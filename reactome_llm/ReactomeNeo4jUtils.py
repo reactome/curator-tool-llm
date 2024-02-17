@@ -1,4 +1,5 @@
 import os
+from tkinter import NO
 import dotenv
 from neo4j import GraphDatabase
 import neo4j
@@ -81,3 +82,63 @@ def _run_event_summary_query(tx, limit: int = None) -> pd.DataFrame:
     result = tx.run(query)
     return result.to_df()
 
+
+def query_reaction_roles_of_pathway(pathway: str,
+                                    genes: list[str]) -> pd.DataFrame:
+    """Get the reactions and roles for a list of genes in a specific pathway.
+
+    Args:
+        pathway (str): _description_
+        genes (list[str]): _description_
+
+    Returns:
+        pd.DataFrame: _description_
+    """
+    query = """
+        MATCH (p:Pathway {displayName: $pathway_name})
+        MATCH (p) - [:hasEvent*] -> (r:ReactionLikeEvent)
+        MATCH (r) - [r_role:input|catalystActivity|regulatedBy|physicalEntity|hasComponent|hasMember|hasCandidate*] -> (ewas:EntityWithAccessionedSequence)
+        MATCH (ewas) - [:referenceEntity] -> (g:ReferenceSequence) WHERE g.geneName[0] in $gene_names
+        RETURN DISTINCT p.displayName AS pathway, r.displayName AS reaction, type(r_role[0]) AS role, g.geneName[0] AS gene
+    """
+    result_df = None
+    with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        result_df = driver.execute_query(query,
+                                         db=DB,
+                                         pathway_name=pathway,
+                                         gene_names=genes,
+                                         result_transformer_=neo4j.Result.to_df)
+    # Somehow "input" is not understood by llm. Change it to reactant as more popular term.
+    def map_fun(role):
+        if role == 'input': 
+            return 'reactant'
+        elif role == 'catalystActivity':
+            return 'catalyst'
+        elif role == 'regulatedBy':
+            return 'regulator'
+        return role
+    result_df['role'] = result_df['role'].map(map_fun)
+    return result_df
+
+
+async def query_pathway_summary(pathway: str) -> str:
+    """Query the pathway summary from the database.
+
+    Args:
+        pathway (_type_, optional): _description_.
+
+    Returns:
+        str: _description_
+    """
+    query = """
+        MATCH (p:Pathway {displayName: $pathway})
+        OPTIONAL MATCH (p)-[:summation]->(summation:Summation)
+        RETURN summation.text AS text
+    """
+    text = None
+    with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        with driver.session(database=DB) as session:
+            result = session.run(query, pathway=pathway).single()
+            if result is not None:
+                text = result['text']
+    return text

@@ -11,22 +11,35 @@ gene: {gene}
 
 context: {text_for_important_reactome_pathways}
 """
-
 summary_prompt = ChatPromptTemplate.from_template(summary_prompt_template)
 
 unannotated_gene_prompt_tempalte = """
 The gene below has not been annotated in Reactome, but predicted to be functionally interacting with the following list of pathways with
-false discovery rate (FDR) provided by interacting with genes listed below (interacting_partners). Write a summary having about {total_words} words 
-about these results for this gene. The summary should focus on interacting_parnters in these pathways with information about their annotation. 
-The information of these interacting_partners should be extracted from the provided context.
+false discovery rate (FDR) provided by interacting with genes listed below (interacting_genes). Write a summary with about {total_words} words 
+about the interacting pathways summarized in the context below. The summary should focus on interacting_genes' roles in reactions as described 
+in the text. Use the context text only for the summary and don't repeat the text. Make sure to mention interacting genes by their names in the 
+summary text to provide more detailed molecular mechanistic description. Also mention that the interactions between the gene and its interacting
+genes are predicted.
 
 gene: {gene}
 
 pathways(name:fdr): {pathways_with_fdr}
 
-interacting_partners(gene_name:score): {interacting_partners}
+interacting_genes: {interacting_partners}
 
 context: {text_for_interacting_pathways}
 """
-
 unannotated_gene_prompt = ChatPromptTemplate.from_template(unannotated_gene_prompt_tempalte)
+
+# Use to summarize the one single interacting pathway 
+interacting_pathway_summary_prompt_template = """
+The query gene below is predicted to be functionally related with the pathway described below via interacting genes listed also below.
+Summarize the following text with about {total_words} words, indicating the most important reactions or interactions having interacting
+genes invovled. Make sure the summary has a sentence at the beging say something like gene (i.e. the query gene) is predicted to interact
+with a gene (e.g. one of the gene listed in interacting genes).
+
+Query gene: {gene}
+
+{interacting_pathway_text}
+"""
+interacting_pathway_summary_prompt = ChatPromptTemplate.from_template(interacting_pathway_summary_prompt_template)

@@ -22,6 +22,7 @@ from paperqa.types import Text
 from paperqa import SentenceTransformerEmbeddingModel
 from paperqa.llms import NumpyVectorStore
 from paperqa.docs import Docs, Doc
+from sympy import summation
 
 import ReactomePrompts as prompts
 import ReactomeNeo4jUtils as neo4jutils
@@ -204,6 +205,7 @@ def query_fis(gene: str,
     fi_df = pd.DataFrame({'gene': json_obj.keys(),
                           'score': json_obj.values()})
     fi_df = fi_df[fi_df['score'] > fi_cutoff]
+    fi_df.sort_values(by=['score'], ascending=False, inplace=True)
     return fi_df
 
 
@@ -284,12 +286,107 @@ def write_summary_of_interacting_pathways_for_annotated_gene(gene: str,
     return result
 
 
-def write_summary_of_interacting_pathways_for_unannotated_gene(gene: str,
-                                                               collected_reactome_summary: list[str],
-                                                               model,
-                                                               fi_cutoff: float = 0.8,
-                                                               fdr_cutoff: float = 1.0E-2,
-                                                               total_words: int = 300) -> any:
+async def write_summary_of_interacting_pathway_for_unannotated_gene(query_gene: str,
+                                                                    interacting_genes: list[str],
+                                                                    pathway: str,
+                                                                    model: any,
+                                                                    total_words: int = 150) -> any:
+    """Write a summary for one single interacting pathway for an unannotated gene.
+
+    Args:
+        gene (str): _description_
+        pathway_text (str): _description_
+        total_words (int, optional): _description_. Defaults to 150.
+
+    Returns:
+        any: _description_
+    """
+    # Fetch the roles of interacting genes in pathways according to reactions
+    reaction_roles_df = neo4jutils.query_reaction_roles_of_pathway(
+        pathway, interacting_genes)
+    # print(reaction_roles_df)
+    reaction_gene_role_text = ''
+    for _, row in reaction_roles_df.iterrows():
+        reaction = row['reaction']
+        gene = row['gene']
+        role = row['role']
+        if len(reaction_gene_role_text) > 0:
+            reaction_gene_role_text = reaction_gene_role_text + "; "
+        reaction_gene_role_text = '{}{} in "{}" as {}'.format(
+            reaction_gene_role_text, gene, reaction, role)
+
+    summation = await neo4jutils.query_pathway_summary(pathway)
+
+    pathway_text_template = """
+    Pathway title: {}\n\n
+    Pathway summary: {}\n\n
+    Genes annotated in the pathway and interacting with the query gene: {}\n\n
+    Roles of interacting genes in reactions annotated in the pathway: {}
+    """
+    pathway_text = pathway_text_template.format(
+        pathway,
+        summation,
+        ', '.join(interacting_genes),
+        reaction_gene_role_text
+    )
+
+    final_input = {
+        'gene': itemgetter('gene'),
+        'total_words': itemgetter('total_words'),
+        'interacting_pathway_text': itemgetter('interacting_pathway_text')
+    }
+    prompt = prompts.interacting_pathway_summary_prompt
+    answer = {
+        'answer': final_input | prompt | model,
+        'docs': itemgetter('docs')
+    }
+
+    # Pass a dummy runnable passthrough to make the chain work.
+    dummy = RunnablePassthrough()
+
+    doc_chain = dummy | answer
+    result = doc_chain.invoke({'gene': query_gene,
+                               'total_words': total_words,
+                               'interacting_pathway_text': pathway_text,
+                               'docs': pathway_text})
+    return result
+
+
+async def write_summary_of_interacting_pathways_for_unannotated_gene(gene: str,
+                                                                     model,
+                                                                     fi_cutoff: float = 0.8,
+                                                                     fdr_cutoff: float = 1.0E-2,
+                                                                     pathway_count: int = 8,
+                                                                     total_words: int = 300) -> any:
+    # TODO: Make sure we don't pick up too many genes and pathways
+    pathways = query_reactome_interacting_pathways(gene, fi_cutoff=fi_cutoff)
+    pathways_with_fdr = ''
+    selected_pathways = []
+    for pathway in pathways:
+        if not pathway.bottomLevel:
+            continue
+        if pathway.fdr < fdr_cutoff:
+            pathways_with_fdr = '{}{}:{}\n'.format(pathways_with_fdr,
+                                                   pathway.name,
+                                                   pathway.fdr)
+            selected_pathways.append(pathway.name)
+        if len(selected_pathways) == pathway_count:
+            break  # Don't collect too many pathways
+    # print(pathways_with_fdr)
+
+    fi_df = query_fis(gene=gene, fi_cutoff=fi_cutoff)
+    interacting_genes = fi_df['gene'].to_list()
+
+    pathway_text_list = []
+    for pathway in selected_pathways:
+        pathway_result = await write_summary_of_interacting_pathway_for_unannotated_gene(query_gene=gene,
+                                                                               interacting_genes=interacting_genes,
+                                                                               pathway=pathway,
+                                                                               model=model)
+        pathway_text = pathway_result['answer'].content
+        pathway_text_list.append('{}: {}'.format(pathway, pathway_text))
+    pathway_text_all = '\n\n'.join(pathway_text_list)
+
     final_input = {
         'gene': itemgetter('gene'),
         'total_words': itemgetter('total_words'),
@@ -303,22 +400,6 @@ def write_summary_of_interacting_pathways_for_unannotated_gene(gene: str,
         'docs': itemgetter('docs')
     }
 
-    pathways = query_reactome_interacting_pathways(gene, fi_cutoff=fi_cutoff)
-    pathways_with_fdr = ''
-    for pathway in pathways:
-        if not pathway.bottomLevel:
-            continue
-        if pathway.fdr < fdr_cutoff:
-            pathways_with_fdr = '{}{}:{}\n'.format(
-                pathways_with_fdr, pathway.name, pathway.fdr)
-    # print(pathways_with_fdr)
-
-    fi_df = query_fis(gene, fi_cutoff=fi_cutoff)
-    interacting_partners = ''
-    for _, fi_row in fi_df.iterrows():
-        interacting_partners = '{}{}:{}\n'.format(
-            interacting_partners, fi_row['gene'], fi_row['score'])
-
     # Pass a dummy runnable passthrough to make the chain work.
     dummy = RunnablePassthrough()
 
@@ -326,9 +407,9 @@ def write_summary_of_interacting_pathways_for_unannotated_gene(gene: str,
     result = doc_chain.invoke({'gene': gene,
                                'total_words': total_words,
                                'pathways_with_fdr': pathways_with_fdr,
-                               'interacting_partners': interacting_partners,
-                               'text_for_interacting_pathways': '\n'.join(collected_reactome_summary),
-                               'docs': collected_reactome_summary})
+                               'interacting_partners': ','.join(interacting_genes),
+                               'text_for_interacting_pathways': pathway_text_all,
+                               'docs': pathway_text_all})
     return result
 
 
@@ -341,7 +422,8 @@ async def write_summary_for_known_gene_via_paperqa(gene: str,
     # Use sentence transformer as we did before
     # The code here is based on test_sentence_transformer_embedding in test_paperqa.py in the paper-qa GitHub repo
     # TODO: See how to use mps under mac
-    embedding_model = SentenceTransformerEmbeddingModel(name=EMBEDDING_MODEL_NAME)
+    embedding_model = SentenceTransformerEmbeddingModel(
+        name=EMBEDDING_MODEL_NAME)
 
     text_splitter = SentenceTransformersTokenTextSplitter(chunk_overlap=10,
                                                           model_name=EMBEDDING_MODEL_NAME,
