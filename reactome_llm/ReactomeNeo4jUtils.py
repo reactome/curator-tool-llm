@@ -121,7 +121,7 @@ def query_reaction_roles_of_pathway(pathway: str,
     return result_df
 
 
-async def query_pathway_summary(pathway: str) -> str:
+def query_pathway_summary(pathway: str) -> str:
     """Query the pathway summary from the database.
 
     Args:

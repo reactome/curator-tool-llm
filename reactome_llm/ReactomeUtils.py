@@ -1,15 +1,14 @@
-import os
-import dotenv
 from operator import itemgetter
-from neo4j import GraphDatabase
-import neo4j
 
 
 from langchain.text_splitter import SentenceTransformersTokenTextSplitter
+from langchain.text_splitter import TextSplitter
 from langchain_community.vectorstores import FAISS
+from langchain_community.vectorstores import VectorStore
 from langchain_core.documents import Document
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.runnables import RunnablePassthrough
+from langchain.retrievers import PubMedRetriever
 
 import pandas as pd
 import scanpy as sc
@@ -22,7 +21,6 @@ from paperqa.types import Text
 from paperqa import SentenceTransformerEmbeddingModel
 from paperqa.llms import NumpyVectorStore
 from paperqa.docs import Docs, Doc
-from sympy import summation
 
 import ReactomePrompts as prompts
 import ReactomeNeo4jUtils as neo4jutils
@@ -62,13 +60,19 @@ def load_event_summary(limit: int = None) -> pd.DataFrame:
     return neo4jutils.load_event_summary(limit=limit)
 
 
+def _get_text_splitter() -> TextSplitter:
+    text_splitter = SentenceTransformersTokenTextSplitter(chunk_overlap=10,
+                                                        model_name=EMBEDDING_MODEL_NAME,
+                                                        add_start_index=True)
+    return text_splitter
+
 def embed_event_summary(pathway_summary_pd: pd.DataFrame,
                         model_name: str = EMBEDDING_MODEL_NAME,
                         db_path: str = '../data/faiss/reactome_pathway_index'):
     # Create a list of Document objects from the pathway dataframe
     # Iterate the pathway dataframe
     documents = []
-    for index, row in pathway_summary_pd.iterrows():
+    for _, row in pathway_summary_pd.iterrows():
         content = row['summary']
         if not content:
             log.info('no summary {}'.format(row['displayName']))
@@ -82,9 +86,7 @@ def embed_event_summary(pathway_summary_pd: pd.DataFrame,
     # This is something we'd like to use for embedding
     # The maximum of the default model we used, S-PubMedBert-MS_MARCH, is 350 tokens.
     # chunk_overlap is calcualted for tokens, not characters
-    text_splitter = SentenceTransformersTokenTextSplitter(chunk_overlap=10,
-                                                          model_name=model_name,
-                                                          add_start_index=True)
+    text_splitter = _get_text_splitter()
     # text_splitter = CharacterTextSplitter(chunk_size=3000, chunk_overlap=100)
     docs = text_splitter.split_documents(documents)
     log.info('After splitting: {}'.format(len(docs)))
@@ -210,7 +212,10 @@ def query_fis(gene: str,
 
 
 def query_reactome_interacting_pathways(gene: str,
-                                        fi_cutoff: float = 0.8) -> list[Pathway]:
+                                        fi_cutoff: float = 0.8,
+                                        fdr_cutoff: float = 0.01,
+                                        bottomLevel_only: bool = True,
+                                        pathway_count: int = 10) -> list[Pathway]:
     """Query the reactome's idg RESTful API to get the list of interacting pathways.
 
     Args:
@@ -227,6 +232,12 @@ def query_reactome_interacting_pathways(gene: str,
     json_objs = result.json()
     pathways = []
     for obj_data in json_objs:
+        if pathway_count and len(pathways) >= pathway_count:
+            continue
+        if (obj_data['fdr'] > fdr_cutoff):
+            continue
+        if (bottomLevel_only and not obj_data['bottomLevel']):
+            continue
         pathway = Pathway(obj_data['stId'],
                           obj_data['name'],
                           obj_data['fdr'],
@@ -240,16 +251,16 @@ def collect_pathway_summary_for_interacting_pathways(gene: str,
                                                      pathway_summary_pd: pd.DataFrame,
                                                      fi_cutoff: float = 0.8,
                                                      fdr_cutoff: float = 0.01,
-                                                     bottomLevel_only: bool = False) -> list[str]:
-    pathways = query_reactome_interacting_pathways(gene, fi_cutoff=fi_cutoff)
+                                                     bottomLevel_only: bool = True) -> list[str]:
+    pathways = query_reactome_interacting_pathways(gene, 
+                                                   fi_cutoff=fi_cutoff,
+                                                   fdr_cutoff=fdr_cutoff,
+                                                   bottomLevel_only=bottomLevel_only,
+                                                   pathway_count=None)
     collected_reactome_summary = []
 
     for pathway in pathways:
         # print('{}: {}'.format(pathway.name, pathway.fdr))
-        if pathway.fdr > fdr_cutoff:
-            continue
-        if bottomLevel_only and not pathway.bottomLevel:
-            continue
         dbId = int(pathway.id.split('-')[2])
         if dbId in pathway_summary_pd.index:
             text = pathway_summary_pd.loc[int(dbId)]['summary']
@@ -301,34 +312,8 @@ async def write_summary_of_interacting_pathway_for_unannotated_gene(query_gene: 
     Returns:
         any: _description_
     """
-    # Fetch the roles of interacting genes in pathways according to reactions
-    reaction_roles_df = neo4jutils.query_reaction_roles_of_pathway(
-        pathway, interacting_genes)
-    # print(reaction_roles_df)
-    reaction_gene_role_text = ''
-    for _, row in reaction_roles_df.iterrows():
-        reaction = row['reaction']
-        gene = row['gene']
-        role = row['role']
-        if len(reaction_gene_role_text) > 0:
-            reaction_gene_role_text = reaction_gene_role_text + "; "
-        reaction_gene_role_text = '{}{} in "{}" as {}'.format(
-            reaction_gene_role_text, gene, reaction, role)
-
-    summation = await neo4jutils.query_pathway_summary(pathway)
-
-    pathway_text_template = """
-    Pathway title: {}\n\n
-    Pathway summary: {}\n\n
-    Genes annotated in the pathway and interacting with the query gene: {}\n\n
-    Roles of interacting genes in reactions annotated in the pathway: {}
-    """
-    pathway_text = pathway_text_template.format(
-        pathway,
-        summation,
-        ', '.join(interacting_genes),
-        reaction_gene_role_text
-    )
+    pathway_text = await create_pathway_text(pathway, 
+                                              interacting_genes)
 
     final_input = {
         'gene': itemgetter('gene'),
@@ -352,6 +337,39 @@ async def write_summary_of_interacting_pathway_for_unannotated_gene(query_gene: 
     return result
 
 
+async def create_pathway_text(pathway: str,
+                             interacting_genes: list[str]):
+    # Fetch the roles of interacting genes in pathways according to reactions
+    reaction_roles_df = neo4jutils.query_reaction_roles_of_pathway(
+        pathway, interacting_genes)
+    # print(reaction_roles_df)
+    reaction_gene_role_text = ''
+    for _, row in reaction_roles_df.iterrows():
+        reaction = row['reaction']
+        gene = row['gene']
+        role = row['role']
+        if len(reaction_gene_role_text) > 0:
+            reaction_gene_role_text = reaction_gene_role_text + "; "
+        reaction_gene_role_text = '{}{} in "{}" as {}'.format(
+            reaction_gene_role_text, gene, reaction, role)
+
+    summation = neo4jutils.query_pathway_summary(pathway)
+
+    pathway_text_template = """
+    Pathway title: {}\n\n
+    Pathway summary: {}\n\n
+    Genes annotated in the pathway and interacting with the query gene: {}\n\n
+    Roles of interacting genes in reactions annotated in the pathway: {}
+    """
+    pathway_text = pathway_text_template.format(
+        pathway,
+        summation,
+        ', '.join(interacting_genes),
+        reaction_gene_role_text
+    )
+    return pathway_text
+
+
 async def write_summary_of_interacting_pathways_for_unannotated_gene(gene: str,
                                                                      model,
                                                                      fi_cutoff: float = 0.8,
@@ -359,19 +377,18 @@ async def write_summary_of_interacting_pathways_for_unannotated_gene(gene: str,
                                                                      pathway_count: int = 8,
                                                                      total_words: int = 300) -> any:
     # TODO: Make sure we don't pick up too many genes and pathways
-    pathways = query_reactome_interacting_pathways(gene, fi_cutoff=fi_cutoff)
+    pathways = query_reactome_interacting_pathways(gene, 
+                                                   fi_cutoff=fi_cutoff,
+                                                   fdr_cutoff=fdr_cutoff,
+                                                   bottomLevel_only=True,
+                                                   pathway_count=pathway_count)
     pathways_with_fdr = ''
     selected_pathways = []
     for pathway in pathways:
-        if not pathway.bottomLevel:
-            continue
-        if pathway.fdr < fdr_cutoff:
-            pathways_with_fdr = '{}{}:{}\n'.format(pathways_with_fdr,
-                                                   pathway.name,
-                                                   pathway.fdr)
-            selected_pathways.append(pathway.name)
-        if len(selected_pathways) == pathway_count:
-            break  # Don't collect too many pathways
+        pathways_with_fdr = '{}{}:{}\n'.format(pathways_with_fdr,
+                                                pathway.name,
+                                                pathway.fdr)
+        selected_pathways.append(pathway.name)
     # print(pathways_with_fdr)
 
     fi_df = query_fis(gene=gene, fi_cutoff=fi_cutoff)
@@ -380,9 +397,9 @@ async def write_summary_of_interacting_pathways_for_unannotated_gene(gene: str,
     pathway_text_list = []
     for pathway in selected_pathways:
         pathway_result = await write_summary_of_interacting_pathway_for_unannotated_gene(query_gene=gene,
-                                                                               interacting_genes=interacting_genes,
-                                                                               pathway=pathway,
-                                                                               model=model)
+                                                                                         interacting_genes=interacting_genes,
+                                                                                         pathway=pathway,
+                                                                                         model=model)
         pathway_text = pathway_result['answer'].content
         pathway_text_list.append('{}: {}'.format(pathway, pathway_text))
     pathway_text_all = '\n\n'.join(pathway_text_list)
@@ -425,9 +442,7 @@ async def write_summary_for_known_gene_via_paperqa(gene: str,
     embedding_model = SentenceTransformerEmbeddingModel(
         name=EMBEDDING_MODEL_NAME)
 
-    text_splitter = SentenceTransformersTokenTextSplitter(chunk_overlap=10,
-                                                          model_name=EMBEDDING_MODEL_NAME,
-                                                          add_start_index=True)
+    text_splitter = _get_text_splitter()
 
     docs = Docs(
         texts_index=NumpyVectorStore(embedding_model=embedding_model),
@@ -462,3 +477,144 @@ async def write_summary_for_known_gene_via_paperqa(gene: str,
                                max_sources=max_sources,
                                length_prompt='about {} words'.format(total_words))
     return result
+
+
+def build_abstract_vector_db_for_gene(query_gene: str,
+                                      top_k_results: int = 8,
+                                      max_query_length: int = 1000) -> any:
+    pubmed_retriever = PubMedRetriever()
+    pubmed_retriever.top_k_results = top_k_results
+    pubmed_retriever.MAX_QUERY_LENGTH = max_query_length
+    pubmed_retriever.doc_content_chars_max = max_query_length * top_k_results
+
+    pubmed_query = '{} interactions or {} reactions or {} pathways'.format(query_gene, query_gene, query_gene)
+    pubmed_result = pubmed_retriever.get_relevant_documents(pubmed_query)
+    
+    text_splitter = _get_text_splitter()
+    docs = text_splitter.split_documents(pubmed_result)
+    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
+    pubmed_db = FAISS.from_documents(docs, embeddings)
+
+    return pubmed_db
+
+
+async def write_summary_of_abstract_pathway_text(query_gene: str,
+                                                 interacting_genes: list[str],
+                                                 pathway: str,
+                                                 pathway_text: str,
+                                                 abstract_text: str,
+                                                 model: any,
+                                                 total_words: int = 150) -> any:
+    final_input = {
+        'query_gene': itemgetter('query_gene'),
+        'interacting_genes': itemgetter('interacting_genes'),
+        'total_words': itemgetter('total_words'),
+        'pathway_text': itemgetter('pathway_text'),
+        'abstract_text': itemgetter('abstract_text'),
+        'pathway': itemgetter('pathway')
+    }
+    prompt = prompts.abstract_summary_prompt
+    answer = {
+        'answer': final_input | prompt | model,
+        'docs': itemgetter('docs')
+    }
+
+    # Pass a dummy runnable passthrough to make the chain work.
+    dummy = RunnablePassthrough()
+
+    doc_chain = dummy | answer
+    result = doc_chain.invoke({'query_gene': query_gene,
+                               'interacting_genes': ','.join(interacting_genes),
+                               'total_words': total_words,
+                               'pathway_text': pathway_text,
+                               'abstract_text': abstract_text,
+                               'pathway': pathway,
+                               'docs': '{}\n\n{}'.format(pathway_text, abstract_text)})
+    return result
+
+
+async def summarize_abstract_results_for_multiple_pathways(query_gene: str,
+                                                           interacting_genes: list[str],
+                                                           pathway_abstract_summary_df: pd.DataFrame,
+                                                           model: any,
+                                                           total_words: int = 300):
+    context = ''
+    for _, row in pathway_abstract_summary_df.iterrows():
+        pathway = row['pathway']
+        pmid = row['pmid']
+        abstract_summary = row['summary']
+        if len(context) > 0:
+            context = '{}\n'.format(context)
+        context = '{}PMID:{};PATHWAY_NAME:"{}": {}'.format(context, pmid, pathway, abstract_summary)
+
+    final_input = {
+        'query_gene': itemgetter('query_gene'),
+        'interacting_genes': itemgetter('interacting_genes'),
+        'total_words': itemgetter('total_words'),
+        'context': itemgetter('context'),
+    }
+    prompt = prompts.multiple_abstracts_summary_prompt
+    answer = {
+        'answer': final_input | prompt | model,
+        'docs': itemgetter('docs')
+    }
+
+    # Pass a dummy runnable passthrough to make the chain work.
+    dummy = RunnablePassthrough()
+
+    doc_chain = dummy | answer
+    result = doc_chain.invoke({'query_gene': query_gene,
+                               'interacting_genes': ','.join(interacting_genes),
+                               'total_words': total_words,
+                               'context': context,
+                               'docs': context})
+    return result
+
+
+async def write_summary_of_abstracts_for_gene(query_gene: str,
+                                              pubmed_db: VectorStore,
+                                              model: any):
+    # Get pathways and genes
+    pathways = query_reactome_interacting_pathways(
+        query_gene, 
+        pathway_count=8)
+    log.debug('Total pathways for {}: {}'.format(query_gene, len(pathways)))
+    fi_df = query_fis(gene=query_gene)
+    interacting_genes = fi_df['gene'].to_list()
+    log.debug('Total interacting genes: {}'.format(len(interacting_genes)))
+
+    pathway_abstract_pd = pd.DataFrame(
+        columns=['pathway', 'pmid', 'title', 'summary'])
+    row = 0
+    text_splitter = _get_text_splitter()
+    for pathway in pathways:
+        pathway_text = await create_pathway_text(pathway.name, interacting_genes)
+        splitted_texts = text_splitter.split_text(pathway_text)
+        best_matched_abstract = None
+        for splitted_text in splitted_texts:
+            # Just need the top scored text
+            matched_abstract_score = pubmed_db.similarity_search_with_score(splitted_text)[0]
+            # print('{}:\n{}'.format(splitted_text, matched_abstract_score))
+            if not best_matched_abstract:
+                best_matched_abstract = matched_abstract_score
+            else:
+                if matched_abstract_score[1] < best_matched_abstract[1]:
+                    best_matched_abstract = matched_abstract_score
+        log.debug('\n\nBest matched abstract: {}'.format(best_matched_abstract))
+        abstract_result = await write_summary_of_abstract_pathway_text(query_gene,
+                                                                    interacting_genes,
+                                                                    pathway.name,
+                                                                    splitted_text,
+                                                                    best_matched_abstract[0].page_content,
+                                                                    model)
+        pathway_abstract_pd.loc[row] = [pathway.name,
+                                        best_matched_abstract[0].metadata['uid'],
+                                        best_matched_abstract[0].metadata['Title'],
+                                        abstract_result['answer'].content]
+        row += 1
+    log.debug('pathway_abstract_pd:\n{}'.format(pathway_abstract_pd.head()))
+    abstract_result_for_multiple_pathways = await summarize_abstract_results_for_multiple_pathways(query_gene,
+                                                                                               interacting_genes,
+                                                                                               pathway_abstract_pd,
+                                                                                               model)
+    return abstract_result_for_multiple_pathways, interacting_genes, pathway_abstract_pd
