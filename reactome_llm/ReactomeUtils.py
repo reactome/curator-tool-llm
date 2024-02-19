@@ -1,6 +1,5 @@
 from operator import itemgetter
 
-
 from langchain.text_splitter import SentenceTransformersTokenTextSplitter
 from langchain.text_splitter import TextSplitter
 from langchain_community.vectorstores import FAISS
@@ -9,6 +8,8 @@ from langchain_core.documents import Document
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.runnables import RunnablePassthrough
 from langchain.retrievers import PubMedRetriever
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.language_models import BaseChatModel
 
 import pandas as pd
 import scanpy as sc
@@ -18,7 +19,7 @@ import plotly.express as px
 import requests
 
 from paperqa.types import Text
-from paperqa import SentenceTransformerEmbeddingModel
+from paperqa import EmbeddingModel, LLMModel, SentenceTransformerEmbeddingModel
 from paperqa.llms import NumpyVectorStore
 from paperqa.docs import Docs, Doc
 
@@ -27,7 +28,7 @@ import ReactomeNeo4jUtils as neo4jutils
 
 import logging as log
 logger = log.getLogger()
-logger.setLevel(log.INFO)
+logger.setLevel(log.DEBUG)
 log.basicConfig(
     format='%(asctime)s -  %(name)s - %(levelname)s - %(message)s', filename=None)
 
@@ -48,23 +49,17 @@ class Pathway:
         self.bottomLevel = bottomLevel
 
 
-def load_event_to_topic_map() -> pd.DataFrame:
-    return neo4jutils.load_event_to_topic_map()
-
-
-def load_pathway_dbIds() -> list:
-    return neo4jutils.load_pathway_dbIds()
-
-
-def load_event_summary(limit: int = None) -> pd.DataFrame:
-    return neo4jutils.load_event_summary(limit=limit)
-
-
 def _get_text_splitter() -> TextSplitter:
     text_splitter = SentenceTransformersTokenTextSplitter(chunk_overlap=10,
-                                                        model_name=EMBEDDING_MODEL_NAME,
-                                                        add_start_index=True)
+                                                          model_name=EMBEDDING_MODEL_NAME,
+                                                          add_start_index=True)
     return text_splitter
+
+
+def _get_embedding(model_name: str = EMBEDDING_MODEL_NAME) -> EmbeddingModel:
+    embeddings = HuggingFaceEmbeddings(model_name=model_name)
+    return embeddings
+
 
 def embed_event_summary(pathway_summary_pd: pd.DataFrame,
                         model_name: str = EMBEDDING_MODEL_NAME,
@@ -95,7 +90,7 @@ def embed_event_summary(pathway_summary_pd: pd.DataFrame,
     # Use the sentence transformers embedding, which was used in the IDG project
     # The embedding model is: https://huggingface.co/pritamdeka/S-PubMedBert-MS-MARCO
     # Which is used for performance analysis in the Biomedical Knoweldge graph RAG paper (https://arxiv.org/abs/2311.17330)
-    embeddings = HuggingFaceEmbeddings(model_name=model_name)
+    embeddings = _get_embedding()
     # The whole embedding took about 15 minutes at the 14'' MacBook Pro (no gpu was used)
     db = FAISS.from_documents(docs, embeddings)
     log.info('Done embedding and saving into {}...'.format(db_path))
@@ -105,7 +100,7 @@ def embed_event_summary(pathway_summary_pd: pd.DataFrame,
 
 def load_event_summary_embed_db(db_path: str = '../data/faiss/reactome_pathway_index',
                                 model_name: str = 'pritamdeka/S-PubMedBert-MS-MARCO') -> FAISS:
-    embeddings = HuggingFaceEmbeddings(model_name=model_name)
+    embeddings = _get_embedding()
     db: FAISS = FAISS.load_local(db_path, embeddings=embeddings)
     return db
 
@@ -173,7 +168,7 @@ def plotly_umap(adata: sc.AnnData):
 
 
 def add_topic_event(adata: sc.AnnData):
-    event_topic_df = load_event_to_topic_map()
+    event_topic_df = neo4jutils.load_event_to_topic_map()
     removed_topics = ['GOCAM test events', 'Cancer Hallmarks']
 
     def map_event_topic(dbId):
@@ -247,12 +242,12 @@ def query_reactome_interacting_pathways(gene: str,
     return pathways
 
 
-def collect_pathway_summary_for_interacting_pathways(gene: str,
-                                                     pathway_summary_pd: pd.DataFrame,
-                                                     fi_cutoff: float = 0.8,
-                                                     fdr_cutoff: float = 0.01,
-                                                     bottomLevel_only: bool = True) -> list[str]:
-    pathways = query_reactome_interacting_pathways(gene, 
+def collect_summaries_for_interacting_pathways(gene: str,
+                                               pathway_summary_pd: pd.DataFrame,
+                                               fi_cutoff: float = 0.8,
+                                               fdr_cutoff: float = 0.01,
+                                               bottomLevel_only: bool = True) -> list[str]:
+    pathways = query_reactome_interacting_pathways(gene,
                                                    fi_cutoff=fi_cutoff,
                                                    fdr_cutoff=fdr_cutoff,
                                                    bottomLevel_only=bottomLevel_only,
@@ -275,26 +270,12 @@ def write_summary_of_interacting_pathways_for_annotated_gene(gene: str,
                                                              collected_reactome_summary: list[str],
                                                              model,
                                                              total_words: int = 300) -> any:
-    final_input = {
-        'gene': itemgetter('gene'),
-        'total_words': itemgetter('total_words'),
-        'text_for_important_reactome_pathways': itemgetter('text_for_important_reactome_pathways')
-    }
     prompt = prompts.summary_prompt
-    answer = {
-        'answer': final_input | prompt | model,
-        'docs': itemgetter('docs')
-    }
-
-    # Pass a dummy runnable passthrough to make the chain work.
-    dummy = RunnablePassthrough()
-
-    doc_chain = dummy | answer
-    result = doc_chain.invoke({'gene': gene,
-                               'total_words': total_words,
-                               'text_for_important_reactome_pathways': '\n\n'.join(collected_reactome_summary),
-                               'docs': collected_reactome_summary})
-    return result
+    parameters = {'gene': gene,
+                  'total_words': total_words,
+                  'text_for_important_reactome_pathways': '\n\n'.join(collected_reactome_summary),
+                  'docs': collected_reactome_summary}
+    return invoke_llm(parameters, prompt, model)
 
 
 async def write_summary_of_interacting_pathway_for_unannotated_gene(query_gene: str,
@@ -312,33 +293,19 @@ async def write_summary_of_interacting_pathway_for_unannotated_gene(query_gene: 
     Returns:
         any: _description_
     """
-    pathway_text = await create_pathway_text(pathway, 
-                                              interacting_genes)
+    pathway_text = await create_pathway_text(pathway,
+                                             interacting_genes)
 
-    final_input = {
-        'gene': itemgetter('gene'),
-        'total_words': itemgetter('total_words'),
-        'interacting_pathway_text': itemgetter('interacting_pathway_text')
-    }
     prompt = prompts.interacting_pathway_summary_prompt
-    answer = {
-        'answer': final_input | prompt | model,
-        'docs': itemgetter('docs')
-    }
-
-    # Pass a dummy runnable passthrough to make the chain work.
-    dummy = RunnablePassthrough()
-
-    doc_chain = dummy | answer
-    result = doc_chain.invoke({'gene': query_gene,
-                               'total_words': total_words,
-                               'interacting_pathway_text': pathway_text,
-                               'docs': pathway_text})
-    return result
+    parameters = {'gene': query_gene,
+                  'total_words': total_words,
+                  'interacting_pathway_text': pathway_text,
+                  'docs': pathway_text}
+    return invoke_llm(parameters, prompt, model)
 
 
 async def create_pathway_text(pathway: str,
-                             interacting_genes: list[str]):
+                              interacting_genes: list[str]):
     # Fetch the roles of interacting genes in pathways according to reactions
     reaction_roles_df = neo4jutils.query_reaction_roles_of_pathway(
         pathway, interacting_genes)
@@ -356,10 +323,10 @@ async def create_pathway_text(pathway: str,
     summation = neo4jutils.query_pathway_summary(pathway)
 
     pathway_text_template = """
-    Pathway title: {}\n\n
-    Pathway summary: {}\n\n
-    Genes annotated in the pathway and interacting with the query gene: {}\n\n
-    Roles of interacting genes in reactions annotated in the pathway: {}
+Pathway title: {}\n\n
+Pathway summary: {}\n\n
+Genes annotated in the pathway and interacting with the query gene: {}\n\n
+Roles of interacting genes in reactions annotated in the pathway: {}
     """
     pathway_text = pathway_text_template.format(
         pathway,
@@ -376,8 +343,21 @@ async def write_summary_of_interacting_pathways_for_unannotated_gene(gene: str,
                                                                      fdr_cutoff: float = 1.0E-2,
                                                                      pathway_count: int = 8,
                                                                      total_words: int = 300) -> any:
+    """Write a summary for a set of interacting pathways for a gene that has not been annotated in Reactome.
+
+    Args:
+        gene (str): _description_
+        model (_type_): _description_
+        fi_cutoff (float, optional): _description_. Defaults to 0.8.
+        fdr_cutoff (float, optional): _description_. Defaults to 1.0E-2.
+        pathway_count (int, optional): _description_. Defaults to 8.
+        total_words (int, optional): _description_. Defaults to 300.
+
+    Returns:
+        any: _description_
+    """
     # TODO: Make sure we don't pick up too many genes and pathways
-    pathways = query_reactome_interacting_pathways(gene, 
+    pathways = query_reactome_interacting_pathways(gene,
                                                    fi_cutoff=fi_cutoff,
                                                    fdr_cutoff=fdr_cutoff,
                                                    bottomLevel_only=True,
@@ -386,8 +366,8 @@ async def write_summary_of_interacting_pathways_for_unannotated_gene(gene: str,
     selected_pathways = []
     for pathway in pathways:
         pathways_with_fdr = '{}{}:{}\n'.format(pathways_with_fdr,
-                                                pathway.name,
-                                                pathway.fdr)
+                                               pathway.name,
+                                               pathway.fdr)
         selected_pathways.append(pathway.name)
     # print(pathways_with_fdr)
 
@@ -404,29 +384,15 @@ async def write_summary_of_interacting_pathways_for_unannotated_gene(gene: str,
         pathway_text_list.append('{}: {}'.format(pathway, pathway_text))
     pathway_text_all = '\n\n'.join(pathway_text_list)
 
-    final_input = {
-        'gene': itemgetter('gene'),
-        'total_words': itemgetter('total_words'),
-        'pathways_with_fdr': itemgetter('pathways_with_fdr'),
-        'interacting_partners': itemgetter('interacting_partners'),
-        'text_for_interacting_pathways': itemgetter('text_for_interacting_pathways')
-    }
     prompt = prompts.unannotated_gene_prompt
-    answer = {
-        'answer': final_input | prompt | model,
-        'docs': itemgetter('docs')
-    }
+    parameters = {'gene': gene,
+                  'total_words': total_words,
+                  'pathways_with_fdr': pathways_with_fdr,
+                  'interacting_partners': ','.join(interacting_genes),
+                  'text_for_interacting_pathways': pathway_text_all,
+                  'docs': pathway_text_all}
+    result = invoke_llm(parameters, prompt, model)
 
-    # Pass a dummy runnable passthrough to make the chain work.
-    dummy = RunnablePassthrough()
-
-    doc_chain = dummy | answer
-    result = doc_chain.invoke({'gene': gene,
-                               'total_words': total_words,
-                               'pathways_with_fdr': pathways_with_fdr,
-                               'interacting_partners': ','.join(interacting_genes),
-                               'text_for_interacting_pathways': pathway_text_all,
-                               'docs': pathway_text_all})
     return result
 
 
@@ -439,8 +405,8 @@ async def write_summary_for_known_gene_via_paperqa(gene: str,
     # Use sentence transformer as we did before
     # The code here is based on test_sentence_transformer_embedding in test_paperqa.py in the paper-qa GitHub repo
     # TODO: See how to use mps under mac
-    embedding_model = SentenceTransformerEmbeddingModel(
-        name=EMBEDDING_MODEL_NAME)
+    # embedding_model = SentenceTransformerEmbeddingModel(name=EMBEDDING_MODEL_NAME)
+    embedding_model = _get_embedding()
 
     text_splitter = _get_text_splitter()
 
@@ -453,10 +419,10 @@ async def write_summary_for_known_gene_via_paperqa(gene: str,
         index_path='../data/paperqa'
     )
 
-    interacting_pathway_summary = collect_pathway_summary_for_interacting_pathways(gene,
-                                                                                   pathway_summary_df,
-                                                                                   fi_cutoff=fi_cutoff,
-                                                                                   fdr_cutoff=fdr_cutoff)
+    interacting_pathway_summary = collect_summaries_for_interacting_pathways(gene,
+                                                                             pathway_summary_df,
+                                                                             fi_cutoff=fi_cutoff,
+                                                                             fdr_cutoff=fdr_cutoff)
     for pathway_summary in interacting_pathway_summary:
         tokens = pathway_summary.split(':')
         pathway_name = tokens[0].strip()
@@ -481,18 +447,30 @@ async def write_summary_for_known_gene_via_paperqa(gene: str,
 
 def build_abstract_vector_db_for_gene(query_gene: str,
                                       top_k_results: int = 8,
-                                      max_query_length: int = 1000) -> any:
+                                      max_query_length: int = 1000) -> VectorStore:
+    """Query pubmed about interactions, reactions, and pathways for a gene and return
+    a vector store for collected abstracts from PubMed.
+
+    Args:
+        query_gene (str): _description_
+        top_k_results (int, optional): _description_. Defaults to 8.
+        max_query_length (int, optional): _description_. Defaults to 1000.
+
+    Returns:
+        any: _description_
+    """
     pubmed_retriever = PubMedRetriever()
     pubmed_retriever.top_k_results = top_k_results
     pubmed_retriever.MAX_QUERY_LENGTH = max_query_length
     pubmed_retriever.doc_content_chars_max = max_query_length * top_k_results
 
-    pubmed_query = '{} interactions or {} reactions or {} pathways'.format(query_gene, query_gene, query_gene)
+    pubmed_query = '{} interactions or {} reactions or {} pathways'.format(
+        query_gene, query_gene, query_gene)
     pubmed_result = pubmed_retriever.get_relevant_documents(pubmed_query)
-    
+
     text_splitter = _get_text_splitter()
     docs = text_splitter.split_documents(pubmed_result)
-    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL_NAME)
+    embeddings = _get_embedding()
     pubmed_db = FAISS.from_documents(docs, embeddings)
 
     return pubmed_db
@@ -505,31 +483,48 @@ async def write_summary_of_abstract_pathway_text(query_gene: str,
                                                  abstract_text: str,
                                                  model: any,
                                                  total_words: int = 150) -> any:
-    final_input = {
-        'query_gene': itemgetter('query_gene'),
-        'interacting_genes': itemgetter('interacting_genes'),
-        'total_words': itemgetter('total_words'),
-        'pathway_text': itemgetter('pathway_text'),
-        'abstract_text': itemgetter('abstract_text'),
-        'pathway': itemgetter('pathway')
-    }
+    """Create a summary for collected abstracts that are related to pathways.
+
+    Args:
+        query_gene (str): _description_
+        interacting_genes (list[str]): _description_
+        pathway (str): _description_
+        pathway_text (str): _description_
+        abstract_text (str): _description_
+        model (any): _description_
+        total_words (int, optional): _description_. Defaults to 150.
+
+    Returns:
+        any: _description_
+    """
     prompt = prompts.abstract_summary_prompt
+    parameters = {'query_gene': query_gene,
+                  'interacting_genes': ','.join(interacting_genes),
+                  'total_words': total_words,
+                  'pathway_text': pathway_text,
+                  'abstract_text': abstract_text,
+                  'pathway': pathway,
+                  'docs': '{}\n\n{}'.format(pathway_text, abstract_text)}
+    result = invoke_llm(parameters, prompt, model)
+    return result
+
+
+def invoke_llm(parameters: dict,
+               prompt: ChatPromptTemplate,
+               model: any) -> any:
+    # Don't include docs
+    final_input = {key: itemgetter(key)
+                   for key in parameters.keys() if key is not 'docs'}
     answer = {
         'answer': final_input | prompt | model,
-        'docs': itemgetter('docs')
     }
+    if 'docs' in parameters.keys():
+        answer['docs'] = itemgetter('docs')
 
     # Pass a dummy runnable passthrough to make the chain work.
     dummy = RunnablePassthrough()
-
-    doc_chain = dummy | answer
-    result = doc_chain.invoke({'query_gene': query_gene,
-                               'interacting_genes': ','.join(interacting_genes),
-                               'total_words': total_words,
-                               'pathway_text': pathway_text,
-                               'abstract_text': abstract_text,
-                               'pathway': pathway,
-                               'docs': '{}\n\n{}'.format(pathway_text, abstract_text)})
+    llm_chain = dummy | answer
+    result = llm_chain.invoke(parameters)
     return result
 
 
@@ -538,53 +533,83 @@ async def summarize_abstract_results_for_multiple_pathways(query_gene: str,
                                                            pathway_abstract_summary_df: pd.DataFrame,
                                                            model: any,
                                                            total_words: int = 300):
+    """Summarize multiple abstracts for multiple pathways for a gene.
+
+    Args:
+        query_gene (str): _description_
+        interacting_genes (list[str]): _description_
+        pathway_abstract_summary_df (pd.DataFrame): _description_
+        model (any): _description_
+        total_words (int, optional): _description_. Defaults to 300.
+
+    Returns:
+        _type_: _description_
+    """
     context = ''
     for _, row in pathway_abstract_summary_df.iterrows():
         pathway = row['pathway']
         pmid = row['pmid']
         abstract_summary = row['summary']
         if len(context) > 0:
-            context = '{}\n'.format(context)
-        context = '{}PMID:{};PATHWAY_NAME:"{}": {}'.format(context, pmid, pathway, abstract_summary)
+            context = '{}\n\n'.format(context)
+        context = '{}PMID:{};PATHWAY_NAME:"{}": {}'.format(
+            context, pmid, pathway, abstract_summary)
 
-    final_input = {
-        'query_gene': itemgetter('query_gene'),
-        'interacting_genes': itemgetter('interacting_genes'),
-        'total_words': itemgetter('total_words'),
-        'context': itemgetter('context'),
-    }
-    prompt = prompts.multiple_abstracts_summary_prompt
-    answer = {
-        'answer': final_input | prompt | model,
-        'docs': itemgetter('docs')
-    }
+    parameters = {'query_gene': query_gene,
+                  'interacting_genes': ','.join(interacting_genes),
+                  'total_words': total_words,
+                  'context': context,
+                  'docs': context}
+    result = invoke_llm(parameters,
+                        prompts.multiple_abstracts_summary_prompt,
+                        model)
 
-    # Pass a dummy runnable passthrough to make the chain work.
-    dummy = RunnablePassthrough()
-
-    doc_chain = dummy | answer
-    result = doc_chain.invoke({'query_gene': query_gene,
-                               'interacting_genes': ','.join(interacting_genes),
-                               'total_words': total_words,
-                               'context': context,
-                               'docs': context})
     return result
 
 
 async def write_summary_of_abstracts_for_gene(query_gene: str,
                                               pubmed_db: VectorStore,
                                               model: any):
+    """Write a summary for a query gene by collecting Reactome pathway related abstracts from PubMed.
+    This function basically is a wrap of multiple calls of LLMs, as well as PubMed retrieval.
+
+    Args:
+        query_gene (str): _description_
+        pubmed_db (VectorStore): _description_
+        model (any): _description_
+
+    Returns:
+        _type_: _description_
+    """
     # Get pathways and genes
     pathways = query_reactome_interacting_pathways(
-        query_gene, 
+        query_gene,
         pathway_count=8)
     log.debug('Total pathways for {}: {}'.format(query_gene, len(pathways)))
     fi_df = query_fis(gene=query_gene)
     interacting_genes = fi_df['gene'].to_list()
     log.debug('Total interacting genes: {}'.format(len(interacting_genes)))
 
+    pathway_abstract_pd = await build_pathway_abstract_df(query_gene, 
+                                                          interacting_genes,
+                                                          pathways,
+                                                          pubmed_db, 
+                                                          model)
+
+    abstract_result_for_multiple_pathways = await summarize_abstract_results_for_multiple_pathways(query_gene,
+                                                                                                   interacting_genes,
+                                                                                                   pathway_abstract_pd,
+                                                                                                   model)
+    return abstract_result_for_multiple_pathways
+
+
+async def build_pathway_abstract_df(query_gene: str,
+                                    interacting_genes: list[str],
+                                    pathways: list[Pathway],
+                                    pubmed_db: VectorStore,
+                                    model: BaseChatModel) -> pd.DataFrame:
     pathway_abstract_pd = pd.DataFrame(
-        columns=['pathway', 'pmid', 'title', 'summary'])
+        columns=['pathway', 'pmid', 'title', 'abstract', 'score', 'summary'])
     row = 0
     text_splitter = _get_text_splitter()
     for pathway in pathways:
@@ -593,28 +618,29 @@ async def write_summary_of_abstracts_for_gene(query_gene: str,
         best_matched_abstract = None
         for splitted_text in splitted_texts:
             # Just need the top scored text
-            matched_abstract_score = pubmed_db.similarity_search_with_score(splitted_text)[0]
+            # This is a two element tuple: document and score
+            matched_abstract_score = pubmed_db.similarity_search_with_score(splitted_text)[
+                0]
             # print('{}:\n{}'.format(splitted_text, matched_abstract_score))
             if not best_matched_abstract:
                 best_matched_abstract = matched_abstract_score
             else:
                 if matched_abstract_score[1] < best_matched_abstract[1]:
                     best_matched_abstract = matched_abstract_score
-        log.debug('\n\nBest matched abstract: {}'.format(best_matched_abstract))
+        log.debug('\n\nBest matched abstract: {}'.format(
+            best_matched_abstract))
         abstract_result = await write_summary_of_abstract_pathway_text(query_gene,
-                                                                    interacting_genes,
-                                                                    pathway.name,
-                                                                    splitted_text,
-                                                                    best_matched_abstract[0].page_content,
-                                                                    model)
+                                                                       interacting_genes,
+                                                                       pathway.name,
+                                                                       splitted_text,
+                                                                       best_matched_abstract[0].page_content,
+                                                                       model)
         pathway_abstract_pd.loc[row] = [pathway.name,
                                         best_matched_abstract[0].metadata['uid'],
                                         best_matched_abstract[0].metadata['Title'],
+                                        best_matched_abstract[0].page_content,
+                                        best_matched_abstract[1],
                                         abstract_result['answer'].content]
         row += 1
     log.debug('pathway_abstract_pd:\n{}'.format(pathway_abstract_pd.head()))
-    abstract_result_for_multiple_pathways = await summarize_abstract_results_for_multiple_pathways(query_gene,
-                                                                                               interacting_genes,
-                                                                                               pathway_abstract_pd,
-                                                                                               model)
-    return abstract_result_for_multiple_pathways, interacting_genes, pathway_abstract_pd
+    return pathway_abstract_pd
