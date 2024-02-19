@@ -48,9 +48,9 @@ interacting_pathway_summary_prompt = ChatPromptTemplate.from_template(interactin
 abstract_summary_prompt_template = """
 The text in the abstract section is excerpts of scientific papers' abstracts collected from PubMed and best matched with pathway text below. 
 Write a summary of the abstract text with about {total_words} words to highlight the query_gene and its interaction with interacting_genes, so that 
-Reactome curators can create reactions based on the original papers. The generated text should provide evidence showing the possible functions 
-of the query gene in the pathway, {pathway}. If you cannot see any genes listed in the interacting genes in the abstract, it is fine not mentioning
-them. Don't speculate! Don't just list interacting genes if there is no information.
+Reactome curators can create reactions based on the original papers. The generated text should be based on the abstract text below only, providing 
+evidence showing the possible functions of the query gene in the pathway, {pathway}. If you cannot see any genes listed in the interacting genes in 
+the abstract, it is fine not mentioning them. Don't speculate anything! Don't just list interacting genes if there is no information.
 
 query_gene: {query_gene}
 
