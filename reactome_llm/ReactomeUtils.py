@@ -28,7 +28,7 @@ import ReactomeNeo4jUtils as neo4jutils
 
 import logging as log
 logger = log.getLogger()
-logger.setLevel(log.DEBUG)
+logger.setLevel(log.INFO)
 log.basicConfig(
     format='%(asctime)s -  %(name)s - %(levelname)s - %(message)s', filename=None)
 
@@ -293,8 +293,10 @@ async def write_summary_of_interacting_pathway_for_unannotated_gene(query_gene: 
     Returns:
         any: _description_
     """
-    pathway_text = await create_pathway_text(pathway,
-                                             interacting_genes)
+    pathway_text = create_pathway_text(pathway,
+                                       interacting_genes)
+    if pathway_text is None:
+        return None
 
     prompt = prompts.interacting_pathway_summary_prompt
     parameters = {'gene': query_gene,
@@ -304,21 +306,27 @@ async def write_summary_of_interacting_pathway_for_unannotated_gene(query_gene: 
     return invoke_llm(parameters, prompt, model)
 
 
-async def create_pathway_text(pathway: str,
-                              interacting_genes: list[str]):
+def create_pathway_text(pathway: str,
+                        interacting_genes: list[str]):
     # Fetch the roles of interacting genes in pathways according to reactions
     reaction_roles_df = neo4jutils.query_reaction_roles_of_pathway(
         pathway, interacting_genes)
     # print(reaction_roles_df)
     reaction_gene_role_text = ''
+    genes_in_pathway = []
     for _, row in reaction_roles_df.iterrows():
         reaction = row['reaction']
         gene = row['gene']
+        genes_in_pathway.append(gene)
         role = row['role']
         if len(reaction_gene_role_text) > 0:
             reaction_gene_role_text = reaction_gene_role_text + "; "
         reaction_gene_role_text = '{}{} in "{}" as {}'.format(
             reaction_gene_role_text, gene, reaction, role)
+        
+    # Because of the version issue, some pathways may not have genes. Escape them
+    if len(genes_in_pathway) == 0:
+        return None
 
     summation = neo4jutils.query_pathway_summary(pathway)
 
@@ -331,9 +339,10 @@ Roles of interacting genes in reactions annotated in the pathway: {}
     pathway_text = pathway_text_template.format(
         pathway,
         summation,
-        ', '.join(interacting_genes),
+        ', '.join(genes_in_pathway),
         reaction_gene_role_text
     )
+    log.debug('text for {}\n'.format(pathway, pathway_text))
     return pathway_text
 
 
@@ -380,6 +389,8 @@ async def write_summary_of_interacting_pathways_for_unannotated_gene(gene: str,
                                                                                          interacting_genes=interacting_genes,
                                                                                          pathway=pathway,
                                                                                          model=model)
+        if pathway_result is None:
+            continue
         pathway_text = pathway_result['answer'].content
         pathway_text_list.append('{}: {}'.format(pathway, pathway_text))
     pathway_text_all = '\n\n'.join(pathway_text_list)
@@ -613,7 +624,9 @@ async def build_pathway_abstract_df(query_gene: str,
     row = 0
     text_splitter = _get_text_splitter()
     for pathway in pathways:
-        pathway_text = await create_pathway_text(pathway.name, interacting_genes)
+        pathway_text = create_pathway_text(pathway.name, interacting_genes)
+        if pathway_text is None:
+            continue
         splitted_texts = text_splitter.split_text(pathway_text)
         best_matched_abstract = None
         for splitted_text in splitted_texts:
