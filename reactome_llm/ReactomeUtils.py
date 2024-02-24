@@ -1,4 +1,6 @@
+import asyncio
 from operator import itemgetter
+from unittest import TestCase
 
 from langchain.text_splitter import SentenceTransformersTokenTextSplitter
 from langchain.text_splitter import TextSplitter
@@ -10,6 +12,7 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_community.retrievers import PubMedRetriever
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.language_models import BaseChatModel
+from langchain_openai import ChatOpenAI
 
 import pandas as pd
 import scanpy as sc
@@ -22,6 +25,7 @@ from paperqa.types import Text
 from paperqa import EmbeddingModel
 from paperqa.llms import NumpyVectorStore
 from paperqa.docs import Docs, Doc
+from ReactomeLLMErrors import NoAbstractFoundError, NoInteractingPathwayFoundError
 
 import ReactomePrompts as prompts
 import ReactomeNeo4jUtils as neo4jutils
@@ -480,6 +484,9 @@ async def build_abstract_vector_db_for_gene(query_gene: str,
     log.debug('pubmed_query: {}'.format(pubmed_query))
     pubmed_result = pubmed_retriever.get_relevant_documents(pubmed_query)
     log.debug('pubmed_result: {}'.format(pubmed_result))
+    # In case nothing is returned
+    if len(pubmed_result) == 0:
+        raise NoAbstractFoundError(query_gene)
 
     text_splitter = _get_text_splitter()
     docs = text_splitter.split_documents(pubmed_result)
@@ -527,7 +534,7 @@ def invoke_llm(parameters: dict,
                model: any) -> any:
     # Don't include docs
     final_input = {key: itemgetter(key)
-                   for key in parameters.keys() if key is not 'docs'}
+                   for key in parameters.keys() if key != 'docs'}
     answer = {
         'answer': final_input | prompt | model,
     }
@@ -599,6 +606,8 @@ async def write_summary_of_abstracts_for_gene(query_gene: str,
         query_gene,
         pathway_count=8)
     log.debug('Total pathways for {}: {}'.format(query_gene, len(pathways)))
+    if len(pathways) == 0:
+        raise NoInteractingPathwayFoundError(query_gene)
     fi_df = query_fis(gene=query_gene)
     interacting_genes = fi_df['gene'].to_list()
     log.debug('Total interacting genes: {}'.format(len(interacting_genes)))
@@ -659,3 +668,19 @@ async def build_pathway_abstract_df(query_gene: str,
         row += 1
     log.debug('pathway_abstract_pd:\n{}'.format(pathway_abstract_pd.head()))
     return pathway_abstract_pd
+
+
+# Simple text in script for fast performance at VSCode
+async def test_api():
+    gene = 'DUX4L2'
+    pubmed_db = await build_abstract_vector_db_for_gene(gene, top_k_results=10)
+    model = ChatOpenAI(temperature=0, model='gpt-3.5-turbo')
+    query_result = await write_summary_of_abstracts_for_gene(gene,
+                                                             pubmed_db,
+                                                             model)
+    print(query_result)
+
+
+if __name__ == '__main__':
+    print('Running test_api...')
+    asyncio.run(test_api())

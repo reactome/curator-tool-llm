@@ -1,0 +1,11 @@
+class NoAbstractFoundError(Exception):
+    def __init__(self, gene):
+        self.message = 'Nothing is found in PubMed for {} about interactions, reactions and pathways'.format(gene)
+        super().__init__(self.message)
+
+
+class NoInteractingPathwayFoundError(Exception):
+    def __init__(self, gene):
+        self.message = 'No interacting pathway is found for {}. Try to reduce the cutoff value for functional interactions.'.format(gene)
+        super().__init__(self.message)
+
