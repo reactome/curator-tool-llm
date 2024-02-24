@@ -7,7 +7,7 @@ from langchain_community.vectorstores import VectorStore
 from langchain_core.documents import Document
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.runnables import RunnablePassthrough
-from langchain.retrievers import PubMedRetriever
+from langchain_community.retrievers import PubMedRetriever
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.language_models import BaseChatModel
 
@@ -19,7 +19,7 @@ import plotly.express as px
 import requests
 
 from paperqa.types import Text
-from paperqa import EmbeddingModel, LLMModel, SentenceTransformerEmbeddingModel
+from paperqa import EmbeddingModel
 from paperqa.llms import NumpyVectorStore
 from paperqa.docs import Docs, Doc
 
@@ -456,7 +456,7 @@ async def write_summary_for_known_gene_via_paperqa(gene: str,
     return result
 
 
-def build_abstract_vector_db_for_gene(query_gene: str,
+async def build_abstract_vector_db_for_gene(query_gene: str,
                                       top_k_results: int = 8,
                                       max_query_length: int = 1000) -> VectorStore:
     """Query pubmed about interactions, reactions, and pathways for a gene and return
@@ -477,7 +477,9 @@ def build_abstract_vector_db_for_gene(query_gene: str,
 
     pubmed_query = '{} interactions or {} reactions or {} pathways'.format(
         query_gene, query_gene, query_gene)
+    log.debug('pubmed_query: {}'.format(pubmed_query))
     pubmed_result = pubmed_retriever.get_relevant_documents(pubmed_query)
+    log.debug('pubmed_result: {}'.format(pubmed_result))
 
     text_splitter = _get_text_splitter()
     docs = text_splitter.split_documents(pubmed_result)

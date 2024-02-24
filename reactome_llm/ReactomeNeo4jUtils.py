@@ -142,3 +142,30 @@ def query_pathway_summary(pathway: str) -> str:
             if result is not None:
                 text = result['text']
     return text
+
+
+def map_pathway_name_to_dbId(pathway_names: list[str]) -> dict[int, str]:
+    """Map display names to dbIds into a dict.
+
+    Args:
+        pathway_names (list[str]): _description_
+
+    Returns:
+        dict[int, str]: _description_
+    """
+    query = """
+        MATCH (m:Pathway) WHERE m.displayName IN $pathway_names
+        RETURN m.displayName as displayName, m.dbId as dbId
+    """
+    result_df = None
+    with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        result_df = driver.execute_query(query,
+                                         db=DB,
+                                         pathway_names=pathway_names,
+                                         result_transformer_=neo4j.Result.to_df)
+    if result_df is not None:
+        name2id = {}
+        for _, row in result_df.iterrows():
+            name2id[row['displayName']] = row['dbId']
+        return name2id
+    return None
