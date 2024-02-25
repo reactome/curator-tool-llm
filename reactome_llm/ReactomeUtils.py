@@ -25,6 +25,7 @@ from paperqa.types import Text
 from paperqa import EmbeddingModel
 from paperqa.llms import NumpyVectorStore
 from paperqa.docs import Docs, Doc
+from sympy import false, true
 from ReactomeLLMErrors import NoAbstractFoundError, NoInteractingPathwayFoundError
 
 import ReactomePrompts as prompts
@@ -42,6 +43,7 @@ EMBEDDING_MODEL_NAME = 'pritamdeka/S-PubMedBert-MS-MARCO'
 # Used to query interacting pathways
 REACTOME_IDG_INTERACTING_PATHWAY_API_URL = 'https://idg.reactome.org/idgpairwise/relationships/enrichedSecondaryPathwaysForTerm1'
 REACTOME_IDG_FI_API_URL = 'https://idg.reactome.org/idgpairwise/relationships/combinedScoreGenesForTerm/'
+REACTOME_IDG_PATHWAY_API_URL = 'https://idg.reactome.org/idgpairwise/relationships/hierarchyForTerm/'
 
 
 class Pathway:
@@ -51,6 +53,7 @@ class Pathway:
         self.fdr = fdr
         self.pVal = pVal
         self.bottomLevel = bottomLevel
+        self.annotated = false
 
 
 def _get_text_splitter() -> TextSplitter:
@@ -63,6 +66,11 @@ def _get_text_splitter() -> TextSplitter:
 def _get_embedding(model_name: str = EMBEDDING_MODEL_NAME) -> EmbeddingModel:
     embeddings = HuggingFaceEmbeddings(model_name=model_name)
     return embeddings
+
+
+def get_default_llm():
+    model = ChatOpenAI(temperature=0, model='gpt-3.5-turbo')
+    return model
 
 
 def embed_event_summary(pathway_summary_pd: pd.DataFrame,
@@ -210,11 +218,30 @@ def query_fis(gene: str,
     return fi_df
 
 
+def query_reactome_pathways_in_hierarchy(gene: str) -> any:
+    """Query the hierarchy of the Reactome pathways for the passed gene.
+
+    Args:
+        gene (str): _description_
+
+    Returns:
+        any: May return None if the gene has not been annotated yet.
+    """
+    url = '{}{}'.format(REACTOME_IDG_PATHWAY_API_URL, gene)
+    result = requests.get(url)
+    json_objs = result.json()
+    if len(json_objs['stIds']) == 0:
+        return None
+    # TODO: To build the pathway hierarchy later on.
+    return json_objs['stIds']
+
+
 def query_reactome_interacting_pathways(gene: str,
                                         fi_cutoff: float = 0.8,
                                         fdr_cutoff: float = 0.01,
                                         bottomLevel_only: bool = True,
-                                        pathway_count: int = 10) -> list[Pathway]:
+                                        pathway_count: int = 10,
+                                        exclude_annotated: bool = True) -> list[Pathway]:
     """Query the reactome's idg RESTful API to get the list of interacting pathways.
 
     Args:
@@ -226,8 +253,8 @@ def query_reactome_interacting_pathways(gene: str,
         'dataDescKeys': [0],
         'prd': fi_cutoff  # The FI prediction score cutoff
     }
-    result = requests.post(
-        REACTOME_IDG_INTERACTING_PATHWAY_API_URL, json=query)
+    result = requests.post(REACTOME_IDG_INTERACTING_PATHWAY_API_URL, json=query)
+    annotated_stIds = query_reactome_pathways_in_hierarchy(gene)
     json_objs = result.json()
     pathways = []
     for obj_data in json_objs:
@@ -242,6 +269,10 @@ def query_reactome_interacting_pathways(gene: str,
                           obj_data['fdr'],
                           obj_data['pVal'],
                           obj_data['bottomLevel'])
+        if annotated_stIds is not None and pathway.id in annotated_stIds:
+            pathway.annotated = True
+        if exclude_annotated and pathway.annotated:
+            continue # Escape it
         pathways.append(pathway)
     return pathways
 
@@ -297,8 +328,8 @@ async def write_summary_of_interacting_pathway_for_unannotated_gene(query_gene: 
     Returns:
         any: _description_
     """
-    pathway_text = create_pathway_text(pathway,
-                                       interacting_genes)
+    pathway_text = create_interacting_pathway_text(pathway,
+                                                   interacting_genes)
     if pathway_text is None:
         return None
 
@@ -310,8 +341,83 @@ async def write_summary_of_interacting_pathway_for_unannotated_gene(query_gene: 
     return invoke_llm(parameters, prompt, model)
 
 
-def create_pathway_text(pathway: str,
-                        interacting_genes: list[str]):
+async def write_summary_of_annotated_pathway(query_gene: str,
+                                             pathway: str,
+                                             model: any,
+                                             total_words: int = 150) -> any:
+    """Write a summary for one single interacting pathway for a gene annotated in Reactome.
+
+    Args:
+        gene (str): _description_
+        pathway_text (str): _description_
+        total_words (int, optional): _description_. Defaults to 150.
+
+    Returns:
+        any: _description_
+    """
+    pathway_text = create_annotated_pathway_text(pathway, query_gene)
+    if pathway_text is None:
+        return None
+
+    prompt = prompts.annotated_pathway_summary_prompt
+    parameters = {'gene': query_gene,
+                  'total_words': total_words,
+                  'annotated_pathway_text': pathway_text,
+                  'docs': pathway_text}
+    return invoke_llm(parameters, prompt, model)
+
+
+async def write_summary_of_annotated_pathways(query_gene: str,
+                                              model: any,
+                                              total_words: int = 300) -> any:
+    """Write a summary for multiple pathways for a gene annotated in Reactome
+
+    Args:
+        query_gene (str): _description_
+        model (any): _description_
+        total_words (int, optional): _description_. Defaults to 300.
+
+    Returns:
+        any: _description_
+    """
+    # Try to get all annotated pathways
+    # TODO: To be optimized using Neo4j directly.
+    pathways = query_reactome_interacting_pathways(query_gene,
+                                                   fdr_cutoff=1.0, # No cutoff to get all pathways
+                                                   bottomLevel_only=True,
+                                                   pathway_count=None,
+                                                   exclude_annotated=False) # Should be all
+    annotated_pathways = [pathway for pathway in pathways if pathway.annotated]
+    if len(annotated_pathways) == 0:
+        return None
+    if len(annotated_pathways) == 1: # No need to write any summary
+        return await write_summary_of_annotated_pathway(query_gene, 
+                                                        annotated_pathways[0].name,
+                                                        model,
+                                                        total_words=300)
+    pathway_text_list = []
+    for pathway in annotated_pathways:
+        pathway_result = await write_summary_of_annotated_pathway(query_gene, 
+                                                                  pathway.name, 
+                                                                  model)
+        if pathway_result is None:
+            continue
+        pathway_text = pathway_result['answer'].content
+        pathway_text_list.append('{}: {}'.format(pathway.name, pathway_text))
+    pathway_text_all = '\n\n'.join(pathway_text_list)
+
+    prompt = prompts.annotated_pathways_summary_prompt
+    parameters = {'gene': query_gene,
+                  'total_words': total_words,
+                  'annotated_pathways_text': pathway_text_all,
+                  'docs': pathway_text_all}
+    result = invoke_llm(parameters, prompt, model)
+
+    return result
+
+
+def create_interacting_pathway_text(pathway: str,
+                                    interacting_genes: list[str]):
     # Fetch the roles of interacting genes in pathways according to reactions
     reaction_roles_df = neo4jutils.query_reaction_roles_of_pathway(
         pathway, interacting_genes)
@@ -327,7 +433,7 @@ def create_pathway_text(pathway: str,
             reaction_gene_role_text = reaction_gene_role_text + "; "
         reaction_gene_role_text = '{}{} in "{}" as {}'.format(
             reaction_gene_role_text, gene, reaction, role)
-        
+
     # Because of the version issue, some pathways may not have genes. Escape them
     if len(genes_in_pathway) == 0:
         return None
@@ -344,6 +450,46 @@ Roles of interacting genes in reactions annotated in the pathway: {}
         pathway,
         summation,
         ', '.join(genes_in_pathway),
+        reaction_gene_role_text
+    )
+    log.debug('text for {}\n'.format(pathway, pathway_text))
+    return pathway_text
+
+
+def create_annotated_pathway_text(pathway: str,
+                                  annotated_gene: str):
+    """
+    This function is similar to create_interacting_pathway_text(), but for an annotated pathway only.
+    """
+    # Fetch the roles of interacting genes in pathways according to reactions
+    reaction_roles_df = neo4jutils.query_reaction_roles_of_pathway(
+        pathway, [annotated_gene])
+    reaction_gene_role_text = ''
+    genes_in_pathway = []
+    for _, row in reaction_roles_df.iterrows():
+        reaction = row['reaction']
+        gene = row['gene']
+        genes_in_pathway.append(gene)
+        role = row['role']
+        if len(reaction_gene_role_text) > 0:
+            reaction_gene_role_text = reaction_gene_role_text + "; "
+        reaction_gene_role_text = '{}{} in "{}" as {}'.format(
+            reaction_gene_role_text, gene, reaction, role)
+
+    # Because of the version issue, some pathways may not have genes. Escape them
+    if len(genes_in_pathway) == 0:
+        return None
+
+    summation = neo4jutils.query_pathway_summary(pathway)
+
+    pathway_text_template = """
+Pathway title: {}\n\n
+Pathway summary: {}\n\n
+Roles of the query gene in reactions annotated in the pathway: {}
+    """
+    pathway_text = pathway_text_template.format(
+        pathway,
+        summation,
         reaction_gene_role_text
     )
     log.debug('text for {}\n'.format(pathway, pathway_text))
@@ -399,7 +545,7 @@ async def write_summary_of_interacting_pathways_for_unannotated_gene(gene: str,
         pathway_text_list.append('{}: {}'.format(pathway, pathway_text))
     pathway_text_all = '\n\n'.join(pathway_text_list)
 
-    prompt = prompts.unannotated_gene_prompt
+    prompt = prompts.interacting_pathways_summary_prompt
     parameters = {'gene': gene,
                   'total_words': total_words,
                   'pathways_with_fdr': pathways_with_fdr,
@@ -461,8 +607,8 @@ async def write_summary_for_known_gene_via_paperqa(gene: str,
 
 
 async def build_abstract_vector_db_for_gene(query_gene: str,
-                                      top_k_results: int = 8,
-                                      max_query_length: int = 1000) -> VectorStore:
+                                            top_k_results: int = 8,
+                                            max_query_length: int = 1000) -> VectorStore:
     """Query pubmed about interactions, reactions, and pathways for a gene and return
     a vector store for collected abstracts from PubMed.
 
@@ -602,9 +748,8 @@ async def write_summary_of_abstracts_for_gene(query_gene: str,
         _type_: _description_
     """
     # Get pathways and genes
-    pathways = query_reactome_interacting_pathways(
-        query_gene,
-        pathway_count=8)
+    # TODO: need to check how many pathways should be used.
+    pathways = query_reactome_interacting_pathways(query_gene, pathway_count=8)
     log.debug('Total pathways for {}: {}'.format(query_gene, len(pathways)))
     if len(pathways) == 0:
         raise NoInteractingPathwayFoundError(query_gene)
@@ -612,10 +757,10 @@ async def write_summary_of_abstracts_for_gene(query_gene: str,
     interacting_genes = fi_df['gene'].to_list()
     log.debug('Total interacting genes: {}'.format(len(interacting_genes)))
 
-    pathway_abstract_pd = await build_pathway_abstract_df(query_gene, 
+    pathway_abstract_pd = await build_pathway_abstract_df(query_gene,
                                                           interacting_genes,
                                                           pathways,
-                                                          pubmed_db, 
+                                                          pubmed_db,
                                                           model)
 
     abstract_result_for_multiple_pathways = await summarize_abstract_results_for_multiple_pathways(query_gene,
@@ -635,7 +780,8 @@ async def build_pathway_abstract_df(query_gene: str,
     row = 0
     text_splitter = _get_text_splitter()
     for pathway in pathways:
-        pathway_text = create_pathway_text(pathway.name, interacting_genes)
+        pathway_text = create_interacting_pathway_text(
+            pathway.name, interacting_genes)
         if pathway_text is None:
             continue
         splitted_texts = text_splitter.split_text(pathway_text)

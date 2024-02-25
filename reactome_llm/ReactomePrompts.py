@@ -13,13 +13,43 @@ context: {text_for_important_reactome_pathways}
 """
 summary_prompt = ChatPromptTemplate.from_template(summary_prompt_template)
 
-unannotated_gene_prompt_tempalte = """
-The gene below has not been annotated in Reactome, but predicted to be functionally interacting with the following list of pathways with
+
+# Used to summary an annotated pathway for a gene in Reactome
+annotated_pathway_summary_prompt_template = """
+The query gene below has been annotated in a pathway described in the text below. The gene's roles in reactions annotated in the pathway
+are also described below. Summarize the following text with about {total_words} words, indicating the most important reactions or interactions 
+having the query gene invovled. Don't speculate anything that is not in the provided text.
+
+Query gene: {gene}
+
+{annotated_pathway_text}
+"""
+annotated_pathway_summary_prompt = ChatPromptTemplate.from_template(annotated_pathway_summary_prompt_template)
+
+
+# Used to summary a set of annotated pathways for a gene in Reactome
+annotated_pathways_summary_prompt_template = """
+The gene below has been annotated in multiple pathways described in the context text below in Reactome. Write a summary having about {total_words} words 
+with focus on the molecular functions of the gene in these pathways. Use the context text only for the summary and don't speculate anything that is not 
+in the text. Make sure to cite the pathway names in the format like this [Pathway_Name] for each sentence. The pathway names are provided in the
+context. Write a summary sentence at the end to summarize all results.
+
+gene: {gene}
+
+context: {annotated_pathways_text}
+"""
+annotated_pathways_summary_prompt = ChatPromptTemplate.from_template(annotated_pathways_summary_prompt_template)
+
+
+# Used to summaryze a set of interacting pathways predicted for a gene.
+interacting_pathways_summary_prompt_template = """
+The gene below has not been annotated inside the pathways listed below in Reactome, but predicted to be functionally interacting with these pathways with
 false discovery rate (FDR) provided by interacting with genes listed below (interacting_genes). Write a summary with about {total_words} words 
 about the interacting pathways summarized in the context below. The summary should focus on interacting_genes' roles in reactions as described 
 in the text. Use the context text only for the summary and don't repeat the text. Make sure to mention interacting genes by their names in the 
 summary text to provide more detailed molecular mechanistic description. Also mention that the interactions between the gene and its interacting
-genes are predicted.
+genes are predicted. Make sure to cite the pathway names in the format like this [Pathway_Name] for each sentence. The pathway names are provided in the
+context.
 
 gene: {gene}
 
@@ -29,13 +59,13 @@ interacting_genes: {interacting_partners}
 
 context: {text_for_interacting_pathways}
 """
-unannotated_gene_prompt = ChatPromptTemplate.from_template(unannotated_gene_prompt_tempalte)
+interacting_pathways_summary_prompt = ChatPromptTemplate.from_template(interacting_pathways_summary_prompt_template)
 
-# Use to summarize the one single interacting pathway 
+# Use to summarize one single interacting pathway 
 interacting_pathway_summary_prompt_template = """
 The query gene below is predicted to be functionally related with the pathway described below via interacting genes listed also below.
 Summarize the following text with about {total_words} words, indicating the most important reactions or interactions having interacting
-genes invovled. Make sure the summary has a sentence at the beging say something like gene (i.e. the query gene) is predicted to interact
+genes invovled. Make sure the summary has a sentence at the begining say something like gene (i.e. the query gene) is predicted to interact
 with a gene (e.g. one of the gene listed in interacting genes).
 
 Query gene: {gene}
