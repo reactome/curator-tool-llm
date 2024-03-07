@@ -95,9 +95,9 @@ async def downloadPdf(pmid: str):
 
 @api.route('/query/<gene>')
 async def query_gene(gene):
-    global return_json
-    if return_json:
-        return return_json
+    # global return_json
+    # if return_json:
+    #     return return_json
     try:
         annotated_pathway_summary = await utils.write_summary_of_annotated_pathways(gene, 
                                                                                     model)
