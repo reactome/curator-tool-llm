@@ -9,3 +9,9 @@ class NoInteractingPathwayFoundError(Exception):
         self.message = 'No interacting pathway is found for {}. Try to reduce the cutoff value for functional interactions.'.format(gene)
         super().__init__(self.message)
 
+
+class PubMedFullTextPDFNotFoundError(Exception):
+    def __init__(self, pmid):
+        self.message = 'Cannot find a URL to download the full text PDF for {}'.format(pmid)
+        super().__init__(self.message)
+

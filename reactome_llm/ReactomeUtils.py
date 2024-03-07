@@ -1,6 +1,5 @@
-import asyncio
 from operator import itemgetter
-from unittest import TestCase
+from pathlib import Path
 
 from langchain.text_splitter import SentenceTransformersTokenTextSplitter
 from langchain.text_splitter import TextSplitter
@@ -13,6 +12,7 @@ from langchain_community.retrievers import PubMedRetriever
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
+from langchain_community.document_loaders import PyPDFLoader
 
 import pandas as pd
 import scanpy as sc
@@ -25,7 +25,7 @@ from paperqa.types import Text
 from paperqa import EmbeddingModel
 from paperqa.llms import NumpyVectorStore
 from paperqa.docs import Docs, Doc
-from sympy import false, true
+from sympy import false
 from ReactomeLLMErrors import NoAbstractFoundError, NoInteractingPathwayFoundError
 
 import ReactomePrompts as prompts
@@ -45,6 +45,7 @@ REACTOME_IDG_INTERACTING_PATHWAY_API_URL = 'https://idg.reactome.org/idgpairwise
 REACTOME_IDG_FI_API_URL = 'https://idg.reactome.org/idgpairwise/relationships/combinedScoreGenesForTerm/'
 REACTOME_IDG_PATHWAY_API_URL = 'https://idg.reactome.org/idgpairwise/relationships/hierarchyForTerm/'
 
+RANDOM_STATE = 123456
 
 class Pathway:
     def __init__(self, id, name, fdr, pVal, bottomLevel) -> None:
@@ -816,17 +817,84 @@ async def build_pathway_abstract_df(query_gene: str,
     return pathway_abstract_pd
 
 
-# Simple text in script for fast performance at VSCode
-async def test_api():
-    gene = 'DUX4L2'
-    pubmed_db = await build_abstract_vector_db_for_gene(gene, top_k_results=10)
-    model = ChatOpenAI(temperature=0, model='gpt-3.5-turbo')
-    query_result = await write_summary_of_abstracts_for_gene(gene,
-                                                             pubmed_db,
-                                                             model)
-    print(query_result)
+def output_llm_result(result):
+    formatted_result = '\nResult: {}\n\nDoc: {}'.format(result['answer'].content, result['docs'])
+    return formatted_result
 
 
-if __name__ == '__main__':
-    print('Running test_api...')
-    asyncio.run(test_api())
+def download_pdf_paper(url: str, 
+                       pmid: str | int,
+                       paper_dir: str):
+    """Download a PDF file directly from the provided URL.
+    Note: The downloading of using a script from the PMC web site is blocked!
+
+    Args:
+        url (str): _description_
+        pmid (str | int): _description_
+        paper_dir (str): _description_
+    """
+    response = requests.get(url)
+    file_name = Path(paper_dir, '{}.pdf'.format(pmid))
+    with open(file_name, 'wb') as file:
+        file.write(response.content)
+
+
+def analyze_full_paper(paper_file_name: str,
+                       query_gene: str,
+                       model: any,
+                       top_pages: int = 12,
+                       max_score: float = 50.0) -> list:
+    """Analyze a full text pdf paper provided by paper_file_name.
+
+    Args:
+        paper_file_name (str): the file location of the full text pdf
+        query_gene (str): the query gene the analysis should focus on
+        model (any): an LLM model
+        top_pages (int): only select these many top matched text chunks
+        max_score (float): the max score should be used to filter out text chunks
+    """
+    # Load the paper first
+    loader = PyPDFLoader(paper_file_name)
+    token_splitter = _get_text_splitter()
+    pages = loader.load_and_split(token_splitter)
+
+    # Embedding the paper
+    embeddings = _get_embedding()
+    paper_db = FAISS.from_documents(pages, embeddings)
+
+    # Fetch the best matched text
+    query = f'({query_gene} interactions) or ({query_gene} reactions) or ({query_gene} pathways)'
+    matched_pages = paper_db.similarity_search_with_score(query, k=top_pages)
+
+    # Prepare to call llm
+    parameters = {
+        'query_gene': query_gene
+    }
+    prompt = prompts.relationship_extraction_prompt
+    results = []
+    for doc, score in matched_pages:
+        if score > max_score:
+            break # The returned results are sorted. If we see this, we can break the loop.
+        parameters['docs'] = doc.page_content
+        parameters['document'] = doc.page_content
+        result = invoke_llm(model=model, parameters=parameters, prompt=prompt)
+        results.append(result)
+    return results
+
+
+# # Simple text in script for fast performance at VSCode
+# async def test_api():
+#     gene = 'DUX4L2'
+#     pubmed_db = await build_abstract_vector_db_for_gene(gene, top_k_results=10)
+#     model = ChatOpenAI(temperature=0, model='gpt-3.5-turbo')
+#     query_result = await write_summary_of_abstracts_for_gene(gene,
+#                                                              pubmed_db,
+#                                                              model)
+#     print(query_result)
+
+
+# if __name__ == '__main__':
+#     print('Running test_api...')
+#     asyncio.run(test_api())
+
+

@@ -107,3 +107,18 @@ interacting_genes: {interacting_genes}
 context: {context}
 """
 multiple_abstracts_summary_prompt = ChatPromptTemplate.from_template(multiple_abstracts_summary_prompt_template)
+
+
+# Used to extract functional relationships that can be annotated in Reactome
+relationship_extraction_prompt_template = """
+Extract funtional relationships between the query gene specified below and other genes, proteins, or biological concepts from the
+following document. Output the relationships in the following format: {query_gene} - relationship_type -> other gene or protein or 
+biological concept. If you can find the cellular component, tissue or cell type, or other experimental system related to the extracted
+relationships, make sure to list them.
+
+query_gene: {query_gene}
+
+document: {document}
+"""
+relationship_extraction_prompt = ChatPromptTemplate.from_template(relationship_extraction_prompt_template)
+
