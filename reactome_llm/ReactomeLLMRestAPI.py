@@ -32,6 +32,12 @@ full_text_return_json = None
 # Test genes: TANC1 (not annotated), DUX4L2 (not annotated, limited abstracts), NTN1 (annotated)
 # TODO: Add cellular locations and cell types reuqest into the prompts!
 
+# Most likely this is temporary. Need to think how to encript it.
+@api.route('/openai_key')
+async def get_openai_key():
+    return os.getenv('OPENAI_API_KEY')
+
+
 @api.route('/fulltext/<pmid>/<gene>')
 async def analyze_full_text(pmid, gene):
     # global full_text_return_json
