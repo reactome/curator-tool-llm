@@ -750,7 +750,7 @@ async def write_summary_of_abstracts_for_gene(query_gene: str,
     """
     # Get pathways and genes
     # TODO: need to check how many pathways should be used.
-    pathways = query_reactome_interacting_pathways(query_gene, pathway_count=8)
+    pathways = query_reactome_interacting_pathways(query_gene, pathway_count=8, fi_cutoff=0.6)
     log.debug('Total pathways for {}: {}'.format(query_gene, len(pathways)))
     if len(pathways) == 0:
         raise NoInteractingPathwayFoundError(query_gene)

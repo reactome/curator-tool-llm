@@ -142,6 +142,6 @@ def _collect_pathway_names(docs: str) -> list[str]:
     return names
 
 
-# Run the api at the terminal with this command: flask --app ReactomeLLMRestAPI run (--debug for debug)
+# Run the api at the terminal with this command: flask --app reactome_llm/ReactomeLLMRestAPI run (--debug for debug)
 if __name__ == '__main__':
     api.run()
