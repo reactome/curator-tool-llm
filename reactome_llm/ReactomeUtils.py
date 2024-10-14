@@ -32,6 +32,8 @@ import ReactomePrompts as prompts
 import ReactomeNeo4jUtils as neo4jutils
 
 import logging as log
+
+from ReactomePubMed import ReactomePubMedRetriever
 logger = log.getLogger()
 logger.setLevel(log.INFO)
 log.basicConfig(
@@ -621,7 +623,9 @@ async def build_abstract_vector_db_for_gene(query_gene: str,
     Returns:
         any: _description_
     """
-    pubmed_retriever = PubMedRetriever()
+    pubmed_retriever = ReactomePubMedRetriever()
+    # Make sure it doesn't exceed the quote: 3 per second. use 0.5.
+    pubmed_retriever.sleep_time = 0.5
     pubmed_retriever.top_k_results = top_k_results
     pubmed_retriever.MAX_QUERY_LENGTH = max_query_length
     pubmed_retriever.doc_content_chars_max = max_query_length * top_k_results
