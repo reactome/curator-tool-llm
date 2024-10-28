@@ -10,7 +10,7 @@ import re
 import logging as log
 import dotenv
 import asyncio
-import requests
+from langchain_openai import ChatOpenAI
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import ReactomeNeo4jUtils as neo4jutils
@@ -22,12 +22,13 @@ dotenv.load_dotenv()
 PDF_PAPERS_FOLDER = os.getenv('PDF_PAPERS_FOLDER')
 HUGGINGFACE_TOKEN = os.getenv('HUGGINGFACE_TOKEN') 
 
-# Configure the AI model
-async def get_model(model_name, temperature=0):
-    # Hugging Face models
-    tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=HUGGINGFACE_TOKEN)
-    model = AutoModelForCausalLM.from_pretrained(model_name, use_auth_token=HUGGINGFACE_TOKEN)
-    return model, tokenizer
+# # Configure the AI model
+# The following code cannot work for the time being
+# async def get_model(model_name, temperature=0):
+#     # Hugging Face models
+#     tokenizer = AutoTokenizer.from_pretrained(model_name, use_auth_token=HUGGINGFACE_TOKEN)
+#     model = AutoModelForCausalLM.from_pretrained(model_name, use_auth_token=HUGGINGFACE_TOKEN)
+#     return model, tokenizer
 
 
 # Analyze full-text paper
@@ -118,18 +119,20 @@ async def save_result(gene, result, model_name):
 
 # Main function 
 async def main():
-    model_name = "aaditya/Llama3-OpenBioLLM-70B"  
-    model, tokenizer = await get_model(model_name, temperature=0)
+    # model_name = "aaditya/Llama3-OpenBioLLM-70B"  
+    # model, tokenizer = await get_model(model_name, temperature=0)
 
     # List of genes to process
     genes = ['TANC1', 'FADD', 'NTN1', 'ICAM1', 'RACK1', 'ABCC1', 'SPIDR', 'XRCC6', 'MPDZ', 'TNFRSF14']
+    genes = ['TANC1']
+    model = ChatOpenAI(temperature=0, model='gpt-3.5-turbo')
 
     # Process each gene
     for gene in genes:
         print(f'Processing gene: {gene}')
         result = await query_gene(gene, model)
         print(result)
-        await save_result(gene, result, model_name)
+    #     await save_result(gene, result, model_name)
 
 if __name__ == '__main__':
     asyncio.run(main())
