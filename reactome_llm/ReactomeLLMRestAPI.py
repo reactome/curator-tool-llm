@@ -13,7 +13,7 @@ from flask_cors import CORS
 from flask import Flask, request
 import warnings
 
-from ReactomeLLMErrors import NoAbstractFoundError, NoInteractingPathwayFoundError
+from ReactomeLLMErrors import NoAbstractFoundError, NoAbstractSupportingInteractingPathwayError, NoInteractingPathwayFoundError
 warnings.filterwarnings('ignore')
 
 from dotenv import load_dotenv
@@ -23,7 +23,9 @@ PDF_PAPERS_FOLDER = os.getenv('PDF_PAPERS_FOLDER')
 # Shared variables for all
 api = Flask(__name__)
 CORS(api)
-model = ChatOpenAI(temperature=0, model='gpt-3.5-turbo')
+# model = ChatOpenAI(temperature=0, model='gpt-3.5-turbo')
+# As of Dec 18, 2024, switch to 4o-mini.
+model = ChatOpenAI(temperature=0, model='gpt-4o-mini')
 
 # This is for test
 return_json = None
@@ -31,6 +33,8 @@ full_text_return_json = None
 
 # Test genes: TANC1 (not annotated), DUX4L2 (not annotated, limited abstracts), NTN1 (annotated)
 # TODO: Add cellular locations and cell types reuqest into the prompts!
+# TODO: This is important. Add GUIs to configure the cutoff of FIs and pathway FDRs and also make sure they are 
+# consistent across the whole application.
 
 # Most likely this is temporary. Need to think how to encript it.
 @api.route('/openai_key')
@@ -111,8 +115,7 @@ async def query_gene(gene):
         query_result = await utils.write_summary_of_abstracts_for_gene(gene,
                                                                        pubmed_db,
                                                                        model)
-    # TODO: Make sure anotated_pathway_summary can be returned if it is there.
-    except (NoAbstractFoundError, NoInteractingPathwayFoundError) as e:
+    except (NoAbstractFoundError, NoInteractingPathwayFoundError, NoAbstractSupportingInteractingPathwayError) as e:
         log.error('error: {}'.format(e.message))
         return {'failure': e.message}
     # Add mapping from pathway to dbId for the front so that a link can be created

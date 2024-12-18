@@ -14,7 +14,7 @@ context: {text_for_important_reactome_pathways}
 summary_prompt = ChatPromptTemplate.from_template(summary_prompt_template)
 
 
-# Used to summary an annotated pathway for a gene in Reactome
+# Used to summarize an annotated pathway for a gene in Reactome
 annotated_pathway_summary_prompt_template = """
 The query gene below has been annotated in a pathway described in the text below. The gene's roles in reactions annotated in the pathway
 are also described below. Summarize the following text with about {total_words} words, indicating the most important reactions or interactions 
@@ -27,7 +27,7 @@ Query gene: {gene}
 annotated_pathway_summary_prompt = ChatPromptTemplate.from_template(annotated_pathway_summary_prompt_template)
 
 
-# Used to summary a set of annotated pathways for a gene in Reactome
+# Used to summarize a set of annotated pathways for a gene in Reactome
 annotated_pathways_summary_prompt_template = """
 The gene below has been annotated in multiple pathways described in the context text below in Reactome. Write a summary having about {total_words} words 
 with focus on the molecular functions of the gene in these pathways. Use the context text only for the summary and don't speculate anything that is not 
@@ -41,7 +41,7 @@ context: {annotated_pathways_text}
 annotated_pathways_summary_prompt = ChatPromptTemplate.from_template(annotated_pathways_summary_prompt_template)
 
 
-# Used to summaryze a set of interacting pathways predicted for a gene.
+# Used to summarize a set of interacting pathways predicted for a gene.
 interacting_pathways_summary_prompt_template = """
 The gene below has not been annotated inside the pathways listed below in Reactome, but predicted to be functionally interacting with these pathways with
 false discovery rate (FDR) provided by interacting with genes listed below (interacting_genes). Write a summary with about {total_words} words 

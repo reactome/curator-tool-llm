@@ -10,6 +10,12 @@ class NoInteractingPathwayFoundError(Exception):
         super().__init__(self.message)
 
 
+class NoAbstractSupportingInteractingPathwayError(Exception):
+    def __init__(self, gene):
+        self.message = 'Cannot find any abstract to support the predicted interacting pathway for {}.'.format(gene)
+        super().__init__(self.message)
+
+
 class PubMedFullTextPDFNotFoundError(Exception):
     def __init__(self, pmid):
         self.message = 'Cannot find a URL to download the full text PDF for {}'.format(pmid)

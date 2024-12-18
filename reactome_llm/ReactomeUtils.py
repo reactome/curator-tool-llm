@@ -26,7 +26,7 @@ from paperqa import EmbeddingModel
 from paperqa.llms import NumpyVectorStore
 from paperqa.docs import Docs, Doc
 from sympy import false
-from ReactomeLLMErrors import NoAbstractFoundError, NoInteractingPathwayFoundError
+from ReactomeLLMErrors import NoAbstractFoundError, NoAbstractSupportingInteractingPathwayError, NoInteractingPathwayFoundError
 
 import ReactomePrompts as prompts
 import ReactomeNeo4jUtils as neo4jutils
@@ -36,6 +36,7 @@ import logging as log
 from ReactomePubMed import ReactomePubMedRetriever
 logger = log.getLogger()
 logger.setLevel(log.INFO)
+# logger.setLevel(log.DEBUG)
 log.basicConfig(
     format='%(asctime)s -  %(name)s - %(levelname)s - %(message)s', filename=None)
 
@@ -754,11 +755,12 @@ async def write_summary_of_abstracts_for_gene(query_gene: str,
     """
     # Get pathways and genes
     # TODO: need to check how many pathways should be used.
-    pathways = query_reactome_interacting_pathways(query_gene, pathway_count=8, fi_cutoff=0.6)
+    fi_cutoff = 0.6
+    pathways = query_reactome_interacting_pathways(query_gene, pathway_count=8, fi_cutoff=fi_cutoff)
     log.debug('Total pathways for {}: {}'.format(query_gene, len(pathways)))
     if len(pathways) == 0:
         raise NoInteractingPathwayFoundError(query_gene)
-    fi_df = query_fis(gene=query_gene)
+    fi_df = query_fis(gene=query_gene, fi_cutoff=fi_cutoff)
     interacting_genes = fi_df['gene'].to_list()
     log.debug('Total interacting genes: {}'.format(len(interacting_genes)))
 
@@ -767,13 +769,14 @@ async def write_summary_of_abstracts_for_gene(query_gene: str,
                                                           pathways,
                                                           pubmed_db,
                                                           model)
+    if pathway_abstract_pd.empty:
+        raise NoAbstractSupportingInteractingPathwayError(query_gene)
 
     abstract_result_for_multiple_pathways = await summarize_abstract_results_for_multiple_pathways(query_gene,
                                                                                                    interacting_genes,
                                                                                                    pathway_abstract_pd,
                                                                                                    model)
     return abstract_result_for_multiple_pathways
-
 
 async def build_pathway_abstract_df(query_gene: str,
                                     interacting_genes: list[str],
