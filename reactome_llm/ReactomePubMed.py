@@ -11,12 +11,19 @@ import urllib
 import time
 import urllib.error
 from langchain_community.retrievers import PubMedRetriever
+from pymongo import MongoClient
 import dotenv
 dotenv.load_dotenv()
 # Make sure to get an api key from https://account.ncbi.nlm.nih.gov/settings/ (need to log in first)
 pubmed_api_key = os.getenv('PUBMED_API_KEY')
 
+pubmed_mongo_uri = os.getenv('PUBMED_MONGO_URI')
+pubmed_mongo_db = os.getenv('PUBMED_MONGO_DB')
+pubmed_mongo_collection = os.getenv('PUBMED_MONGO_COLLECTION')
+
 class ReactomePubMedRetriever(PubMedRetriever):
+    # Required by BaseModel
+    db: object = None
     
     def lazy_load(self, query: str) -> Iterator[dict]:
         """
@@ -43,7 +50,8 @@ class ReactomePubMedRetriever(PubMedRetriever):
 
                 webenv = json_text["esearchresult"]["webenv"]
                 for uid in json_text["esearchresult"]["idlist"]:
-                    yield self.retrieve_article(uid, webenv)
+                    # yield self.retrieve_article(uid, webenv)
+                    yield self.get_abstract_from_mongodb(uid)
                 break
             except urllib.error.HTTPError as e:
                 if retry < self.max_retry:
@@ -57,6 +65,32 @@ class ReactomePubMedRetriever(PubMedRetriever):
                     time.sleep(self.sleep_time * retry)
                 else:
                     raise e
+
+    def get_abstract_from_mongodb(self, pmid: str|int) -> str:
+        """Get the abstract from MongoDB
+
+        Args:
+            pmid (int): the PMID of the abstract
+
+        Returns:
+            str: the abstract
+        """
+        # Cache the connection to increase the query performance
+        if self.db is None:
+            client = MongoClient(pubmed_mongo_uri)
+            db = client[pubmed_mongo_db]
+            self.db = db
+        collection = self.db[pubmed_mongo_collection]
+        result = collection.find_one({'pmid': str(pmid)})
+        if result:
+            # Follow the format from _parse_article:
+            return {
+                "uid": str(pmid),
+                "Summary": result['abstract'],
+            }
+            # return result['abstract']
+        else:
+            return None
 
 
     def retrieve_article(self, uid: str, webenv: str) -> dict:
@@ -93,3 +127,12 @@ class ReactomePubMedRetriever(PubMedRetriever):
         text_dict = self.parse(xml_text)
         return self._parse_article(uid, text_dict)
 
+
+# Just a simple test
+# retriever = ReactomePubMedRetriever()
+# pmid = 37941124
+# time1 = time.time()
+# for i in range(1):
+#     print(retriever.get_abstract_from_mongodb(pmid))
+# time2 = time.time()
+# print('Time: {}'.format(time2 - time1))

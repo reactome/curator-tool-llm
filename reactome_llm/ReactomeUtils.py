@@ -8,7 +8,6 @@ from langchain_community.vectorstores import VectorStore
 from langchain_core.documents import Document
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.runnables import RunnablePassthrough
-from langchain_community.retrievers import PubMedRetriever
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
@@ -30,10 +29,14 @@ from ReactomeLLMErrors import NoAbstractFoundError, NoAbstractSupportingInteract
 
 import ReactomePrompts as prompts
 import ReactomeNeo4jUtils as neo4jutils
+import statsmodels.stats.multitest as smm
+import scipy.stats as stats
 
 import logging as log
 
 from ReactomePubMed import ReactomePubMedRetriever
+import ProteinProteinInteractionsLoader as ppi_loader
+
 logger = log.getLogger()
 logger.setLevel(log.INFO)
 # logger.setLevel(log.DEBUG)
@@ -47,6 +50,7 @@ EMBEDDING_MODEL_NAME = 'pritamdeka/S-PubMedBert-MS-MARCO'
 REACTOME_IDG_INTERACTING_PATHWAY_API_URL = 'https://idg.reactome.org/idgpairwise/relationships/enrichedSecondaryPathwaysForTerm1'
 REACTOME_IDG_FI_API_URL = 'https://idg.reactome.org/idgpairwise/relationships/combinedScoreGenesForTerm/'
 REACTOME_IDG_PATHWAY_API_URL = 'https://idg.reactome.org/idgpairwise/relationships/hierarchyForTerm/'
+REACTOME_PATHWAY_GENE_FILE = 'resources/ReactomePathwayGenes_Ver_91.txt'
 
 RANDOM_STATE = 123456
 
@@ -59,6 +63,8 @@ class Pathway:
         self.bottomLevel = bottomLevel
         self.annotated = false
 
+# Probably use a class in the future
+ppi_loader = ppi_loader.PPILoader()
 
 def _get_text_splitter() -> TextSplitter:
     text_splitter = SentenceTransformersTokenTextSplitter(chunk_overlap=10,
@@ -213,13 +219,7 @@ def query_fis(gene: str,
         gene (str): _description_
         fi_cutoff (float, optional): _description_. Defaults to 0.8.
     """
-    result = requests.get(url='{}{}'.format(REACTOME_IDG_FI_API_URL, gene))
-    json_obj = result.json()
-    fi_df = pd.DataFrame({'gene': json_obj.keys(),
-                          'score': json_obj.values()})
-    fi_df = fi_df[fi_df['score'] > fi_cutoff]
-    fi_df.sort_values(by=['score'], ascending=False, inplace=True)
-    return fi_df
+    return ppi_loader.query_fis(gene, fi_cutoff)
 
 
 def query_reactome_pathways_in_hierarchy(gene: str) -> any:
@@ -278,6 +278,28 @@ def query_reactome_interacting_pathways(gene: str,
         if exclude_annotated and pathway.annotated:
             continue # Escape it
         pathways.append(pathway)
+    return pathways
+
+
+def get_annotated_pathways(gene: str, pathway_file: str=REACTOME_PATHWAY_GENE_FILE) -> list[Pathway]:
+    """Get the annotated pathways for a gene based on a pre-generated file.
+
+    Args:
+        gene (str): _description_
+        fi_cutoff (float, optional): _description_. Defaults to 0.8.
+    """
+    pathway_gene_df = pd.read_csv(pathway_file, sep='\t')
+    pathways = []
+    for _, row in pathway_gene_df.iterrows():
+        pathway_id = row['pathway_id']
+        pathway_name = row['pathway_name']
+        pathway_genes = set(row['genes'].split(','))  # Convert to set for faster intersection
+        if gene in pathway_genes:
+            # Put the results in the Pathway data structure for other code
+            # All pathways in this file are bottom level
+            pathway = Pathway(pathway_id, pathway_name, None, None, True)
+            pathway.annotated = True    
+            pathways.append(pathway)
     return pathways
 
 
@@ -386,11 +408,13 @@ async def write_summary_of_annotated_pathways(query_gene: str,
     """
     # Try to get all annotated pathways
     # TODO: To be optimized using Neo4j directly.
-    pathways = query_reactome_interacting_pathways(query_gene,
-                                                   fdr_cutoff=1.0, # No cutoff to get all pathways
-                                                   bottomLevel_only=True,
-                                                   pathway_count=None,
-                                                   exclude_annotated=False) # Should be all
+    # pathways = query_reactome_interacting_pathways(query_gene,
+    #                                                fdr_cutoff=1.0, # No cutoff to get all pathways
+    #                                                bottomLevel_only=True,
+    #                                                pathway_count=None,
+    #                                                exclude_annotated=False) # Should be all
+    # Change to use a local pre-processed file as of March 12, 2025
+    pathways = get_annotated_pathways(query_gene)
     annotated_pathways = [pathway for pathway in pathways if pathway.annotated]
     if len(annotated_pathways) == 0:
         return None
@@ -559,6 +583,83 @@ async def write_summary_of_interacting_pathways_for_unannotated_gene(gene: str,
     result = invoke_llm(parameters, prompt, model)
 
     return result
+
+
+async def write_summary_of_interacting_pathways_for_unannotated_gene_via_ppis(gene: str,
+                                                                     model,
+                                                                     fi_cutoff: float=0.8,
+                                                                     fdr_cutoff: float = 0.05,
+                                                                     pathway_count: int = 8,
+                                                                     total_words: int = 300) -> any:
+    """Write a summary for a set of interacting pathways for a gene that has not been annotated in Reactome.
+    The interacting pathways are fetched based on PPIs collected from IntAct and BioGrid.
+
+    Args:
+        gene (str): _description_
+        model (_type_): _description_
+        fi_cutoff (float, optional): Default=0.8. Used to filter the pulled PPIs.
+        fdr_cutoff (float, optional): _description_. Defaults to 1.0E-2.
+        pathway_count (int, optional): _description_. Defaults to 8.
+        total_words (int, optional): _description_. Defaults to 300.
+
+    Returns:
+        any: _description_
+    """
+    ppi = ppi_loader.get_interactions(gene, filter_ppis_with_fi=True, fi_cutoff=fi_cutoff)
+    if ppi is None:
+        raise NoInteractingPathwayFoundError('No interacting pathway found for {}'.format(gene))
+    
+    # Make sure this is a list.
+    interacting_genes = list(ppi.keys())
+
+    ppis_in_pathways_df = map_interactions_in_pathways(ppi)
+    # Here we'd like to have all pathways that are mapped. Therefore, we use fdr cutoff = 1.0
+    pathway_enrichment_results = pathway_binomial_enrichment_df(ppis_in_pathways_df, 
+                                                                len(interacting_genes),
+                                                                fdr_cutoff=fdr_cutoff)
+    if pathway_enrichment_results is None or pathway_enrichment_results.empty:
+        raise NoInteractingPathwayFoundError('No interacting pathway found for {}'.format(gene))
+    
+    pathways_with_fdr = ''
+    selected_pathways = []
+    for _, row in pathway_enrichment_results.iterrows():
+        if (len(selected_pathways)) >= pathway_count:
+            break
+        pathways_with_fdr = '{}{}:{}\n'.format(pathways_with_fdr,
+                                               row['pathway_name'],
+                                               row['FDR'])
+        selected_pathways.append(row['pathway_name'])
+    
+    if len(selected_pathways) == 0:
+        raise NoInteractingPathwayFoundError('No interacting pathway found for {}'.format(gene))
+    
+    pathway_text_list = []
+    used_pathways = []
+    for pathway in selected_pathways:
+        pathway_result = await write_summary_of_interacting_pathway_for_unannotated_gene(query_gene=gene,
+                                                                                         interacting_genes=interacting_genes,
+                                                                                         pathway=pathway,
+                                                                                         model=model)
+        if pathway_result is None:
+            continue
+        pathway_text = pathway_result['answer'].content
+        pathway_text_list.append('{}: {}'.format(pathway, pathway_text))
+        used_pathways.append(pathway)
+    pathway_text_all = '\n\n'.join(pathway_text_list)
+
+    prompt = prompts.interacting_pathways_summary_prompt
+    parameters = {'gene': gene,
+                  'total_words': total_words,
+                  'pathways_with_fdr': pathways_with_fdr,
+                  'interacting_partners': ','.join(interacting_genes),
+                  'text_for_interacting_pathways': pathway_text_all,
+                  'docs': pathway_text_all}
+    result = invoke_llm(parameters, prompt, model)
+
+    # Returns only whatever is used
+    enrichment_df = pathway_enrichment_results[pathway_enrichment_results['pathway_name'].isin(used_pathways)]
+
+    return result, enrichment_df
 
 
 async def write_summary_for_known_gene_via_paperqa(gene: str,
@@ -813,9 +914,11 @@ async def build_pathway_abstract_df(query_gene: str,
                                                                        splitted_text,
                                                                        best_matched_abstract[0].page_content,
                                                                        model)
+        # In case there is no title
+        title = '' if best_matched_abstract[0].metadata['Title'] is None else best_matched_abstract[0].metadata['Title']
         pathway_abstract_pd.loc[row] = [pathway.name,
                                         best_matched_abstract[0].metadata['uid'],
-                                        best_matched_abstract[0].metadata['Title'],
+                                        title,
                                         best_matched_abstract[0].page_content,
                                         best_matched_abstract[1],
                                         abstract_result['answer'].content]
@@ -887,6 +990,174 @@ def analyze_full_paper(paper_file_name: str,
         result = invoke_llm(model=model, parameters=parameters, prompt=prompt)
         results.append(result)
     return results
+
+
+def map_interactions_in_pathways(interaction_dict, pathway_file: str=REACTOME_PATHWAY_GENE_FILE) -> pd.DataFrame:
+    """Map the interactions to pathways.
+
+    Args:
+        interaction_dict (_type_): interaction partners vs pubmed_ids
+        pathway_file (str, optional): _description_. Defaults to REACTOME_PATHWAY_GENE_FILE.
+    return: pd.DataFrame
+    """
+    pathway_data = pd.read_csv(pathway_file, sep='\t')
+    map_df = pd.DataFrame(columns=[
+        "pathway_id",
+        "pathway_name",
+        "mapped_genes",
+        "pmids"
+    ])
+    row_index = 0
+    for _, row in pathway_data.iterrows():
+        pathway_id = row['pathway_id']
+        pathway_name = row['pathway_name']
+        pathway_genes = set(row['genes'].split(','))  # Convert to set for faster intersection
+        hits = []
+        pmids = []
+        for partner, pmids_1 in interaction_dict.items():
+            if partner in pathway_genes:
+                hits.append(partner)
+                pmids.append('|'.join(pmids_1))
+        if len(hits) > 0:
+            map_df.loc[row_index] = [pathway_id, pathway_name, hits, pmids]
+            row_index += 1
+    return map_df
+
+
+def pathway_binomial_enrichment_df(map_df, 
+                                   test_gene_count, 
+                                   pathway_file: str=REACTOME_PATHWAY_GENE_FILE,
+                                   fdr_cutoff: float=0.05) -> pd.DataFrame:
+    """Perform pathway enrichment analysis for the mapped dataframe object. The DF object
+    should be generated by function map_interactions_in_pathways().
+
+    Args:
+        map_df (_type_): _description_
+        pathway_file (str, optional): _description_. Defaults to REACTOME_PATHWAY_GENE_FILE.
+    """
+    pathway_data = pd.read_csv(pathway_file, sep='\t')
+    pathway_2_size = {
+        row['pathway_id']: len(row['genes'].split(','))
+        for _, row in pd.read_csv(pathway_file, sep='\t').iterrows()
+    }
+
+    # Compute background size as the total number of unique genes across all pathways
+    all_genes_in_pathways = set(gene for genes in pathway_data['genes'] for gene in genes.split(','))
+    background_size = len(all_genes_in_pathways)
+
+    # Store pathway p-values
+    p_values = []
+    pathway_ids = []
+    pathway_names = []
+    overlap_counts = []
+    mapped_genes_all = []
+    pubmids_all = []
+
+    for _, row in map_df.iterrows():
+        pathway_id = row['pathway_id']
+        pathway_name = row['pathway_name']
+        mapped_genes = row['mapped_genes']
+        # Find the overlap between the pathway genes and the gene set
+        overlap_count = len(mapped_genes)
+
+        if overlap_count > 0:
+            # Probability of a gene being in this pathway by random chance
+            pathway_size = pathway_2_size[pathway_id]
+            expected_prob = pathway_size / background_size
+
+            # Perform binomial test
+            p_value = stats.binomtest(overlap_count, test_gene_count, expected_prob, alternative='greater').pvalue
+
+            # Store results for FDR correction
+            pathway_ids.append(pathway_id)
+            pathway_names.append(pathway_name)
+            overlap_counts.append(overlap_count)
+            p_values.append(p_value)
+            mapped_genes_all.append(mapped_genes)
+            pubmids_all.append(row['pmids'])
+
+    # Apply FDR correction using Benjamini-Hochberg method
+    q_values = smm.multipletests(p_values, method='fdr_bh')[1]
+
+    # Create a DataFrame
+    df = pd.DataFrame({
+        "pathway_id": pathway_ids,
+        "pathway_name": pathway_names,
+        "overlap_count": overlap_counts,
+        'mapped_genes': mapped_genes_all,
+        'pubmids': pubmids_all,
+        "pVal": p_values,
+        "FDR": q_values
+    })
+
+    # Sort by FDR-adjusted q-values (ascending order)
+    df = df.sort_values(by="FDR").reset_index(drop=True)
+    df = df[df['FDR'] < fdr_cutoff]
+    return df
+
+
+def pathway_binomial_enrichment(gene_list, pathway_file: str=REACTOME_PATHWAY_GENE_FILE):
+    """
+    Perform enrichment analysis using the binomial test with FDR correction.
+    
+    :param pathway_data: DataFrame with columns ['pathway_id', 'pathway_name', 'genes']
+    :param gene_list: List of genes to test for enrichment.
+    :return: Pandas DataFrame.
+    """
+    pathway_data = pd.read_csv(pathway_file, sep='\t')
+
+    # Convert gene_list to set for faster lookup
+    gene_set = set(gene_list)
+    test_gene_count = len(gene_set)  # Total genes in the test set
+
+    # Compute background size as the total number of unique genes across all pathways
+    all_genes_in_pathways = set(gene for genes in pathway_data['genes'] for gene in genes.split(','))
+    background_size = len(all_genes_in_pathways)
+
+    # Store pathway p-values
+    p_values = []
+    pathway_ids = []
+    pathway_names = []
+    overlap_counts = []
+
+    for _, row in pathway_data.iterrows():
+        pathway_id = row['pathway_id']
+        pathway_name = row['pathway_name']
+        pathway_genes = set(row['genes'].split(','))  # Convert to set for faster intersection
+
+        # Find the overlap between the pathway genes and the gene set
+        overlap_count = len(gene_set & pathway_genes)
+
+        if overlap_count > 0:
+            # Probability of a gene being in this pathway by random chance
+            pathway_size = len(pathway_genes)
+            expected_prob = pathway_size / background_size
+
+            # Perform binomial test
+            p_value = stats.binomtest(overlap_count, test_gene_count, expected_prob, alternative='greater').pvalue
+
+            # Store results for FDR correction
+            pathway_ids.append(pathway_id)
+            pathway_names.append(pathway_name)
+            overlap_counts.append(overlap_count)
+            p_values.append(p_value)
+
+    # Apply FDR correction using Benjamini-Hochberg method
+    q_values = smm.multipletests(p_values, method='fdr_bh')[1]
+
+    # Create a DataFrame
+    df = pd.DataFrame({
+        "pathway_id": pathway_ids,
+        "pathway_name": pathway_names,
+        "overlap_count": overlap_counts,
+        "pVal": p_values,
+        "FDR": q_values
+    })
+
+    # Sort by FDR-adjusted q-values (ascending order)
+    df = df.sort_values(by="FDR").reset_index(drop=True)
+
+    return df
 
 
 # # Simple text in script for fast performance at VSCode
