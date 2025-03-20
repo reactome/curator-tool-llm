@@ -134,7 +134,7 @@ class PPILoader:
                         # Make a copy
                         ppi_dict_fi_filtered[partner] = set(pmids)
                 return ppi_dict_fi_filtered
-            else: # Use idg.reactome.org. This will be updated in the future to avoid calling that
+            else: # Use idg.reactome.org. This will be updated in the future to use the latest version of the released FI network
                 fi_df = self.query_fis(query_gene, fi_cutoff=fi_cutoff)
                 if fi_df is None or fi_df.empty:
                     return None

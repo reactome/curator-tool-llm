@@ -4,6 +4,8 @@ many request error and also provide an API key.
 """
 
 import json
+import logging
+import logging_config
 import os
 import types
 from typing import Iterator
@@ -20,6 +22,8 @@ pubmed_api_key = os.getenv('PUBMED_API_KEY')
 pubmed_mongo_uri = os.getenv('PUBMED_MONGO_URI')
 pubmed_mongo_db = os.getenv('PUBMED_MONGO_DB')
 pubmed_mongo_collection = os.getenv('PUBMED_MONGO_COLLECTION')
+
+logger = logging.getLogger(__name__)
 
 class ReactomePubMedRetriever(PubMedRetriever):
     # Required by BaseModel
@@ -81,6 +85,7 @@ class ReactomePubMedRetriever(PubMedRetriever):
             db = client[pubmed_mongo_db]
             self.db = db
         collection = self.db[pubmed_mongo_collection]
+        logger.debug('Query abstract from mongodb: {}'.format(pmid))
         result = collection.find_one({'pmid': str(pmid)})
         if result:
             # Follow the format from _parse_article:

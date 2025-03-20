@@ -62,15 +62,21 @@ context: {text_for_interacting_pathways}
 interacting_pathways_summary_prompt = ChatPromptTemplate.from_template(interacting_pathways_summary_prompt_template)
 
 # Use to summarize one single interacting pathway 
+# The following prompt template has been enhanced by ChatGPT
 interacting_pathway_summary_prompt_template = """
-The query gene below is predicted to be functionally related with the pathway described below via interacting genes listed also below.
-Summarize the following text with about {total_words} words, indicating the most important reactions or interactions having interacting
-genes invovled. Make sure the summary has a sentence at the begining say something like gene (i.e. the query gene) is predicted to interact
-with a gene (e.g. one of the gene listed in interacting genes).
+The query gene {gene} is predicted to be functionally related to the pathway described below through its interactions with the genes {interacting_genes}.
 
-Query gene: {gene}
+Summarize the provided pathway description in approximately {total_words} words, highlighting the key reactions or interactions that involve these genes. Ensure that:
+	•	The summary begins with a sentence explicitly stating that {gene} interacts with {interacting_genes}.
+	•	The roles of the interacting genes in the pathway are clearly described.
+	•	No speculative information is included—only summarize what is explicitly stated in the provided text.
 
-{interacting_pathway_text}
+Input Data:
+	•	Query gene: {gene}
+	•	Interacting genes in the pathway: {interacting_genes}
+	•	Roles of interacting genes in the pathway: {roles_of_genes}
+	•	Pathway description: {interacting_pathway_text}
+
 """
 interacting_pathway_summary_prompt = ChatPromptTemplate.from_template(interacting_pathway_summary_prompt_template)
 
