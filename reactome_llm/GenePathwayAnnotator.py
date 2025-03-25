@@ -1,7 +1,7 @@
-from code import interact
 import logging
 from operator import itemgetter
-from turtle import fd
+from typing import List
+from xml.dom.minidom import Document
 
 from langchain.text_splitter import SentenceTransformersTokenTextSplitter
 from langchain.text_splitter import TextSplitter
@@ -14,6 +14,11 @@ from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
 from langchain_community.document_loaders import PyPDFLoader
 
+from sentence_transformers import SentenceTransformer
+
+from sklearn.metrics.pairwise import cosine_similarity
+
+import numpy as np
 import pandas as pd
 
 from paperqa import EmbeddingModel
@@ -23,7 +28,6 @@ import ReactomePrompts as prompts
 
 from ReactomePubMed import ReactomePubMedRetriever
 import ReactomeUtils as utils
-from ReactomeUtils import Pathway
 import ProteinProteinInteractionsLoader as ppi_loader
 
 # This script should be the main entry.
@@ -31,8 +35,18 @@ import logging_config
 logging_config.setup_logging()
 
 logger = logging.getLogger(__name__)
+
+# Disable INFO and lower level logs from the sentence_transformers library
+logging.getLogger('sentence_transformers').setLevel(logging.ERROR)
+
 # Used to embedding
-EMBEDDING_MODEL_NAME = 'pritamdeka/S-PubMedBert-MS-MARCO'
+# NB: Apparent this model cannot generate a good cosine similarity score.
+# e.g. the following two sentences are not similar at all, but the cosine similarity is 0.8
+# sentence1 = "The cat sat on the windowsill, basking in the warm afternoon sun."
+# sentence2 = "Quantum mechanics explores the behavior of particles at the subatomic level."
+# EMBEDDING_MODEL_NAME = 'pritamdeka/S-PubMedBert-MS-MARCO'
+# Use this generic model gives us a better result
+EMBEDDING_MODEL_NAME = 'all-MiniLM-L6-v2'
 
 
 class GenePathwayAnnotator:
@@ -40,7 +54,7 @@ class GenePathwayAnnotator:
     """
 
     def __init__(self) -> None:
-        self.ppi_loader = ppi_loader.PPILoader()
+        self.ppi_loader = None
 
     def _get_text_splitter(self) -> TextSplitter:
         text_splitter = SentenceTransformersTokenTextSplitter(chunk_overlap=10,
@@ -50,7 +64,16 @@ class GenePathwayAnnotator:
 
     def _get_embedding(self, model_name: str = EMBEDDING_MODEL_NAME) -> EmbeddingModel:
         embeddings = HuggingFaceEmbeddings(model_name=model_name)
+        embeddings.model_kwargs['show_progress_bar'] = False
         return embeddings
+    
+    def get_ppi_loader(self):
+        if self.ppi_loader is None:
+            self.ppi_loader = ppi_loader.PPILoader()
+        return self.ppi_loader
+    
+    def set_ppi_loader(self, ppi_loader):
+        self.ppi_loader = ppi_loader
 
     def get_default_llm(self):
         # model = ChatOpenAI(temperature=0, model='gpt-3.5-turbo')
@@ -180,7 +203,7 @@ class GenePathwayAnnotator:
         Returns:
             any: _description_
         """
-        ppi = self.ppi_loader.get_interactions(gene,
+        ppi = self.get_ppi_loader().get_interactions(gene,
                                                filter_ppis_with_fi=True,
                                                fi_cutoff=fi_cutoff)
         if ppi is None:
@@ -241,10 +264,10 @@ class GenePathwayAnnotator:
 
         return result, enrichment_df
 
-    async def build_abstract_vector_db_for_gene(self,
-                                                query_gene: str,
-                                                top_k_results: int = 8,
-                                                max_query_length: int = 1000) -> VectorStore:
+    async def query_pubmed_abstracts_for_gene(self,
+                                            query_gene: str,
+                                            top_k_results: int = 8,
+                                            max_query_length: int = 1000) -> List[Document]:
         """Query pubmed about interactions, reactions, and pathways for a gene and return
         a vector store for collected abstracts from PubMed.
 
@@ -271,13 +294,30 @@ class GenePathwayAnnotator:
         # In case nothing is returned
         if len(pubmed_result) == 0:
             raise NoAbstractFoundError(query_gene)
+        
+        return pubmed_result
+    
 
+    async def build_abstract_vector_db_for_gene(self,
+                                                pubmed_result: List[Document]) -> VectorStore:
+        """Query pubmed about interactions, reactions, and pathways for a gene and return
+        a vector store for collected abstracts from PubMed.
+
+        Args:
+            query_gene (str): _description_
+            top_k_results (int, optional): _description_. Defaults to 8.
+            max_query_length (int, optional): _description_. Defaults to 1000.
+
+        Returns:
+            any: _description_
+        """
         text_splitter = self._get_text_splitter()
         docs = text_splitter.split_documents(pubmed_result)
         embeddings = self._get_embedding()
         pubmed_db = FAISS.from_documents(docs, embeddings)
 
         return pubmed_db
+
 
     async def write_summary_of_abstract_pathway_text(self,
                                                      query_gene: str,
@@ -375,11 +415,11 @@ class GenePathwayAnnotator:
         return result
 
     def query_fis(self, gene, fi_cutoff):
-        return self.ppi_loader.get_interactions(gene, fi_cutoff=fi_cutoff)
+        return self.get_ppi_loader().get_interactions(gene, fi_cutoff=fi_cutoff)
 
     async def write_summary_of_abstracts_for_gene_annotation(self,
                                                              query_gene: str,
-                                                             pubmed_db: VectorStore,
+                                                             pubmed_results: List[Document],
                                                              fi_cutoff: float = 0.8,
                                                              fdr_cutoff: float = 0.05,
                                                              pathway_count: int = 8,
@@ -395,7 +435,7 @@ class GenePathwayAnnotator:
         Returns:
             _type_: _description_
         """
-        interaction_dict = self.ppi_loader.get_interactions(query_gene, fi_cutoff=fi_cutoff, filter_ppis_with_fi=True)
+        interaction_dict = self.get_ppi_loader().get_interactions(query_gene, fi_cutoff=fi_cutoff, filter_ppis_with_fi=True)
         interaction_map_df = utils.map_interactions_in_pathways(interaction_dict)
         pathway_enrichment_df = utils.pathway_binomial_enrichment_df(interaction_map_df,
                                                                      interaction_dict.keys(),
@@ -407,9 +447,9 @@ class GenePathwayAnnotator:
         if pathway_enrichment_df.shape[0] > pathway_count: # Pick the top pathways
             pathway_enrichment_df = pathway_enrichment_df.head(pathway_count)
         
-        pathway_abstract_pd = await self.build_pathway_abstract_df(query_gene,
+        pathway_abstract_pd = await self.build_pathway_abstract_df_from_docs(query_gene,
                                                                    pathway_enrichment_df,
-                                                                   pubmed_db,
+                                                                   pubmed_results,
                                                                    model)
         if pathway_abstract_pd is None or pathway_abstract_pd.empty:
             raise NoAbstractSupportingInteractingPathwayError(query_gene)
@@ -417,7 +457,94 @@ class GenePathwayAnnotator:
         abstract_result_for_multiple_pathways = await self.summarize_abstract_results_for_multiple_pathways(query_gene,
                                                                                                             pathway_abstract_pd,
                                                                                                             model)
-        return abstract_result_for_multiple_pathways
+        return abstract_result_for_multiple_pathways, pathway_abstract_pd
+    
+
+    async def build_pathway_abstract_df_from_docs(self,
+                                                query_gene: str,
+                                                pathway_enrichment_results_df: pd.DataFrame,
+                                                pubmed_results: List[Document],
+                                                model: BaseChatModel) -> pd.DataFrame:
+        """Build the pathway abstract dataframe from the abstracts directly without building the index
+        using vector store. We use this method so that we can have a fine control on retrieving the abstracts.
+
+        Args:
+            query_gene (str): _description_
+            pathway_enrichment_results_df (pd.DataFrame): _description_
+            pubmed_db (VectorStore): _description_
+            model (BaseChatModel): _description_
+
+        Returns:
+            pd.DataFrame: _description_
+        """
+        # To increase the embedding efficiency, we will cache the results
+        pmid2embedding = {}
+        for doc in pubmed_results:
+            pmid2embedding[doc.metadata['uid']] = self._embed_text(doc.page_content)
+        pathway_abstract_pd = pd.DataFrame(
+            columns=['pathway', 'ppi_genes', 'ppi_genes_pmids', 'pmid', 'title', 'abstract', 'score', 'summary'])
+        row_index = 0
+        for _, row in pathway_enrichment_results_df.iterrows():
+            pathway = row['pathway_name']
+            interacting_genes = row['mapped_genes']
+            # Need the text only
+            pathway_text, _, _ = utils.create_interacting_pathway_text(pathway, interacting_genes)
+            if pathway_text is None:
+                continue
+
+            best_pmid = None
+            best_abstract = None
+            best_score = -1.0
+            for doc in pubmed_results:
+                cos_similarity = self._average_cos_similiarity(pathway_text, pmid2embedding[doc.metadata['uid']])
+                if best_pmid is None or cos_similarity > best_score:
+                    best_pmid = doc.metadata['uid']
+                    best_score = cos_similarity
+                    best_abstract = doc.page_content
+            logger.debug('\n\nBest matched abstract: {}'.format(best_abstract))
+            # TODO: 1). Make sure interacting_genes are for the genes in the specific pathway only, not the query genes
+            # 2). Make sure the pathway text and the abstract text are the full, not just the splitted ones.
+            abstract_result = await self.write_summary_of_abstract_pathway_text(query_gene,
+                                                                                interacting_genes,
+                                                                                pathway,
+                                                                                pathway_text,
+                                                                                best_abstract,
+                                                                                model)
+            pathway_abstract_pd.loc[row_index] = [pathway,
+                                            interacting_genes,
+                                            row['pmids_all'],
+                                            best_pmid,
+                                            '',
+                                            best_abstract,
+                                            best_score,
+                                            abstract_result['answer'].content]
+            row_index += 1
+        logger.debug('pathway_abstract_pd:\n{}'.format(pathway_abstract_pd.head()))
+        return pathway_abstract_pd
+    
+    def _embed_text(self, text1: str) -> np.array:
+        # Split the texts into chunks
+        chunks1 = self._get_text_splitter().split_text(text1)
+        
+        # Get embeddings for each chunk
+        # embedder: HuggingFaceEmbeddings = self._get_embedding()
+        embedder = SentenceTransformer(EMBEDDING_MODEL_NAME)
+        embeddings1 = np.array([embedder.encode(chunk, show_progress_bar=False) for chunk in chunks1])
+        return embeddings1
+    
+    def _average_cos_similiarity(self, text1: str, abstract_embeddings: np.array) -> float:
+        embeddings1 = self._embed_text(text1)
+        
+        # Calculate pairwise cosine similarities between the chunks of text1 and text2
+        similarity_scores = []
+        for emb1 in embeddings1:
+            for emb2 in abstract_embeddings:
+                similarity = cosine_similarity([emb1], [emb2])[0][0]  # Cosine similarity score
+                similarity_scores.append(similarity)
+        
+        # Return the average of all pairwise similarities
+        avg_similarity = np.mean(similarity_scores)
+        return avg_similarity
 
     async def build_pathway_abstract_df(self,
                                         query_gene: str,
