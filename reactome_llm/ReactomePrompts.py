@@ -80,6 +80,29 @@ Input Data:
 """
 interacting_pathway_summary_prompt = ChatPromptTemplate.from_template(interacting_pathway_summary_prompt_template)
 
+
+# Used to evaluate if the abstract text is matched to the pathway text. This is used to validate the found match based on semantic 
+# similarity. 
+abstract_pathway_match_prompt_template = """
+You are an expert in biology. Evaluate whether the following sections of text describe the same biological pathway.  
+
+- The first section is labeled **"pathway_text:"**  
+- The second section is labeled **"abstract_text:"**  
+
+Assign a similarity score between **1 and 10**, where:  
+- **10** indicates a high likelihood that they describe the same pathway.  
+- **1** indicates a very low likelihood.  
+
+### **Response Format:**  
+score: XX  
+
+### **Text Sections:**  
+**pathway_text:** {pathway_text}  
+**abstract_text:** {abstract_text} 
+"""
+abstract_pathway_match_prompt = ChatPromptTemplate.from_template(abstract_pathway_match_prompt_template)
+
+
 # Used to summarize the abstract text that are matched to an interacting pathway
 abstract_summary_prompt_template = """
 The text in the abstract section is excerpts of scientific papers' abstracts collected from PubMed and best matched with pathway text below. 
@@ -128,3 +151,18 @@ document: {document}
 """
 relationship_extraction_prompt = ChatPromptTemplate.from_template(relationship_extraction_prompt_template)
 
+
+# Used to summarize abstracts collected from protein interaction databases (e.g. IntAct and BioGrid)
+protein_interaction_abstracts_summary_prompt_template = """
+You are an expert in biology specializing in protein interactions and pathways. Your task is to summarize the following abstracts, which describe sources of protein interactions for the gene ”{query_gene}”.
+	•	If the gene ”{query_gene}” is mentioned, highlight its occurrence in the summary.
+    •	If any of the interacting genes "{interactors}" is mentioned, highlight them in the summary.
+	•	If any text relates to the pathway ”{pathway}”, highlight it as well.
+	•	Ensure your summary includes citations for each statement using the format [PMID: XXXXXX].
+
+The abstracts are listed below, each beginning with “PMID XXXXXX:”. Your summary should be concise, ensuring the total word count does not exceed {total_words}.
+
+Context (Abstracts):
+{context}
+"""
+protein_interaction_abstracts_summary_prompt = ChatPromptTemplate.from_template(protein_interaction_abstracts_summary_prompt_template)

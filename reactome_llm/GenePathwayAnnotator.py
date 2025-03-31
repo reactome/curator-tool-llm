@@ -1,5 +1,6 @@
 import logging
 from operator import itemgetter
+import re
 from typing import List
 from xml.dom.minidom import Document
 
@@ -22,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 from paperqa import EmbeddingModel
-from ReactomeLLMErrors import NoAbstractFoundError, NoAbstractSupportingInteractingPathwayError, NoInteractingPathwayFoundError
+from ReactomeLLMErrors import NoAbstractFoundError, NoAbstractSupportingInteractingPathwayError, NoAbstractSupportingProteinInteractions, NoInteractingPathwayFoundError
 
 import ReactomePrompts as prompts
 
@@ -67,6 +68,17 @@ class GenePathwayAnnotator:
         embeddings.model_kwargs['show_progress_bar'] = False
         return embeddings
     
+    def _get_pubmed_retriver(self, 
+                             top_k_results: int = 8,
+                             max_query_length: int = 1000) -> ReactomePubMedRetriever:
+        pubmed_retriever = ReactomePubMedRetriever()
+        # Make sure it doesn't exceed the quote: 3 per second. use 0.5.
+        pubmed_retriever.sleep_time = 0.5
+        pubmed_retriever.top_k_results = top_k_results
+        pubmed_retriever.MAX_QUERY_LENGTH = max_query_length
+        pubmed_retriever.doc_content_chars_max = max_query_length * top_k_results
+        return pubmed_retriever
+    
     def get_ppi_loader(self):
         if self.ppi_loader is None:
             self.ppi_loader = ppi_loader.PPILoader()
@@ -79,37 +91,6 @@ class GenePathwayAnnotator:
         # model = ChatOpenAI(temperature=0, model='gpt-3.5-turbo')
         model = ChatOpenAI(temperature=0, model='gpt-4o-mini')
         return model
-
-    async def write_summary_of_interacting_pathway_for_unannotated_gene(self,
-                                                                        query_gene: str,
-                                                                        interacting_genes: list[str],
-                                                                        pathway: str,
-                                                                        model: any = None,
-                                                                        total_words: int = 150) -> any:
-        """Write a summary for one single interacting pathway for an unannotated gene.
-
-        Args:
-            gene (str): _description_
-            pathway_text (str): _description_
-            total_words (int, optional): _description_. Defaults to 150.
-
-        Returns:
-            any: _description_
-        """
-        pathway_text, interacting_genes_text, gene_roles_text = utils.create_interacting_pathway_text(pathway,
-                                                                                                      interacting_genes)
-        if pathway_text is None:
-            return None
-
-        prompt = prompts.interacting_pathway_summary_prompt
-        parameters = {'gene': query_gene,
-                      'total_words': total_words,
-                      'interacting_genes': interacting_genes_text,
-                      'roles_of_genes': gene_roles_text,
-                      'interacting_pathway_text': pathway_text,
-                      'docs': '{}\n\n{}\n\n{}'.format(pathway_text, interacting_genes_text, gene_roles_text)}
-        return self.invoke_llm(parameters, prompt, model)
-
 
     async def write_summary_of_annotated_pathway(self,
                                                  query_gene: str,
@@ -182,6 +163,37 @@ class GenePathwayAnnotator:
 
         return result
 
+    async def write_summary_of_interacting_pathway_for_unannotated_gene(self,
+                                                                        query_gene: str,
+                                                                        interacting_genes: list[str],
+                                                                        pathway: str,
+                                                                        model: any = None,
+                                                                        total_words: int = 150) -> any:
+        """Write a summary for one single interacting pathway for an unannotated gene.
+
+        Args:
+            gene (str): _description_
+            pathway_text (str): _description_
+            total_words (int, optional): _description_. Defaults to 150.
+
+        Returns:
+            any: _description_
+        """
+        pathway_text, interacting_genes_text, gene_roles_text = utils.create_interacting_pathway_text(pathway,
+                                                                                                      interacting_genes)
+        if pathway_text is None:
+            return None
+
+        prompt = prompts.interacting_pathway_summary_prompt
+        parameters = {'gene': query_gene,
+                      'total_words': total_words,
+                      'interacting_genes': interacting_genes_text,
+                      'roles_of_genes': gene_roles_text,
+                      'interacting_pathway_text': pathway_text,
+                      'docs': '{}\n\n{}\n\n{}'.format(pathway_text, interacting_genes_text, gene_roles_text)}
+        return self.invoke_llm(parameters, prompt, model)
+
+
     async def write_summary_of_interacting_pathways_for_unannotated_gene(self,
                                                                          gene: str,
                                                                          model: any=None,
@@ -190,7 +202,8 @@ class GenePathwayAnnotator:
                                                                          pathway_count: int = 8,
                                                                          total_words: int = 300) -> any:
         """Write a summary for a set of interacting pathways for a gene that has not been annotated in Reactome.
-        The interacting pathways are fetched based on PPIs collected from IntAct and BioGrid.
+        The interacting pathways are fetched based on PPIs collected from IntAct and BioGrid. The summary has not
+        been supported by any abstract.
 
         Args:
             gene (str): _description_
@@ -263,6 +276,73 @@ class GenePathwayAnnotator:
             selected_pathways)]
 
         return result, enrichment_df
+    
+    async def summarize_pubmed_abstracts_for_interactions(self,
+                                                          query_gene: str,
+                                                          pathway: str,
+                                                          interactors: list,
+                                                          pmids: set,
+                                                          model: any = None,
+                                                          total_words: int=300,
+                                                          top_abstracts: int = 8) -> any:
+        """Write a summary for a list of abstracts that are collected from PPIs.
+
+        Args:
+            pmids (set): _description_
+            model (any): _description_
+            top_abstracts (int, optional): _description_. Defaults to 8.
+
+        Returns:
+            any: _description_
+        """
+        # Expected to see abstracts
+        abstract_df = self._select_top_abstracts_for_interactions(pathway, pmids, top_abstracts)
+        if abstract_df is None or abstract_df.empty:
+            return NoAbstractSupportingProteinInteractions(query_gene)
+        abstract_text = ''
+        for _, row in abstract_df.iterrows():
+            pmid = row['pmid']
+            abstract = row['abstract']
+            abstract_text = '{}PMID {}:{}\n\n'.format(abstract_text, pmid, abstract)
+        prompt = prompts.protein_interaction_abstracts_summary_prompt
+        parameters = {'query_gene': query_gene,
+                      'interactors': ','.join(interactors),
+                      'pathway': pathway,
+                      'context': abstract_text,
+                      'total_words': total_words,
+                      'docs': abstract_text}
+        result = self.invoke_llm(parameters, prompt, model)
+        return result, abstract_df
+
+    def _select_top_abstracts_for_interactions(self, pathway, pmids, top_abstract) -> pd.DataFrame:
+        # Need to do filtering
+        pubmed_retriever = self._get_pubmed_retriver()
+        # Use pd.DataFrame as the data structure so that we can do sorting
+        abstract_df = pd.DataFrame(
+            columns=['pathway', 'pmid', 'abstract', 'cos_score']
+        )
+        row = 0
+        # Pull abstracts
+        for pmid in pmids:
+            abstract = pubmed_retriever.get_abstract_from_mongodb(pmid)
+            if abstract is None:
+                continue
+            abstract_df.loc[row] = [pathway, pmid, abstract['Summary'], None]
+            row += 1
+        if abstract_df.shape[0] > top_abstract:
+            # Sort based on pathway information
+            pathway_embedding = self._embed_text(pathway)[0] # Pathway is just a name and there should be just one embedding
+            for _, row in abstract_df.iterrows():
+                abstract: HuggingFaceEmbeddings = row['abstract']
+                # This is a quick way. We basically just do a simple
+                abstract_embeddings = self._embed_text(abstract)
+                cos_score = np.max([cosine_similarity([pathway_embedding], [abstract_embedding])[0][0] 
+                             for abstract_embedding in abstract_embeddings])
+                row['cos_score'] = cos_score
+            abstract_df.sort_values(by=['cos_score'], ascending=False, inplace=True)
+            abstract_df = abstract_df.head(top_abstract)
+        return abstract_df
+    
 
     async def query_pubmed_abstracts_for_gene(self,
                                             query_gene: str,
@@ -279,12 +359,7 @@ class GenePathwayAnnotator:
         Returns:
             any: _description_
         """
-        pubmed_retriever = ReactomePubMedRetriever()
-        # Make sure it doesn't exceed the quote: 3 per second. use 0.5.
-        pubmed_retriever.sleep_time = 0.5
-        pubmed_retriever.top_k_results = top_k_results
-        pubmed_retriever.MAX_QUERY_LENGTH = max_query_length
-        pubmed_retriever.doc_content_chars_max = max_query_length * top_k_results
+        pubmed_retriever = self._get_pubmed_retriver()
 
         pubmed_query = '{} interactions or {} reactions or {} pathways'.format(
             query_gene, query_gene, query_gene)
@@ -318,8 +393,7 @@ class GenePathwayAnnotator:
 
         return pubmed_db
 
-
-    async def write_summary_of_abstract_pathway_text(self,
+    async def _write_summary_of_abstract_pathway_text(self,
                                                      query_gene: str,
                                                      interacting_genes: list[str],
                                                      pathway: str,
@@ -327,7 +401,7 @@ class GenePathwayAnnotator:
                                                      abstract_text: str,
                                                      model: any,
                                                      total_words: int = 150) -> any:
-        """Create a summary for collected abstracts that are related to pathways.
+        """Create a summary for an abstract that is collected for a pathway.
 
         Args:
             query_gene (str): _description_
@@ -373,7 +447,7 @@ class GenePathwayAnnotator:
         result = llm_chain.invoke(parameters)
         return result
 
-    async def summarize_abstract_results_for_multiple_pathways(self,
+    async def _summarize_abstract_results_for_multiple_pathways(self,
                                                                query_gene: str,
                                                                pathway_abstract_summary_df: pd.DataFrame,
                                                                model: any,
@@ -417,13 +491,15 @@ class GenePathwayAnnotator:
     def query_fis(self, gene, fi_cutoff):
         return self.get_ppi_loader().get_interactions(gene, fi_cutoff=fi_cutoff)
 
-    async def write_summary_of_abstracts_for_gene_annotation(self,
-                                                             query_gene: str,
-                                                             pubmed_results: List[Document],
-                                                             fi_cutoff: float = 0.8,
-                                                             fdr_cutoff: float = 0.05,
-                                                             pathway_count: int = 8,
-                                                             model: any = None):
+    async def write_summary_for_gene_annotation(self,
+                                                query_gene: str,
+                                                pubmed_results: List[Document],
+                                                fi_cutoff: float = 0.8,
+                                                fdr_cutoff: float = 0.05,
+                                                pathway_count: int = 8,
+                                                pathway_abstract_similiary: float = 0.4,
+                                                llm_score: int = 3,
+                                                model: any = None):
         """Write a summary for a query gene by collecting Reactome pathway related abstracts from PubMed.
         This function basically is a wrap of multiple calls of LLMs, as well as PubMed retrieval.
 
@@ -450,21 +526,38 @@ class GenePathwayAnnotator:
         pathway_abstract_pd = await self.build_pathway_abstract_df_from_docs(query_gene,
                                                                    pathway_enrichment_df,
                                                                    pubmed_results,
-                                                                   model)
+                                                                   model,
+                                                                   similarity=pathway_abstract_similiary,
+                                                                   llm_score=llm_score)
         if pathway_abstract_pd is None or pathway_abstract_pd.empty:
             raise NoAbstractSupportingInteractingPathwayError(query_gene)
 
-        abstract_result_for_multiple_pathways = await self.summarize_abstract_results_for_multiple_pathways(query_gene,
+        abstract_result_for_multiple_pathways = await self._summarize_abstract_results_for_multiple_pathways(query_gene,
                                                                                                             pathway_abstract_pd,
                                                                                                             model)
         return abstract_result_for_multiple_pathways, pathway_abstract_pd
+
+
+    async def validate_similarity_of_abstract_pathway_text(self,
+                                                           pathway_text: str,
+                                                           abstract_text: str,
+                                                           model: any) -> any:
+        prompt = prompts.abstract_pathway_match_prompt
+        parameters = {'pathway_text': pathway_text,
+                      'abstract_text': abstract_text,
+                      'docs': '{}\n\n{}'.format(pathway_text, abstract_text)}
+        result = self.invoke_llm(parameters, prompt, model)
+        return result
     
 
     async def build_pathway_abstract_df_from_docs(self,
                                                 query_gene: str,
                                                 pathway_enrichment_results_df: pd.DataFrame,
                                                 pubmed_results: List[Document],
-                                                model: BaseChatModel) -> pd.DataFrame:
+                                                model: BaseChatModel,
+                                                total_abstracts: int=3,
+                                                similarity: float=0.4,
+                                                llm_score: int=3) -> pd.DataFrame:
         """Build the pathway abstract dataframe from the abstracts directly without building the index
         using vector store. We use this method so that we can have a fine control on retrieving the abstracts.
 
@@ -473,7 +566,9 @@ class GenePathwayAnnotator:
             pathway_enrichment_results_df (pd.DataFrame): _description_
             pubmed_db (VectorStore): _description_
             model (BaseChatModel): _description_
-
+            total_abstracts: the number of the abstracts collected for a pathway.
+            similarity: the cosine similarity used to filter out abstracts that have less similarity.
+            llm_score: the similarity score determined by the llm model.
         Returns:
             pd.DataFrame: _description_
         """
@@ -482,7 +577,8 @@ class GenePathwayAnnotator:
         for doc in pubmed_results:
             pmid2embedding[doc.metadata['uid']] = self._embed_text(doc.page_content)
         pathway_abstract_pd = pd.DataFrame(
-            columns=['pathway', 'ppi_genes', 'ppi_genes_pmids', 'pmid', 'title', 'abstract', 'score', 'summary'])
+            columns=['pathway', 'pathway_text', 'ppi_genes', 'ppi_genes_pmids', 
+                     'pmid', 'title', 'abstract', 'cos_score', 'summary', 'llm_score'])
         row_index = 0
         for _, row in pathway_enrichment_results_df.iterrows():
             pathway = row['pathway_name']
@@ -491,34 +587,59 @@ class GenePathwayAnnotator:
             pathway_text, _, _ = utils.create_interacting_pathway_text(pathway, interacting_genes)
             if pathway_text is None:
                 continue
-
-            best_pmid = None
-            best_abstract = None
-            best_score = -1.0
+            # Use the pd.DataFrame so that we can sort if needed
+            pathway_abstract_match_pd = pd.DataFrame(
+                columns=['pmid', 'abstract', 'cos_score', 'llm_score']
+            )
+            pathway_abstract_match_pd_row = 0
             for doc in pubmed_results:
-                cos_similarity = self._average_cos_similiarity(pathway_text, pmid2embedding[doc.metadata['uid']])
-                if best_pmid is None or cos_similarity > best_score:
-                    best_pmid = doc.metadata['uid']
-                    best_score = cos_similarity
-                    best_abstract = doc.page_content
-            logger.debug('\n\nBest matched abstract: {}'.format(best_abstract))
-            # TODO: 1). Make sure interacting_genes are for the genes in the specific pathway only, not the query genes
-            # 2). Make sure the pathway text and the abstract text are the full, not just the splitted ones.
-            abstract_result = await self.write_summary_of_abstract_pathway_text(query_gene,
-                                                                                interacting_genes,
-                                                                                pathway,
-                                                                                pathway_text,
-                                                                                best_abstract,
+                pmid = doc.metadata['uid']
+                abstract = doc.page_content
+                cos_similarity = self._average_cos_similiarity(pathway_text, pmid2embedding[pmid])
+                if cos_similarity < similarity:
+                    continue
+                llm_similarity_result = await self.validate_similarity_of_abstract_pathway_text(pathway_text, 
+                                                                                abstract,
                                                                                 model)
-            pathway_abstract_pd.loc[row_index] = [pathway,
-                                            interacting_genes,
-                                            row['pmids_all'],
-                                            best_pmid,
-                                            '',
-                                            best_abstract,
-                                            best_score,
-                                            abstract_result['answer'].content]
-            row_index += 1
+                # Cannot call directly in the above statement.
+                llm_similarity_result = llm_similarity_result['answer'].content
+                # extract the score using RE
+                match = re.search(r"score:\s*(\d+)", llm_similarity_result)
+                llm_score_result = int(match.group(1)) if match else None
+                if llm_score_result is not None and llm_score_result < llm_score:
+                    continue
+                pathway_abstract_match_pd.loc[pathway_abstract_match_pd_row] = [
+                    pmid,
+                    abstract,
+                    cos_similarity,
+                    llm_score_result
+                ]
+                pathway_abstract_match_pd_row += 1
+            # Nothing for this interacting pathway. Try next.
+            if pathway_abstract_match_pd.empty:
+                continue
+            # Sort and take the top. Sort is based on cos_score. But we may sore based on the sum of the two scores.
+            pathway_abstract_match_pd.sort_values(by=['cos_score', 'llm_score'], inplace=True, ascending=False)
+            pathway_abstract_match_pd = pathway_abstract_match_pd.head(total_abstracts)
+            for _, match_row in pathway_abstract_match_pd.iterrows():
+                abstract_result = await self._write_summary_of_abstract_pathway_text(query_gene,
+                                                                                    interacting_genes,
+                                                                                    pathway,
+                                                                                    pathway_text,
+                                                                                    match_row['abstract'],
+                                                                                    model)
+
+                pathway_abstract_pd.loc[row_index] = [pathway,
+                                                    pathway_text,
+                                                    interacting_genes,
+                                                    row['pmids_all'],
+                                                    match_row['pmid'],
+                                                    '',
+                                                    match_row['abstract'],
+                                                    match_row['cos_score'],
+                                                    abstract_result['answer'].content,
+                                                    match_row['llm_score']]
+                row_index += 1
         logger.debug('pathway_abstract_pd:\n{}'.format(pathway_abstract_pd.head()))
         return pathway_abstract_pd
     
@@ -545,59 +666,7 @@ class GenePathwayAnnotator:
         # Return the average of all pairwise similarities
         avg_similarity = np.mean(similarity_scores)
         return avg_similarity
-
-    async def build_pathway_abstract_df(self,
-                                        query_gene: str,
-                                        pathway_enrichment_results_df: pd.DataFrame,
-                                        pubmed_db: VectorStore,
-                                        model: BaseChatModel) -> pd.DataFrame:
-        pathway_abstract_pd = pd.DataFrame(
-            columns=['pathway', 'ppi_genes', 'ppi_genes_pmids', 'pmid', 'title', 'abstract', 'score', 'summary'])
-        row_index = 0
-        text_splitter = self._get_text_splitter()
-        for _, row in pathway_enrichment_results_df.iterrows():
-            pathway = row['pathway_name']
-            interacting_genes = row['mapped_genes']
-            # Need the text only
-            pathway_text, _, _ = utils.create_interacting_pathway_text(pathway, interacting_genes)
-            if pathway_text is None:
-                continue
-            splitted_texts = text_splitter.split_text(pathway_text)
-            best_matched_abstract = None
-            for splitted_text in splitted_texts:
-                # Just need the top scored text
-                # This is a two element tuple: document and score
-                matched_abstract_score = pubmed_db.similarity_search_with_score(splitted_text)[
-                    0]
-                # print('{}:\n{}'.format(splitted_text, matched_abstract_score))
-                if not best_matched_abstract:
-                    best_matched_abstract = matched_abstract_score
-                else:
-                    if matched_abstract_score[1] < best_matched_abstract[1]:
-                        best_matched_abstract = matched_abstract_score
-            logger.debug('\n\nBest matched abstract: {}'.format(
-                best_matched_abstract))
-            # TODO: 1). Make sure interacting_genes are for the genes in the specific pathway only, not the query genes
-            # 2). Make sure the pathway text and the abstract text are the full, not just the splitted ones.
-            abstract_result = await self.write_summary_of_abstract_pathway_text(query_gene,
-                                                                                interacting_genes,
-                                                                                pathway,
-                                                                                splitted_text,
-                                                                                best_matched_abstract[0].page_content,
-                                                                                model)
-            # In case there is no title
-            title = '' if 'Title' not in best_matched_abstract[0].metadata.keys() else best_matched_abstract[0].metadata['Title']
-            pathway_abstract_pd.loc[row_index] = [pathway,
-                                            interacting_genes,
-                                            row['pmids_all'],
-                                            best_matched_abstract[0].metadata['uid'],
-                                            title,
-                                            best_matched_abstract[0].page_content,
-                                            best_matched_abstract[1],
-                                            abstract_result['answer'].content]
-            row_index += 1
-        logger.debug('pathway_abstract_pd:\n{}'.format(pathway_abstract_pd.head()))
-        return pathway_abstract_pd
+        
 
     def analyze_full_paper(self,
                            paper_file_name: str,
