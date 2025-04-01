@@ -83,18 +83,25 @@ interacting_pathway_summary_prompt = ChatPromptTemplate.from_template(interactin
 
 # Used to evaluate if the abstract text is matched to the pathway text. This is used to validate the found match based on semantic 
 # similarity. We may use the pathway name directly here. However, apparently it looks like using the pathway text is better, providing
-# more specific results. 
+# more specific results. This is an example of using Chain of Thought (CoT) prompt.
 abstract_pathway_match_prompt_template = """
 You are an expert in biology. Your task is to evaluate whether the following two text sections describe the same biological pathway.  
 
-The specific pathway of interest is: **"{pathway}"**.  
+The pathway of interest is: **"{pathway}"**.  
 
-### **Instructions:**  
-- Compare the **pathway_text** and **abstract_text** to determine their similarity in describing the pathway "{pathway}".  
-- Focus on **key biological concepts**, **molecular mechanisms**, and **functional descriptions**.  
-- Assign a **similarity score between 1 and 10**, where:  
-  - **10** → The texts describe the same pathway with high confidence.  
-  - **1** → The texts are unrelated or only weakly connected.  
+### **Evaluation Process (Think Step by Step):**  
+1. **Extract Key Concepts**  
+   - Identify genes, proteins, molecules, and biological processes related to **"{pathway}"** in **pathway_text**.  
+   - Identify the same in **abstract_text**.  
+
+2. **Compare Functional Descriptions**  
+   - Do both texts describe **how** "{pathway}" functions?  
+   - Do they mention the **same molecular interactions, enzymes, or regulatory steps**?  
+
+3. **Assess Overall Similarity**  
+   - If both texts describe **"{pathway}" in the same context**, assign a **high score (8-10)**.  
+   - If they describe related but different mechanisms, assign a **moderate score (4-7)**.  
+   - If "{pathway}" is **not relevant**, assign a **low score (1-3)**.  
 
 ### **Response Format:**  
 Return only the similarity score in the following format:  
