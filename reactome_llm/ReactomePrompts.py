@@ -82,23 +82,30 @@ interacting_pathway_summary_prompt = ChatPromptTemplate.from_template(interactin
 
 
 # Used to evaluate if the abstract text is matched to the pathway text. This is used to validate the found match based on semantic 
-# similarity. 
+# similarity. We may use the pathway name directly here. However, apparently it looks like using the pathway text is better, providing
+# more specific results. 
 abstract_pathway_match_prompt_template = """
-You are an expert in biology. Evaluate whether the following sections of text describe the same biological pathway.  
+You are an expert in biology. Your task is to evaluate whether the following two text sections describe the same biological pathway.  
 
-- The first section is labeled **"pathway_text:"**  
-- The second section is labeled **"abstract_text:"**  
+The specific pathway of interest is: **"{pathway}"**.  
 
-Assign a similarity score between **1 and 10**, where:  
-- **10** indicates a high likelihood that they describe the same pathway.  
-- **1** indicates a very low likelihood.  
+### **Instructions:**  
+- Compare the **pathway_text** and **abstract_text** to determine their similarity in describing the pathway "{pathway}".  
+- Focus on **key biological concepts**, **molecular mechanisms**, and **functional descriptions**.  
+- Assign a **similarity score between 1 and 10**, where:  
+  - **10** → The texts describe the same pathway with high confidence.  
+  - **1** → The texts are unrelated or only weakly connected.  
 
 ### **Response Format:**  
-score: XX  
+Return only the similarity score in the following format:  
+**score: XX**  
 
 ### **Text Sections:**  
-**pathway_text:** {pathway_text}  
-**abstract_text:** {abstract_text} 
+**pathway_text:**  
+{pathway_text}  
+
+**abstract_text:**  
+{abstract_text}  
 """
 abstract_pathway_match_prompt = ChatPromptTemplate.from_template(abstract_pathway_match_prompt_template)
 

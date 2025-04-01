@@ -539,11 +539,13 @@ class GenePathwayAnnotator:
 
 
     async def validate_similarity_of_abstract_pathway_text(self,
+                                                           pathway: str,
                                                            pathway_text: str,
                                                            abstract_text: str,
                                                            model: any) -> any:
         prompt = prompts.abstract_pathway_match_prompt
-        parameters = {'pathway_text': pathway_text,
+        parameters = {'pathway': pathway,
+                      'pathway_text': pathway_text,
                       'abstract_text': abstract_text,
                       'docs': '{}\n\n{}'.format(pathway_text, abstract_text)}
         result = self.invoke_llm(parameters, prompt, model)
@@ -595,12 +597,14 @@ class GenePathwayAnnotator:
             for doc in pubmed_results:
                 pmid = doc.metadata['uid']
                 abstract = doc.page_content
-                cos_similarity = self._average_cos_similiarity(pathway_text, pmid2embedding[pmid])
+                cos_similarity = self._average_cos_similiarity(
+                    pathway_text, pmid2embedding[pmid])
                 if cos_similarity < similarity:
                     continue
-                llm_similarity_result = await self.validate_similarity_of_abstract_pathway_text(pathway_text, 
-                                                                                abstract,
-                                                                                model)
+                llm_similarity_result = await self.validate_similarity_of_abstract_pathway_text(
+                    pathway, pathway_text,
+                    abstract,
+                    model)
                 # Cannot call directly in the above statement.
                 llm_similarity_result = llm_similarity_result['answer'].content
                 # extract the score using RE
