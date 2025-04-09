@@ -56,6 +56,7 @@ class GenePathwayAnnotator:
 
     def __init__(self) -> None:
         self.ppi_loader = None
+        self.model = None
 
     def _get_text_splitter(self) -> TextSplitter:
         text_splitter = SentenceTransformersTokenTextSplitter(chunk_overlap=10,
@@ -87,7 +88,17 @@ class GenePathwayAnnotator:
     def set_ppi_loader(self, ppi_loader):
         self.ppi_loader = ppi_loader
 
+    def set_model(self, model: any):
+        """Set the model to be used.
+
+        Args:
+            model (any): _description_
+        """
+        self.model = model
+
     def get_default_llm(self):
+        if self.model is not None:
+            return self.model
         # model = ChatOpenAI(temperature=0, model='gpt-3.5-turbo')
         model = ChatOpenAI(temperature=0, model='gpt-4o-mini')
         return model
@@ -359,8 +370,9 @@ class GenePathwayAnnotator:
         Returns:
             any: _description_
         """
-        pubmed_retriever = self._get_pubmed_retriver()
-
+        pubmed_retriever = self._get_pubmed_retriver(top_k_results=top_k_results,
+                                                     max_query_length=max_query_length)
+        
         pubmed_query = '{} interactions or {} reactions or {} pathways'.format(
             query_gene, query_gene, query_gene)
         logger.debug('pubmed_query: {}'.format(pubmed_query))

@@ -1,12 +1,14 @@
-from crypt import methods
 import logging as log
 import os
 from pathlib import Path
 
-import dotenv
-from exceptiongroup import catch
+from sympy import public
+from torch import mode
+
 import ReactomeNeo4jUtils as neo4jutils
 import ReactomeUtils as utils
+import GenePathwayAnnotator as gpa
+
 import re
 from langchain_openai import ChatOpenAI
 from flask_cors import CORS
@@ -30,6 +32,10 @@ model = ChatOpenAI(temperature=0, model='gpt-4o-mini')
 # This is for test
 return_json = None
 full_text_return_json = None
+
+# The following code is used to set up an instance of GenePathwayAnnotator.
+annotator = gpa.GenePathwayAnnotator()
+annotator.set_model(model)
 
 # Test genes: TANC1 (not annotated), DUX4L2 (not annotated, limited abstracts), NTN1 (annotated)
 # TODO: Add cellular locations and cell types reuqest into the prompts!
@@ -108,24 +114,68 @@ async def query_gene(gene):
     # global return_json
     # if return_json:
     #     return return_json
+    # The following parameters will be extracted from the request. For the time being, we just
+    # hard-coded them here.
+    top_pubmed_results = 8
+    max_query_length = 1000 # Don't change this for the time being
+    pathway_count = 8 # interacting (potential) pathways for a gene
+    # cosine similarity between pathway text and abstract after emebdding
+    pathway_abstract_similiary_cutoff = 0.38
+    # The relatedness score evaulated by LLM
+    # This is quite low. 
+    llm_score_cutoff = 3
+    fi_cutoff = 0.8 # FI score used to filter PPIs
+    fdr_cutoff = 0.05 # Used to select interacting pathways
     try:
-        annotated_pathway_summary = await utils.write_summary_of_annotated_pathways(gene, 
-                                                                                    model)
-        pubmed_db = await utils.build_abstract_vector_db_for_gene(gene, top_k_results=12)
-        query_result = await utils.write_summary_of_abstracts_for_gene(gene,
-                                                                       pubmed_db,
-                                                                       model)
+        annotated_pathway_summary = await annotator.write_summary_of_annotated_pathways(gene)
+        pubmed_results = await annotator.query_pubmed_abstracts_for_gene(gene, 
+                                                                         top_k_results=top_pubmed_results,
+                                                                         max_query_length=max_query_length)
+        abstract_result_for_pathways, pathway_abstract_df = await annotator.write_summary_for_gene_annotation(gene,
+                                                                                                              pubmed_results=pubmed_results,
+                                                                                                              fi_cutoff=fi_cutoff,
+                                                                                                              fdr_cutoff=fdr_cutoff,
+                                                                                                              pathway_count=pathway_count,
+                                                                                                              pathway_abstract_similiary=pathway_abstract_similiary_cutoff,
+                                                                                                              llm_score=llm_score_cutoff,
+                                                                                                              model=model)
+        # Get summary for literature supporting PPIs
+        pathway2ppi_summary = dict()
+        for _, row in pathway_abstract_df.iterrows():
+            pathway = row['pathway']
+            # Escape if it has been checked since the interactions are
+            # collected for genes
+            if pathway in pathway2ppi_summary.keys():
+                continue
+            pmids = row['ppi_genes_pmids']
+            ppi_genes = row['ppi_genes']
+            abstract_result = {}
+            abstract_result['ppi_genes'] = ppi_genes
+            abstract_result['pmids'] = pmids
+            # Parse the pmids
+            # Make sure it is not duplicated
+            pmid_set = set([pmid for pmids_1 in pmids for pmid in pmids_1.split('|')])
+            # If the total abstracts are less than 8, no score is provided since all abstracts will be analyzed
+            llm_result, abstract_df = await annotator.summarize_pubmed_abstracts_for_interactions(query_gene,
+                                                                                                pathway,
+                                                                                                ppi_genes,
+                                                                                                pmid_set,
+                                                                                                # Use the same top PPIs abstracts as pubmed for the time being.
+                                                                                                top_abstracts=top_pubmed_results)
+            abstract_result['summary'] = llm_result['answer'].content
+            pathway2ppi_summary[pathway] = abstract_result
     except (NoAbstractFoundError, NoInteractingPathwayFoundError, NoAbstractSupportingInteractingPathwayError) as e:
         log.error('error: {}'.format(e.message))
         return {'failure': e.message}
     # Add mapping from pathway to dbId for the front so that a link can be created
     pattern = re.compile(r'PATHWAY_NAME:"([^"]+)"')
-    pathway_names = re.findall(pattern, query_result['docs'])
+    pathway_names = re.findall(pattern, abstract_result_for_pathways['docs'])
     name2id = neo4jutils.map_pathway_name_to_dbId(pathway_names)
 
     return_json = {
-        'content': query_result['answer'].content,
-        'docs':  query_result['docs'],
+        'content': abstract_result_for_pathways['answer'].content,
+        'docs':  abstract_result_for_pathways['docs'],
+        'pathway_2_ppi_abstracts_summary': pathway2ppi_summary,
         'pathway_name_2_id': name2id
     }
     if annotated_pathway_summary:
