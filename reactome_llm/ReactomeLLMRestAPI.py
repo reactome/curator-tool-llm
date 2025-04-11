@@ -108,24 +108,20 @@ async def downloadPdf(pmid: str):
     except Exception as e:
         return {'failure': 'An error occurred: {}'.format(e)}
 
+@api.route('/annotate', methods=['POST'])
+async def annotate_gene():
+    data = request.get_json()
 
-@api.route('/query/<gene>')
-async def query_gene(gene):
-    # global return_json
-    # if return_json:
-    #     return return_json
-    # The following parameters will be extracted from the request. For the time being, we just
-    # hard-coded them here.
-    top_pubmed_results = 8
-    max_query_length = 1000 # Don't change this for the time being
-    pathway_count = 8 # interacting (potential) pathways for a gene
-    # cosine similarity between pathway text and abstract after emebdding
-    pathway_abstract_similiary_cutoff = 0.38
-    # The relatedness score evaulated by LLM
-    # This is quite low. 
-    llm_score_cutoff = 3
-    fi_cutoff = 0.8 # FI score used to filter PPIs
-    fdr_cutoff = 0.05 # Used to select interacting pathways
+    # Extract gene and parameters from the JSON request
+    gene = data.get('queryGene')
+    top_pubmed_results = data.get('numberOfPubmed', 8)
+    max_query_length = data.get('max_query_length', 1000)  # Don't change this for now
+    pathway_count = data.get('numberOfPathways', 8)
+    pathway_abstract_similiary_cutoff = data.get('cosineSimilarityCutoff', 0.38)
+    llm_score_cutoff = data.get('llmScoreCutoff', 3)
+    fi_cutoff = data.get('fiScoreCutoff', 0.8)
+    fdr_cutoff = data.get('fdrCutoff', 0.05)
+
     try:
         annotated_pathway_summary = await annotator.write_summary_of_annotated_pathways(gene)
         pubmed_results = await annotator.query_pubmed_abstracts_for_gene(gene, 
@@ -156,7 +152,7 @@ async def query_gene(gene):
             # Make sure it is not duplicated
             pmid_set = set([pmid for pmids_1 in pmids for pmid in pmids_1.split('|')])
             # If the total abstracts are less than 8, no score is provided since all abstracts will be analyzed
-            llm_result, abstract_df = await annotator.summarize_pubmed_abstracts_for_interactions(query_gene,
+            llm_result, abstract_df = await annotator.summarize_pubmed_abstracts_for_interactions(annotate_gene,
                                                                                                 pathway,
                                                                                                 ppi_genes,
                                                                                                 pmid_set,
