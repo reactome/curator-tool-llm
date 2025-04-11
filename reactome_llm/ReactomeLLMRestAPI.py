@@ -121,10 +121,13 @@ async def annotate_gene():
     llm_score_cutoff = data.get('llmScoreCutoff', 3)
     fi_cutoff = data.get('fiScoreCutoff', 0.8)
     fdr_cutoff = data.get('fdrCutoff', 0.05)
+    # This is not set by the front-end and determined by the local pubmed abstracts latest date
+    pubmed_maxdate = '2024/12/31'
 
     try:
         annotated_pathway_summary = await annotator.write_summary_of_annotated_pathways(gene)
         pubmed_results = await annotator.query_pubmed_abstracts_for_gene(gene, 
+                                                                         pubmed_maxdate=pubmed_maxdate,
                                                                          top_k_results=top_pubmed_results,
                                                                          max_query_length=max_query_length)
         abstract_result_for_pathways, pathway_abstract_df = await annotator.write_summary_for_gene_annotation(gene,

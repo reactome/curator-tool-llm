@@ -13,6 +13,7 @@ import urllib
 import time
 import urllib.error
 from langchain_community.retrievers import PubMedRetriever
+from langchain_core.documents import Document
 from pymongo import MongoClient
 import dotenv
 dotenv.load_dotenv()
@@ -28,20 +29,29 @@ logger = logging.getLogger(__name__)
 class ReactomePubMedRetriever(PubMedRetriever):
     # Required by BaseModel
     db: object = None
+    maxdate: str = None
+
+    def lazy_load_docs(self, query: str) -> Iterator[Document]:
+        for d in self.lazy_load(query=query):
+            if d is None:
+                continue
+            yield self._dict2document(d)
     
     def lazy_load(self, query: str) -> Iterator[dict]:
         """
         Search PubMed for documents matching the query.
         Return an iterator of dictionaries containing the document metadata.
         """
+        # To make maxdate settting work, we have to set mindate. Just set a really old date.
         url = (
             self.base_url_esearch
             + "db=pubmed&term="
-            + str({urllib.parse.quote(query)})
+            + str(urllib.parse.quote(query))
             + f"&retmode=json&retmax={self.top_k_results}&usehistory=y"
+            + ('' if self.maxdate is None else '&mindate=1900/01/01&maxdate={}&datetype=pdat'.format(self.maxdate))
             + '&api_key={}'.format(pubmed_api_key)
         )
-        #print('URL: {}'.format(url))
+        # print('URL: {}'.format(url))
         # Add retry
         retry = 0
         while True:

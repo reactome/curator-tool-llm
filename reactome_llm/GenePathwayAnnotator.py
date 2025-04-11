@@ -70,6 +70,7 @@ class GenePathwayAnnotator:
         return embeddings
     
     def _get_pubmed_retriver(self, 
+                             maxdate: str = '2024/12/31',
                              top_k_results: int = 8,
                              max_query_length: int = 1000) -> ReactomePubMedRetriever:
         pubmed_retriever = ReactomePubMedRetriever()
@@ -78,6 +79,7 @@ class GenePathwayAnnotator:
         pubmed_retriever.top_k_results = top_k_results
         pubmed_retriever.MAX_QUERY_LENGTH = max_query_length
         pubmed_retriever.doc_content_chars_max = max_query_length * top_k_results
+        pubmed_retriever.maxdate=maxdate
         return pubmed_retriever
     
     def get_ppi_loader(self):
@@ -356,21 +358,24 @@ class GenePathwayAnnotator:
     
 
     async def query_pubmed_abstracts_for_gene(self,
-                                            query_gene: str,
-                                            top_k_results: int = 8,
-                                            max_query_length: int = 1000) -> List[Document]:
+                                              query_gene: str,
+                                              pubmed_maxdate: str='2024/12/31',
+                                              top_k_results: int = 8,
+                                              max_query_length: int = 1000) -> List[Document]:
         """Query pubmed about interactions, reactions, and pathways for a gene and return
         a vector store for collected abstracts from PubMed.
 
         Args:
             query_gene (str): _description_
+            pubmed_maxdate: the latest date of the local downloaded abstracts.
             top_k_results (int, optional): _description_. Defaults to 8.
             max_query_length (int, optional): _description_. Defaults to 1000.
 
         Returns:
             any: _description_
         """
-        pubmed_retriever = self._get_pubmed_retriver(top_k_results=top_k_results,
+        pubmed_retriever = self._get_pubmed_retriver(maxdate=pubmed_maxdate,
+                                                     top_k_results=top_k_results,
                                                      max_query_length=max_query_length)
         
         pubmed_query = '{} interactions or {} reactions or {} pathways'.format(
