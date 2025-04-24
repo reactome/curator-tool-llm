@@ -108,8 +108,15 @@ async def downloadPdf(pmid: str):
     except Exception as e:
         return {'failure': 'An error occurred: {}'.format(e)}
 
+
 @api.route('/annotate', methods=['POST'])
 async def annotate_gene():
+    # This is for test
+    # load the test json without querying LLMs etc
+    # with open('test/NTN1.json', 'r') as f:
+    #     data = f.read()
+    #     return data
+
     data = request.get_json()
 
     # Extract gene and parameters from the JSON request
@@ -155,7 +162,7 @@ async def annotate_gene():
             # Make sure it is not duplicated
             pmid_set = set([pmid for pmids_1 in pmids for pmid in pmids_1.split('|')])
             # If the total abstracts are less than 8, no score is provided since all abstracts will be analyzed
-            llm_result, abstract_df = await annotator.summarize_pubmed_abstracts_for_interactions(annotate_gene,
+            llm_result, abstract_df = await annotator.summarize_pubmed_abstracts_for_interactions(gene,
                                                                                                 pathway,
                                                                                                 ppi_genes,
                                                                                                 pmid_set,
