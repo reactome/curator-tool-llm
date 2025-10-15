@@ -15,7 +15,7 @@ from flask_cors import CORS
 from flask import Flask, request
 import warnings
 
-from ReactomeLLMErrors import NoAbstractFoundError, NoAbstractSupportingInteractingPathwayError, NoInteractingPathwayFoundError
+from ReactomeLLMErrors import NoAbstractFoundError, NoAbstractSupportingInteractingPathwayError, NoInteractingPathwayFoundError, NoProteinInteractionFoundError
 warnings.filterwarnings('ignore')
 
 from dotenv import load_dotenv
@@ -27,7 +27,11 @@ api = Flask(__name__)
 CORS(api)
 # model = ChatOpenAI(temperature=0, model='gpt-3.5-turbo')
 # As of Dec 18, 2024, switch to 4o-mini.
-model = ChatOpenAI(temperature=0, model='gpt-4o-mini')
+# model = ChatOpenAI(temperature=0, model='gpt-4o-mini')
+# Switch to gpit-5-min on October 14, 2025: temperature=1 is the default. This cannot be changed
+# for gpt-5-mini.
+model = ChatOpenAI(temperature=1, model='gpt-5-mini')
+# model = ChatOpenAI(temperature=1, model='gpt-5-nano') # Try nano for test and development. However, the output is not quitely well formatted.
 
 # This is for test
 return_json = None
@@ -65,7 +69,7 @@ async def analyze_full_text(pmid, gene):
         }
         full_text_return_json.append(result_json)
         return full_text_return_json
-    results = utils.analyze_full_paper(str(file_path), gene, model, top_pages=4) # Use 4 for test
+    results = annotator.analyze_full_paper(str(file_path), gene, model, top_pages=4) # Use 4 for test
     
     for result in results:
         result_json = {
@@ -170,7 +174,7 @@ async def annotate_gene():
                                                                                                 top_abstracts=top_pubmed_results)
             abstract_result['summary'] = llm_result['answer'].content
             pathway2ppi_summary[pathway] = abstract_result
-    except (NoAbstractFoundError, NoInteractingPathwayFoundError, NoAbstractSupportingInteractingPathwayError) as e:
+    except (NoAbstractFoundError, NoProteinInteractionFoundError, NoInteractingPathwayFoundError, NoAbstractSupportingInteractingPathwayError) as e:
         log.error('error: {}'.format(e.message))
         return {'failure': e.message}
     # Add mapping from pathway to dbId for the front so that a link can be created
@@ -202,5 +206,6 @@ def _collect_pathway_names(docs: str) -> list[str]:
 
 
 # Run the api at the terminal with this command: flask --app reactome_llm/ReactomeLLMRestAPI run (--debug for debug)
+# The conda environment should be paperqa (G.W.)
 if __name__ == '__main__':
     api.run()

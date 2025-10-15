@@ -10,6 +10,12 @@ class NoInteractingPathwayFoundError(Exception):
         super().__init__(self.message)
 
 
+class NoProteinInteractionFoundError(Exception):
+    def __init__(self, gene):
+        self.message = 'No protein interaction is found for {}. Try to reduce the cutoff value for functional interactions.'.format(gene)
+        super().__init__(self.message)
+
+
 class NoAbstractSupportingInteractingPathwayError(Exception):
     def __init__(self, gene):
         self.message = 'Cannot find any abstract to support the predicted interacting pathway for {}.'.format(gene)

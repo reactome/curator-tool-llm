@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 from paperqa import EmbeddingModel
-from ReactomeLLMErrors import NoAbstractFoundError, NoAbstractSupportingInteractingPathwayError, NoAbstractSupportingProteinInteractions, NoInteractingPathwayFoundError
+from ReactomeLLMErrors import NoAbstractFoundError, NoAbstractSupportingInteractingPathwayError, NoAbstractSupportingProteinInteractions, NoInteractingPathwayFoundError, NoProteinInteractionFoundError
 
 import ReactomePrompts as prompts
 
@@ -145,9 +145,7 @@ class GenePathwayAnnotator:
         Returns:
             any: _description_
         """
-        pathways = utils.get_annotated_pathways(query_gene)
-        annotated_pathways = [
-            pathway for pathway in pathways if pathway.annotated]
+        annotated_pathways = utils.get_annotated_pathways(query_gene)
         if len(annotated_pathways) == 0:
             return None
         if len(annotated_pathways) == 1:  # No need to write any summary
@@ -516,6 +514,7 @@ class GenePathwayAnnotator:
                                                 pathway_count: int = 8,
                                                 pathway_abstract_similiary: float = 0.4,
                                                 llm_score: int = 3,
+                                                excluded_annotated_pathways: bool = True,
                                                 model: any = None):
         """Write a summary for a query gene by collecting Reactome pathway related abstracts from PubMed.
         This function basically is a wrap of multiple calls of LLMs, as well as PubMed retrieval.
@@ -529,10 +528,17 @@ class GenePathwayAnnotator:
             _type_: _description_
         """
         interaction_dict = self.get_ppi_loader().get_interactions(query_gene, fi_cutoff=fi_cutoff, filter_ppis_with_fi=True)
+        if interaction_dict is None or len(interaction_dict) == 0:
+            raise NoProteinInteractionFoundError(query_gene)
         interaction_map_df = utils.map_interactions_in_pathways(interaction_dict)
         pathway_enrichment_df = utils.pathway_binomial_enrichment_df(interaction_map_df,
                                                                      interaction_dict.keys(),
                                                                      fdr_cutoff=fdr_cutoff)
+        if excluded_annotated_pathways:
+            # Remove the pathways that are already annotated
+            annotated_pathways = utils.get_annotated_pathways(query_gene)
+            if len(annotated_pathways) > 0:
+                pathway_enrichment_df = pathway_enrichment_df[~pathway_enrichment_df['pathway_id'].isin([pathway.id for pathway in annotated_pathways])]
         if pathway_enrichment_df is None or pathway_enrichment_df.empty:
             raise NoInteractingPathwayFoundError(query_gene)
         logger.debug('Total pathways for {}: {}'.format(
