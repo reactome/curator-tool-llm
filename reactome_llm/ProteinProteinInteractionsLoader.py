@@ -120,19 +120,42 @@ class PPILoader:
                 int_ppis[gene] = interactions
         return int_ppis
     
-    def get_interactions(self, query_gene, filter_ppis_with_fi: boolean=False, fi_cutoff: float = 0.8) -> dict:
+    def get_interactions(self, 
+                         query_gene, 
+                         interaction_source: str = 'intact_biogrid',
+                         filter_ppis_with_fi: boolean=True, 
+                         fi_cutoff: float = 0.8) -> dict:
         """For the time being, an fi_cutoff value should be specified so that more FIs can be fetched
         from idg.reactome.org. If fi_cutoff is not specified, the latest version of the released FI network
         will be used. The returned interactions may be different from these two versions.
 
         Args:
             query_gene (_type_): _description_
-            filter_ppis_with_fi (boolean, optional): _description_. Defaults to False.
+            filter_ppis_with_fi (boolean, optional): _description_. Defaults to True.
             fi_cutoff (float, optional): _description_. Defaults to None.
 
         Returns:
             dict: _description_
         """
+        if interaction_source not in ['intact_biogrid', 'reactome_fis']:
+            raise ValueError('interaction_source must be one of intact_biogrid or reactome_fis')
+        if interaction_source == 'reactome_fis':
+            if self.mongo_fis_loader is None:
+                self.mongo_fis_loader = MongoFILoader()
+            # Force to use the fi_cutoff value
+            if fi_cutoff is None:
+                fi_cutoff = 0.8
+            fi_df = self.mongo_fis_loader.fetch_fis(query_gene, fi_cutoff=fi_cutoff)
+            logger.debug('Total FIs found for gene {} with cutoff {}: {}'.format(query_gene, fi_cutoff, len(fi_df)))
+            if fi_df is None or fi_df.empty:
+                return dict() # Return an empty dict if no interactions are found to avoid issues in the downstream analysis.
+            ppi_dict = dict()
+            for _, row in fi_df.iterrows():
+                partner = row['gene']
+                ppi_dict[partner] = set() # No PubMed IDs are associated with these interactions
+            logger.debug('Total PPIs from Reactome FIs for gene {}: {}'.format(query_gene, len(ppi_dict)))
+            return ppi_dict
+        # This should be the default option
         if self.interactions_dict is None:
             logger.info('Loading PPIs...')
             time_start = time.time()

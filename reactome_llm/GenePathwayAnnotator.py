@@ -509,6 +509,8 @@ class GenePathwayAnnotator:
     async def write_summary_for_gene_annotation(self,
                                                 query_gene: str,
                                                 pubmed_results: List[Document],
+                                                interactionSource: str = 'intact_biogrid',
+                                                filterPPIs: bool = True,
                                                 fi_cutoff: float = 0.8,
                                                 fdr_cutoff: float = 0.05,
                                                 pathway_count: int = 8,
@@ -527,7 +529,10 @@ class GenePathwayAnnotator:
         Returns:
             _type_: _description_
         """
-        interaction_dict = self.get_ppi_loader().get_interactions(query_gene, fi_cutoff=fi_cutoff, filter_ppis_with_fi=True)
+        interaction_dict = self.get_ppi_loader().get_interactions(query_gene, 
+                                                                  fi_cutoff=fi_cutoff, 
+                                                                  filter_ppis_with_fi=filterPPIs,
+                                                                  interaction_source=interactionSource)
         if interaction_dict is None or len(interaction_dict) == 0:
             raise NoProteinInteractionFoundError(query_gene)
         interaction_map_df = utils.map_interactions_in_pathways(interaction_dict)
@@ -603,7 +608,7 @@ class GenePathwayAnnotator:
             pmid2embedding[doc.metadata['uid']] = self._embed_text(doc.page_content)
         pathway_abstract_pd = pd.DataFrame(
             columns=['pathway', 'pathway_text', 'ppi_genes', 'ppi_genes_pmids', 
-                     'pmid', 'title', 'abstract', 'cos_score', 'summary', 'llm_score'])
+                     'pmid', 'title', 'abstract', 'cos_score', 'summary', 'llm_score', 'enrichment_fdr'])
         row_index = 0
         for _, row in pathway_enrichment_results_df.iterrows():
             pathway = row['pathway_name']
@@ -665,7 +670,8 @@ class GenePathwayAnnotator:
                                                     match_row['abstract'],
                                                     match_row['cos_score'],
                                                     abstract_result['answer'].content,
-                                                    match_row['llm_score']]
+                                                    match_row['llm_score'],
+                                                    row['FDR']]
                 row_index += 1
         logger.debug('pathway_abstract_pd:\n{}'.format(pathway_abstract_pd.head()))
         return pathway_abstract_pd

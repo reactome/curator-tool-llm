@@ -2,9 +2,6 @@ import logging as log
 import os
 from pathlib import Path
 
-from sympy import public
-from torch import mode
-
 import ReactomeNeo4jUtils as neo4jutils
 import ReactomeUtils as utils
 import GenePathwayAnnotator as gpa
@@ -132,6 +129,8 @@ async def annotate_gene():
     llm_score_cutoff = data.get('llmScoreCutoff', 3)
     fi_cutoff = data.get('fiScoreCutoff', 0.8)
     fdr_cutoff = data.get('fdrCutoff', 0.05)
+    interactionSource = data.get('interactionSource', 'intact_biogrid')
+    filterPPIs = data.get('filterPPIs', True)
     # This is not set by the front-end and determined by the local pubmed abstracts latest date
     pubmed_maxdate = '2024/12/31'
 
@@ -142,6 +141,8 @@ async def annotate_gene():
                                                                          top_k_results=top_pubmed_results,
                                                                          max_query_length=max_query_length)
         abstract_result_for_pathways, pathway_abstract_df = await annotator.write_summary_for_gene_annotation(gene,
+                                                                                                              interactionSource=interactionSource,
+                                                                                                              filterPPIs=filterPPIs,
                                                                                                               pubmed_results=pubmed_results,
                                                                                                               fi_cutoff=fi_cutoff,
                                                                                                               fdr_cutoff=fdr_cutoff,
@@ -149,31 +150,34 @@ async def annotate_gene():
                                                                                                               pathway_abstract_similiary=pathway_abstract_similiary_cutoff,
                                                                                                               llm_score=llm_score_cutoff,
                                                                                                               model=model)
+        pathway_abstract_scores = pathway_abstract_df[['pathway', 'pmid', 'cos_score', 'llm_score', 'enrichment_fdr']]
         # Get summary for literature supporting PPIs
         pathway2ppi_summary = dict()
-        for _, row in pathway_abstract_df.iterrows():
-            pathway = row['pathway']
-            # Escape if it has been checked since the interactions are
-            # collected for genes
-            if pathway in pathway2ppi_summary.keys():
-                continue
-            pmids = row['ppi_genes_pmids']
-            ppi_genes = row['ppi_genes']
-            abstract_result = {}
-            abstract_result['ppi_genes'] = ppi_genes
-            abstract_result['pmids'] = pmids
-            # Parse the pmids
-            # Make sure it is not duplicated
-            pmid_set = set([pmid for pmids_1 in pmids for pmid in pmids_1.split('|')])
-            # If the total abstracts are less than 8, no score is provided since all abstracts will be analyzed
-            llm_result, abstract_df = await annotator.summarize_pubmed_abstracts_for_interactions(gene,
-                                                                                                pathway,
-                                                                                                ppi_genes,
-                                                                                                pmid_set,
-                                                                                                # Use the same top PPIs abstracts as pubmed for the time being.
-                                                                                                top_abstracts=top_pubmed_results)
-            abstract_result['summary'] = llm_result['answer'].content
-            pathway2ppi_summary[pathway] = abstract_result
+        # reactome_fis doesn't have pmids
+        if interactionSource == 'intact_biogrid':
+            for _, row in pathway_abstract_df.iterrows():
+                pathway = row['pathway']
+                # Escape if it has been checked since the interactions are
+                # collected for genes
+                if pathway in pathway2ppi_summary.keys():
+                    continue
+                pmids = row['ppi_genes_pmids']
+                ppi_genes = row['ppi_genes']
+                abstract_result = {}
+                abstract_result['ppi_genes'] = ppi_genes
+                abstract_result['pmids'] = pmids
+                # Parse the pmids
+                # Make sure it is not duplicated
+                pmid_set = set([pmid for pmids_1 in pmids for pmid in pmids_1.split('|')])
+                # If the total abstracts are less than 8, no score is provided since all abstracts will be analyzed
+                llm_result, abstract_df = await annotator.summarize_pubmed_abstracts_for_interactions(gene,
+                                                                                                    pathway,
+                                                                                                    ppi_genes,
+                                                                                                    pmid_set,
+                                                                                                    # Use the same top PPIs abstracts as pubmed for the time being.
+                                                                                                    top_abstracts=top_pubmed_results)
+                abstract_result['summary'] = llm_result['answer'].content
+                pathway2ppi_summary[pathway] = abstract_result
     except (NoAbstractFoundError, NoProteinInteractionFoundError, NoInteractingPathwayFoundError, NoAbstractSupportingInteractingPathwayError) as e:
         log.error('error: {}'.format(e.message))
         return {'failure': e.message}
@@ -186,15 +190,16 @@ async def annotate_gene():
         'content': abstract_result_for_pathways['answer'].content,
         'docs':  abstract_result_for_pathways['docs'],
         'pathway_2_ppi_abstracts_summary': pathway2ppi_summary,
-        'pathway_name_2_id': name2id
+        'pathway_name_2_id': name2id,
+        'pathway_abstract_scores': pathway_abstract_scores.to_dict(orient='records'),
     }
     if annotated_pathway_summary:
         return_json['annotated_pathways_content'] = annotated_pathway_summary['answer'].content
         return_json['annotated_pathways_docs'] = annotated_pathway_summary['docs']
         # Get the names
         annotated_pathway_names = _collect_pathway_names(annotated_pathway_summary['docs'])
-        annoated_name2id = neo4jutils.map_pathway_name_to_dbId(annotated_pathway_names)
-        name2id.update(annoated_name2id)
+        annotated_name2id = neo4jutils.map_pathway_name_to_dbId(annotated_pathway_names)
+        name2id.update(annotated_name2id)
     return return_json
 
 
