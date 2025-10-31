@@ -197,7 +197,12 @@ class PPILoader:
             self.mongo_fis_loader = MongoFILoader()
         return self.mongo_fis_loader.fetch_fis(gene, fi_cutoff=fi_cutoff)
 
+
 class MongoFILoader:
+    """Reactome FIs are persisted in a mongodb for easy loading. These FIs are persisted into the mongo database
+    using the Java project idg-pairsise-ws, org.reactome.idg.pairwise.main.MainApp.processPRDPredictions(), which
+    is invoked in the Main() method. To deploy the mongo database, please refer to the README.md file in the project.
+    """
     def __init__(self):
         load_dotenv()
         mongo_uri = os.getenv("PUBMED_MONGO_URI")
