@@ -7,12 +7,9 @@ import ReactomeUtils as utils
 import GenePathwayAnnotator as gpa
 
 import re
-from langchain_openai import ChatOpenAI
 from flask_cors import CORS
 from flask import Flask, request
 import warnings
-import asyncio
-import json
 
 from ReactomeLLMErrors import NoAbstractFoundError, NoAbstractSupportingInteractingPathwayError, NoInteractingPathwayFoundError, NoProteinInteractionFoundError
 from CrewAILiteratureAnnotator import CrewAILiteratureAnnotator, AnnotationRequest
