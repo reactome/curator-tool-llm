@@ -26,6 +26,7 @@ from paperqa import EmbeddingModel
 from ReactomeLLMErrors import NoAbstractFoundError, NoAbstractSupportingInteractingPathwayError, NoAbstractSupportingProteinInteractions, NoInteractingPathwayFoundError, NoProteinInteractionFoundError
 
 import ReactomePrompts as prompts
+from ModelConfig import create_reactome_chat_model
 
 from ReactomePubMed import ReactomePubMedRetriever
 import ReactomeUtils as utils
@@ -33,6 +34,7 @@ import ProteinProteinInteractionsLoader as ppi_loader
 
 # This script should be the main entry.
 import logging_config
+
 logging_config.setup_logging()
 
 logger = logging.getLogger(__name__)
@@ -101,9 +103,7 @@ class GenePathwayAnnotator:
     def get_default_llm(self):
         if self.model is not None:
             return self.model
-        # model = ChatOpenAI(temperature=0, model='gpt-3.5-turbo')
-        model = ChatOpenAI(temperature=0, model='gpt-4o-mini')
-        return model
+        return create_reactome_chat_model()
 
     async def write_summary_of_annotated_pathway(self,
                                                  query_gene: str,

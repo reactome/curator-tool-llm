@@ -11,8 +11,12 @@ from langchain_openai import ChatOpenAI
 from flask_cors import CORS
 from flask import Flask, request
 import warnings
+import asyncio
+import json
 
 from ReactomeLLMErrors import NoAbstractFoundError, NoAbstractSupportingInteractingPathwayError, NoInteractingPathwayFoundError, NoProteinInteractionFoundError
+from CrewAILiteratureAnnotator import CrewAILiteratureAnnotator, AnnotationRequest
+from ModelConfig import create_reactome_chat_model, get_crewai_model_settings
 warnings.filterwarnings('ignore')
 
 from dotenv import load_dotenv
@@ -22,13 +26,8 @@ PDF_PAPERS_FOLDER = os.getenv('PDF_PAPERS_FOLDER')
 # Shared variables for all
 api = Flask(__name__)
 CORS(api)
-# model = ChatOpenAI(temperature=0, model='gpt-3.5-turbo')
-# As of Dec 18, 2024, switch to 4o-mini.
-# model = ChatOpenAI(temperature=0, model='gpt-4o-mini')
-# Switch to gpit-5-min on October 14, 2025: temperature=1 is the default. This cannot be changed
-# for gpt-5-mini.
-model = ChatOpenAI(temperature=1, model='gpt-5-mini')
-# model = ChatOpenAI(temperature=1, model='gpt-5-nano') # Try nano for test and development. However, the output is not quitely well formatted.
+# Configure base model using environment (REACTOME_LLM_MODEL / REACTOME_LLM_TEMPERATURE).
+model = create_reactome_chat_model()
 
 # This is for test
 return_json = None
@@ -37,6 +36,15 @@ full_text_return_json = None
 # The following code is used to set up an instance of GenePathwayAnnotator.
 annotator = gpa.GenePathwayAnnotator()
 annotator.set_model(model)
+
+# Initialize CrewAI annotator
+crewai_model, crewai_temperature = get_crewai_model_settings()
+crewai_annotator = CrewAILiteratureAnnotator(
+    annotator,
+    model=crewai_model,
+    temperature=crewai_temperature,
+    verbose=True,
+)
 
 # Test genes: TANC1 (not annotated), DUX4L2 (not annotated, limited abstracts), NTN1 (annotated)
 # TODO: Add cellular locations and cell types reuqest into the prompts!
@@ -208,6 +216,96 @@ def _collect_pathway_names(docs: str) -> list[str]:
     for paragraph in docs.split('\n'):
         names.append(paragraph.split(':')[0].strip())
     return names
+
+
+@api.route('/crewai/annotate', methods=['POST'])
+async def crewai_annotate_gene():
+    """
+    Multi-agent literature annotation endpoint using CrewAI framework.
+    
+    Provides a more sophisticated annotation pipeline with specialized agents
+    for extraction, curation, review, and quality assurance.
+    """
+    data = request.get_json()
+    
+    # Extract parameters
+    gene = data.get('queryGene')
+    max_papers = data.get('numberOfPubmed', 8)
+    target_pathways = data.get('targetPathways', None)  # Optional pathway focus
+    quality_threshold = data.get('qualityThreshold', 0.7)
+    enable_full_text = data.get('enableFullText', False)
+    
+    # Get papers from existing PubMed functionality
+    try:
+        pubmed_maxdate = '2024/12/31'
+        max_query_length = 1000
+        
+        # Get papers using existing PubMed retrieval
+        pubmed_results = await annotator.query_pubmed_abstracts_for_gene(
+            gene, 
+            pubmed_maxdate=pubmed_maxdate,
+            top_k_results=max_papers,
+            max_query_length=max_query_length
+        )
+        
+        # Extract PMIDs from results
+        papers = []
+        for doc in pubmed_results:
+            pmid = doc.metadata.get("uid", "")
+            if pmid:
+                papers.append(pmid)
+        
+        # Create annotation request
+        request_obj = AnnotationRequest(
+            gene=gene,
+            papers=papers,
+            pathways=target_pathways,
+            max_papers=max_papers,
+            quality_threshold=quality_threshold,
+            enable_full_text=enable_full_text
+        )
+        
+        # Run multi-agent annotation
+        result = await crewai_annotator.annotate_literature(request_obj)
+        
+        # Convert result to JSON-serializable format
+        return {
+            'gene': result.gene,
+            'reactome_instances': result.reactome_instances,
+            'literature_evidence': result.literature_evidence,
+            'quality_scores': result.quality_scores,
+            'validation_report': result.validation_report,
+            'consistency_check': result.consistency_check,
+            'processing_metadata': result.processing_metadata,
+            'status': 'success'
+        }
+        
+    except Exception as e:
+        log.error(f'CrewAI annotation error for {gene}: {str(e)}')
+        return {
+            'gene': gene,
+            'error': str(e),
+            'status': 'failed'
+        }
+
+
+@api.route('/crewai/status')
+async def crewai_status():
+    """Get status of CrewAI annotation system"""
+    try:
+        return {
+            'status': 'active',
+            'model': crewai_annotator.model,
+            'temperature': crewai_annotator.temperature,
+            'max_iterations': crewai_annotator.max_iter,
+            'agent_count': 4,
+            'agents': ['ReactomeCurator', 'LiteratureExtractor', 'Reviewer', 'QualityChecker']
+        }
+    except Exception as e:
+        return {
+            'status': 'error',
+            'error': str(e)
+        }
 
 
 # Run the api at the terminal with this command: flask --app reactome_llm/ReactomeLLMRestAPI run (--debug for debug)

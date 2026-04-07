@@ -27,6 +27,8 @@ chardet=5.2.0=pypi_0
 charset-normalizer=3.3.2=pypi_0
 click=8.1.7=pypi_0
 colorama=0.4.6=pypi_0
+crewai=0.28.8=pypi_0
+crewai-tools=0.1.6=pypi_0
 coloredlogs=15.0.1=pypi_0
 comm=0.2.1=pyhd8ed1ab_0
 contourpy=1.2.0=pypi_0
