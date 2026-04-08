@@ -32,7 +32,8 @@ class ReactomeTasks:
                                         gene: str,
                                         papers: List[str], 
                                         max_papers: int = 8,
-                                        enable_full_text: bool = False) -> Task:
+                                        enable_full_text: bool = False,
+                                        enable_literature_search: bool = False) -> Task:
         """
         Create a task for the Literature Extractor agent.
         
@@ -44,15 +45,45 @@ class ReactomeTasks:
             papers: List of PMIDs or paper content
             max_papers: Maximum number of papers to process
             enable_full_text: Whether to process full text or just abstracts
+            enable_literature_search: Whether to search PubMed first instead of using the provided PMID list directly
             
         Returns:
             Configured Task instance
         """
+        if enable_literature_search:
+            if enable_full_text:
+                workflow_instructions = f"""
+        Step 1 — Call `literature_search` with gene="{gene}" to retrieve abstracts and metadata.
+               The JSON result will contain a `papers` list, each entry with a `pmid` field.
+        Step 2 — For each PMID in the search results, call `fulltext_analysis` with pmid=<pmid_value> and gene="{gene}" to analyze the local PDF if available. If the file is not found, skip that PMID and continue.
+        Step 3 — Combine the available abstract and full-text evidence into the structured JSON output below.
+                """
+            else:
+                workflow_instructions = f"""
+        Step 1 — Call `literature_search` with gene="{gene}" to retrieve abstracts and metadata.
+               The JSON result will contain a `papers` list, each entry with a `pmid` field.
+        Step 2 — Full-text analysis is disabled for this run; use the search results only.
+        Step 3 — Combine the available evidence into the structured JSON output below.
+                """
+        else:
+            if enable_full_text:
+                workflow_instructions = f"""
+        Step 1 — Use only the provided PMID list as the paper set for this run. Do not call `literature_search`.
+        Step 2 — For each provided PMID, call `fulltext_analysis` with pmid=<pmid_value> and gene="{gene}". The tool resolves the PMID to `data/papers/<pmid>.pdf`. If a PDF is missing, skip that PMID and continue.
+        Step 3 — Combine findings from the provided PMID set into the structured JSON output below.
+                """
+            else:
+                workflow_instructions = """
+        Step 1 — Use only the provided PMID list as the paper set for this run. Do not call `literature_search`.
+        Step 2 — Full-text analysis is disabled for this run; do not expand beyond the provided PMID list.
+        Step 3 — Combine findings from the provided PMID set into the structured JSON output below.
+                """
+
         description = f"""
         Extract and structure molecular information about gene {gene} from scientific literature.
         
         **Primary Objectives:**
-        1. Process up to {max_papers} scientific papers (PMIDs: {papers[:5]}...)
+        1. Process up to {max_papers} scientific papers (PMIDs provided: {papers[:5]}...)
         2. Extract molecular interactions, pathways, and functional annotations
         3. Identify evidence strength and experimental methods
         4. Structure findings in machine-readable format
@@ -104,9 +135,9 @@ class ReactomeTasks:
         - Distinguish between direct and indirect evidence
         - Prioritize recent, high-quality publications
         - Include confidence assessments for all claims
-        
-        Use available tools to access PubMed, process full-text when requested,
-        and validate information against existing knowledge bases.
+
+        **Tool Usage Workflow:**
+          {workflow_instructions}
         """
         
         expected_output = f"""
@@ -124,7 +155,8 @@ class ReactomeTasks:
     def create_reactome_curation_task(self,
                                     gene: str,
                                     structured_info: Dict[str, Any],
-                                    target_pathways: Optional[List[str]] = None) -> Task:
+                                    target_pathways: Optional[List[str]] = None,
+                                    schema_path: Optional[str] = None) -> Task:
         """
         Create a task for the Reactome Curator agent.
         
@@ -139,15 +171,19 @@ class ReactomeTasks:
         Returns:
             Configured Task instance
         """
+        structured_info_json = json.dumps(structured_info, indent=2, default=str) if structured_info else "No structured information provided."
+
         description = f"""
         Convert structured literature information about gene {gene} into valid Reactome 
         pathway model instances following the official Reactome data schema.
         
-        **Input Context:**
-        You will receive structured information extracted from literature including:
-        - Molecular interactions and binding partners
-        - Pathway involvement and functional roles  
-        - Experimental evidence and confidence levels
+        **Input Context (Literature Extraction Output):**
+        ```json
+        {structured_info_json}
+        ```
+        Use the above structured data as the primary source of evidence for all entities,
+        reactions, and pathways you create. Each annotation must be traceable to an entry
+        in this input (via pmid or interaction partner).
         
         **Primary Objectives:**
         1. Create valid Reactome Entity instances for {gene} and interaction partners
@@ -206,7 +242,14 @@ class ReactomeTasks:
         - Include proper evidence attribution
         - Use consistent naming conventions
         - Avoid duplicate instances for existing entities
-        
+
+        **Schema Validation:**
+        After generating each batch of instances, call the `schema_validation` tool with:
+        - `instances`: your generated JSON
+        - `schema_path`: {schema_path if schema_path else 'not provided'}
+        Fix any reported errors before finalising the output.
+        If no schema_path is provided, perform structural field validation only.
+
         Use available tools to query existing Reactome data, validate against
         the schema, and ensure proper integration with current pathway models.
         """
@@ -340,6 +383,7 @@ class ReactomeTasks:
                                     gene: str,
                                     reactome_instances: List[Dict[str, Any]],
                                     validation_report: Dict[str, Any],
+                                    schema_path: Optional[str] = None,
                                     quality_threshold: float = 0.7) -> Task:
         """
         Create a task for the Quality Checker agent.
@@ -399,6 +443,12 @@ class ReactomeTasks:
         - Cross-reference validation
         - Performance impact assessment
         - Ontology consistency checking
+
+                **Schema Input:**
+                - If an official JSON schema file is available, use the `schema_validation` tool with:
+                    - `instances`: the generated instance JSON
+                    - `schema_path`: {schema_path if schema_path else 'not provided'}
+                - If no schema path is provided, fall back to structural validation and report that full schema validation was not run.
         
         **Expert Review Integration:**
         Review the domain expert's assessment (overall score: {validation_report.get('overall_score', 'N/A')}):

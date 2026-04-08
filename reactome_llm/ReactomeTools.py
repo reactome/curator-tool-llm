@@ -14,13 +14,15 @@ Tool categories:
 
 import json
 import logging
-from typing import List
+from typing import Any, List
+from pathlib import Path
 
 from crewai.tools import BaseTool
 from pydantic import Field
 
 from GenePathwayAnnotator import GenePathwayAnnotator
 import ReactomeUtils as utils
+import ReactomeNeo4jUtils as neo4j_utils
 
 logger = logging.getLogger(__name__)
 
@@ -77,27 +79,40 @@ class FullTextAnalysisTool(BaseTool):
     gene_annotator: GenePathwayAnnotator = Field(..., description="Gene annotator instance")
     
     def _run(self, pmid: str, gene: str) -> str:
-        """Analyze full-text paper for gene-related information"""
+        """Analyze full-text paper for gene-related information.
+        
+        `pmid` may be a bare PMID string (e.g. '25391454') or an explicit local PDF path
+        (e.g. 'data/papers/25391454.pdf'). Bare PMIDs are resolved automatically to
+        data/papers/<pmid>.pdf relative to the working directory.
+        """
         try:
-            # Prefer explicit failure when the input is a PMID only. The full-text analyzer
-            # expects a local PDF file path and a model object.
-            if not str(pmid).lower().endswith(".pdf"):
+            # Resolve a bare PMID to the expected local PDF path.
+            pdf_path = pmid if str(pmid).lower().endswith(".pdf") else f"data/papers/{pmid}.pdf"
+
+            from pathlib import Path as _Path
+            if not _Path(pdf_path).exists():
                 return json.dumps({
                     "pmid": pmid,
                     "gene": gene,
-                    "status": "failed",
-                    "error": "fulltext_analysis expects a local PDF path in 'pmid' for this tool wrapper"
+                    "status": "skipped",
+                    "error": f"Local PDF not found at '{pdf_path}'; full-text analysis skipped."
                 })
 
             model = self.gene_annotator.get_default_llm()
-            pmid_pdf = f'data/papers/{pmid}'  # Assuming the PDF is stored locally in this path   
-            result = self.gene_annotator.analyze_full_paper(pmid_pdf, gene, model=model)
+            result = self.gene_annotator.analyze_full_paper(pdf_path, gene, model=model)
+
+            # Convert model responses (e.g., LangChain AIMessage) into JSON-safe data.
+            def _json_default(obj: Any) -> Any:
+                if hasattr(obj, "content"):
+                    return obj.content
+                return str(obj)
+
             return json.dumps({
                 "pmid": pmid,
                 "gene": gene,
                 "analysis": result,
                 "status": "success"
-            })
+            }, default=_json_default)
         except Exception as e:
             return json.dumps({
                 "pmid": pmid,
@@ -115,11 +130,9 @@ class ReactomeQueryTool(BaseTool):
     
     gene_annotator: GenePathwayAnnotator = Field(..., description="Gene annotator instance")
     
-    def _run(self, gene: str, query_type: str = "pathways") -> str:
+    def _run(self, gene: str, query_type: str = "pathways", pathway: str = "") -> str:
         """Query Reactome database for gene information"""
         try:
-            neo4j_utils = self.gene_annotator.neo4j_utils
-            
             if query_type == "pathways":
                 pathways = neo4j_utils.query_pathways_for_gene(gene)
                 return json.dumps({
@@ -127,17 +140,23 @@ class ReactomeQueryTool(BaseTool):
                     "query_type": query_type,
                     "pathways": pathways
                 })
-            elif query_type == "reactions": 
-                reactions = neo4j_utils.query_reaction_roles_of_pathway(gene)
+            elif query_type == "reactions":
+                if not pathway:
+                    return json.dumps({
+                        "gene": gene,
+                        "error": "query_type 'reactions' requires a 'pathway' argument"
+                    })
+                reactions_df = neo4j_utils.query_reaction_roles_of_pathway(pathway, [gene])
                 return json.dumps({
                     "gene": gene,
+                    "pathway": pathway,
                     "query_type": query_type,
-                    "reactions": reactions
+                    "reactions": reactions_df.to_dict(orient="records")
                 })
             else:
                 return json.dumps({
                     "gene": gene,
-                    "error": f"Unknown query type: {query_type}"
+                    "error": f"Unknown query_type: {query_type}. Use 'pathways' or 'reactions'."
                 })
                 
         except Exception as e:
@@ -196,21 +215,29 @@ class SchemaValidationTool(BaseTool):
     """Tool for validating Reactome data model instances"""
     
     name: str = "schema_validation"
-    description: str = "Validate generated Reactome instances against the official schema"
+    description: str = "Validate generated Reactome instances against the official schema. Accepts instances plus optional schema JSON or schema_path."
     
     gene_annotator: GenePathwayAnnotator = Field(..., description="Gene annotator instance")
     
-    def _run(self, instances: str) -> str:
+    def _run(self, instances: str, schema: str = "", schema_path: str = "") -> str:
         """Validate instances against Reactome schema"""
         try:
             # Parse instances
             data = json.loads(instances) if isinstance(instances, str) else instances
+            schema_data = None
+
+            if schema_path:
+                schema_data = json.loads(Path(schema_path).read_text(encoding="utf-8"))
+            elif schema:
+                schema_data = json.loads(schema) if isinstance(schema, str) else schema
             
             # Basic validation checks
             validation_results = {
                 "valid": True,
                 "errors": [],
-                "warnings": []
+                "warnings": [],
+                "schema_provided": bool(schema_data),
+                "schema_path": schema_path or None,
             }
             
             # Check for required fields in entities
@@ -228,6 +255,17 @@ class SchemaValidationTool(BaseTool):
                         validation_results["errors"].append("Missing 'class' in reaction")
                     if "displayName" not in reaction:
                         validation_results["errors"].append("Missing 'displayName' in reaction")
+
+            if schema_data is not None:
+                try:
+                    import jsonschema
+                    jsonschema.validate(instance=data, schema=schema_data)
+                except ImportError:
+                    validation_results["warnings"].append(
+                        "jsonschema package is not installed; external schema validation was skipped"
+                    )
+                except Exception as e:
+                    validation_results["errors"].append(f"Schema validation failed: {str(e)}")
             
             if validation_results["errors"]:
                 validation_results["valid"] = False
@@ -256,7 +294,7 @@ class ConsistencyCheckTool(BaseTool):
             data = json.loads(instances) if isinstance(instances, str) else instances
             
             # Get existing data for comparison
-            existing_pathways = self.gene_annotator.neo4j_utils.query_pathways_for_gene(gene)
+            existing_pathways = neo4j_utils.query_pathways_for_gene(gene)
             
             consistency_report = {
                 "gene": gene,
@@ -270,7 +308,7 @@ class ConsistencyCheckTool(BaseTool):
                 for pathway in data["pathways"]:
                     pathway_name = pathway.get("displayName", "")
                     # Simple conflict detection
-                    if pathway_name in [p["name"] for p in existing_pathways]:
+                    if pathway_name in [p["pathway"] for p in existing_pathways]:
                         consistency_report["conflicts"].append({
                             "type": "pathway_overlap",
                             "description": f"Pathway {pathway_name} already exists"
@@ -399,9 +437,9 @@ class ReactomeToolkit:
     def get_extractor_tools(self) -> List[BaseTool]:
         """Get tools for Literature Extractor agent"""
         return [
-            # self.literature_search,
+            self.literature_search,
             self.fulltext_analysis,
-            # self.protein_interactions,
+            self.protein_interactions,
             self.evidence_evaluation
         ]
     

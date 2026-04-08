@@ -83,6 +83,34 @@ def _run_event_summary_query(tx, limit: int = None) -> pd.DataFrame:
     return result.to_df()
 
 
+def query_pathways_for_gene(gene: str) -> list[dict]:
+    """Get all Reactome pathways that the given gene participates in.
+
+    Args:
+        gene (str): Gene symbol (e.g. 'NTN1')
+
+    Returns:
+        list[dict]: List of dicts with keys 'pathway' and 'pathway_id'
+    """
+    query = """
+        MATCH (ewas:EntityWithAccessionedSequence)-[:referenceEntity]->(g:ReferenceSequence)
+        WHERE g.geneName[0] = $gene_name
+        MATCH (p:Pathway)-[:hasEvent*]->(r:ReactionLikeEvent)
+              -[:input|catalystActivity|regulatedBy|physicalEntity|hasComponent|hasMember|hasCandidate*]->(ewas)
+        RETURN DISTINCT p.displayName AS pathway, p.dbId AS pathway_id
+        ORDER BY p.displayName
+    """
+    result_df = None
+    with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        result_df = driver.execute_query(query,
+                                         db=DB,
+                                         gene_name=gene,
+                                         result_transformer_=neo4j.Result.to_df)
+    if result_df is None or result_df.empty:
+        return []
+    return result_df.to_dict(orient='records')
+
+
 def query_reaction_roles_of_pathway(pathway: str,
                                     genes: list[str]) -> pd.DataFrame:
     """Get the reactions and roles for a list of genes in a specific pathway.

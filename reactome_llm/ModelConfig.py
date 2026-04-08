@@ -4,7 +4,7 @@ from langchain_openai import ChatOpenAI
 
 REACTOME_MODEL_NAME = "gpt-5-mini"
 REACTOME_MODEL_TEMPERATURE = 1.0
-CREWAI_MODEL_NAME = "gpt-5.4-mini"
+CREWAI_MODEL_NAME = "gpt-5-nano"
 CREWAI_MODEL_TEMPERATURE = 0.1
 
 

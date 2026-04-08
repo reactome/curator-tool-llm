@@ -41,11 +41,13 @@ logger = logging.getLogger(__name__)
 class AnnotationRequest:
     """Input data structure for literature annotation requests"""
     gene: str
-    papers: List[str]  # List of PMIDs or full-text content
+    papers: List[str]  # List of PMIDs mapped to local PDFs at data/papers/<pmid>.pdf
     pathways: Optional[List[str]] = None  # Target pathways for focused annotation
+    schema_path: Optional[str] = 'resources/reactome_domain_model.json'  # Optional JSON schema file used during QA validation
     max_papers: int = 8
     quality_threshold: float = 0.7
-    enable_full_text: bool = False
+    enable_full_text: bool = True
+    enable_literature_search: bool = False
 
 
 @dataclass  
@@ -106,8 +108,8 @@ class CrewAILiteratureAnnotator:
         """Create and configure the CrewAI crew with all agents"""
         
         # Get agent instances
-        curator_agent = self.agents.create_reactome_curator(self.toolkit.get_curator_tools())
         extractor_agent = self.agents.create_literature_extractor(self.toolkit.get_extractor_tools())
+        curator_agent = self.agents.create_reactome_curator(self.toolkit.get_curator_tools())
         reviewer_agent = self.agents.create_reviewer(self.toolkit.get_reviewer_tools())
         qa_agent = self.agents.create_quality_checker(self.toolkit.get_qa_tools())
         
@@ -148,8 +150,12 @@ class CrewAILiteratureAnnotator:
         logger.info(f"Starting multi-agent annotation for gene: {request.gene}")
         
         try:
+            # test = True
             # Phase 1: Literature Extraction and Preprocessing
             extraction_context = await self._phase_1_literature_extraction(request)
+
+            # if test:
+            #     return extraction_context
             
             # Phase 2: Reactome Data Model Creation  
             curation_context = await self._phase_2_data_model_creation(
@@ -190,6 +196,7 @@ class CrewAILiteratureAnnotator:
                     "pathways_created": curation_context["pathways_created"],
                     "quality_threshold": request.quality_threshold,
                     "full_text_enabled": request.enable_full_text,
+                    "literature_search_enabled": request.enable_literature_search,
                     "final_decision": consensus_context["final_consensus"].get("decision", "unknown")
                 }
             )
@@ -210,7 +217,8 @@ class CrewAILiteratureAnnotator:
             gene=request.gene,
             papers=request.papers,
             max_papers=request.max_papers,
-            enable_full_text=request.enable_full_text
+            enable_full_text=request.enable_full_text,
+            enable_literature_search=request.enable_literature_search
         )
         extraction_task.agent = self.extractor_agent
         
@@ -241,7 +249,8 @@ class CrewAILiteratureAnnotator:
         curation_task = self.tasks.create_reactome_curation_task(
             gene=request.gene,
             structured_info=extraction_context["structured_information"],
-            target_pathways=request.pathways
+            target_pathways=request.pathways,
+            schema_path=request.schema_path
         )
         curation_task.agent = self.curator_agent
         
@@ -305,6 +314,7 @@ class CrewAILiteratureAnnotator:
             gene=request.gene,
             reactome_instances=curation_context["reactome_instances"],
             validation_report=review_context["validation_report"],
+            schema_path=request.schema_path,
             quality_threshold=request.quality_threshold
         )
         qa_task.agent = self.qa_agent
