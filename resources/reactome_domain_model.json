@@ -1,0 +1,2119 @@
+{
+  "description": "Data model for org.reactome.server.graph.domain.model. Generated for LLM-based object validation.",
+  "totalClasses": 117,
+  "classes": [
+    {
+      "className": "AbstractModifiedResidue",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "referenceSequence",
+          "type": "ReferenceSequence"
+        }
+      ]
+    },
+    {
+      "className": "Affiliation",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "address",
+          "type": "String"
+        },
+        {
+          "name": "name",
+          "collection": "List",
+          "elementType": "String"
+        }
+      ]
+    },
+    {
+      "className": "Anatomy",
+      "extends": "ExternalOntology"
+    },
+    {
+      "className": "BlackBoxEvent",
+      "extends": "ReactionLikeEvent",
+      "fields": [
+        {
+          "name": "templateEvent",
+          "type": "Event"
+        }
+      ]
+    },
+    {
+      "className": "Book",
+      "extends": "Publication",
+      "fields": [
+        {
+          "name": "ISBN",
+          "type": "String"
+        },
+        {
+          "name": "chapterTitle",
+          "type": "String"
+        },
+        {
+          "name": "pages",
+          "type": "String"
+        },
+        {
+          "name": "year",
+          "type": "Integer"
+        },
+        {
+          "name": "publisher",
+          "type": "Affiliation"
+        }
+      ]
+    },
+    {
+      "className": "CandidateSet",
+      "extends": "EntitySet",
+      "fields": [
+        {
+          "name": "hasCandidate",
+          "collection": "SortedSet",
+          "elementType": "HasCandidate"
+        }
+      ]
+    },
+    {
+      "className": "CatalystActivity",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "activeUnit",
+          "collection": "Set",
+          "elementType": "PhysicalEntity"
+        },
+        {
+          "name": "activity",
+          "type": "GO_MolecularFunction"
+        },
+        {
+          "name": "catalyzedEvent",
+          "collection": "List",
+          "elementType": "ReactionLikeEvent"
+        },
+        {
+          "name": "physicalEntity",
+          "type": "PhysicalEntity"
+        },
+        {
+          "name": "literatureReference",
+          "collection": "List",
+          "elementType": "Publication"
+        }
+      ]
+    },
+    {
+      "className": "CatalystActivityReference",
+      "extends": "ControlReference",
+      "fields": [
+        {
+          "name": "catalystActivity",
+          "type": "CatalystActivity"
+        }
+      ]
+    },
+    {
+      "className": "Cell",
+      "extends": "PhysicalEntity",
+      "fields": [
+        {
+          "name": "RNAMarker",
+          "collection": "List",
+          "elementType": "EntityWithAccessionedSequence"
+        },
+        {
+          "name": "markerReference",
+          "collection": "List",
+          "elementType": "MarkerReference"
+        },
+        {
+          "name": "organ",
+          "type": "Anatomy"
+        },
+        {
+          "name": "proteinMarker",
+          "collection": "List",
+          "elementType": "EntityWithAccessionedSequence"
+        },
+        {
+          "name": "species",
+          "collection": "List",
+          "elementType": "Taxon"
+        },
+        {
+          "name": "tissue",
+          "type": "Anatomy"
+        },
+        {
+          "name": "tissueLayer",
+          "type": "Anatomy"
+        }
+      ]
+    },
+    {
+      "className": "CellDevelopmentStep",
+      "extends": "ReactionLikeEvent",
+      "fields": [
+        {
+          "name": "tissue",
+          "type": "Anatomy"
+        }
+      ]
+    },
+    {
+      "className": "CellLineagePath",
+      "extends": "Pathway",
+      "fields": [
+        {
+          "name": "tissue",
+          "type": "Anatomy"
+        }
+      ]
+    },
+    {
+      "className": "CellType",
+      "extends": "ExternalOntology"
+    },
+    {
+      "className": "ChemicalDrug",
+      "extends": "Drug"
+    },
+    {
+      "className": "Compartment",
+      "extends": "GO_CellularComponent"
+    },
+    {
+      "className": "Complex",
+      "extends": "PhysicalEntity",
+      "fields": [
+        {
+          "name": "isChimeric",
+          "type": "Boolean"
+        },
+        {
+          "name": "hasComponent",
+          "collection": "SortedSet",
+          "elementType": "HasComponent"
+        },
+        {
+          "name": "stoichiometryKnown",
+          "type": "Boolean"
+        },
+        {
+          "name": "entityOnOtherCell",
+          "collection": "List",
+          "elementType": "PhysicalEntity"
+        },
+        {
+          "name": "includedLocation",
+          "collection": "SortedSet",
+          "elementType": "HasCompartment"
+        },
+        {
+          "name": "species",
+          "collection": "List",
+          "elementType": "Species"
+        },
+        {
+          "name": "relatedSpecies",
+          "collection": "List",
+          "elementType": "Species"
+        },
+        {
+          "name": "componentCellType",
+          "collection": "List",
+          "elementType": "PhysicalEntityCellType"
+        }
+      ]
+    },
+    {
+      "className": "ControlReference",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "literatureReference",
+          "collection": "List",
+          "elementType": "Publication"
+        }
+      ]
+    },
+    {
+      "className": "ControlledVocabulary",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "definition",
+          "type": "String"
+        },
+        {
+          "name": "name",
+          "collection": "List",
+          "elementType": "String"
+        }
+      ]
+    },
+    {
+      "className": "CrosslinkedResidue",
+      "extends": "TranslationalModification",
+      "fields": [
+        {
+          "name": "secondCoordinate",
+          "type": "Integer"
+        },
+        {
+          "name": "modification",
+          "type": "DatabaseObject"
+        }
+      ]
+    },
+    {
+      "className": "DBInfo",
+      "extends": "Release",
+      "fields": [
+        {
+          "name": "name",
+          "type": "String"
+        },
+        {
+          "name": "checksum",
+          "type": "Long"
+        }
+      ]
+    },
+    {
+      "className": "DatabaseIdentifier",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "databaseName",
+          "type": "String"
+        },
+        {
+          "name": "identifier",
+          "type": "String"
+        },
+        {
+          "name": "url",
+          "type": "String"
+        },
+        {
+          "name": "crossReference",
+          "collection": "List",
+          "elementType": "DatabaseIdentifier"
+        },
+        {
+          "name": "referenceDatabase",
+          "type": "ReferenceDatabase"
+        }
+      ]
+    },
+    {
+      "className": "DatabaseObject",
+      "implements": [
+        "Serializable",
+        "Comparable",
+        "DatabaseObjectLike"
+      ],
+      "fields": [
+        {
+          "name": "isLoaded",
+          "type": "Boolean",
+          "transient": true
+        },
+        {
+          "name": "preventLazyLoading",
+          "type": "Boolean",
+          "transient": true
+        },
+        {
+          "name": "dbId",
+          "type": "Long"
+        },
+        {
+          "name": "displayName",
+          "type": "String"
+        },
+        {
+          "name": "stId",
+          "type": "String"
+        },
+        {
+          "name": "stIdVersion",
+          "type": "String"
+        },
+        {
+          "name": "oldStId",
+          "type": "String",
+          "transient": true
+        },
+        {
+          "name": "created",
+          "type": "InstanceEdit"
+        },
+        {
+          "name": "modified",
+          "type": "InstanceEdit"
+        },
+        {
+          "name": "modifiedList",
+          "collection": "SortedSet",
+          "elementType": "ModifiedList"
+        },
+        {
+          "name": "stableIdentifier",
+          "type": "StableIdentifier"
+        }
+      ]
+    },
+    {
+      "className": "DefinedSet",
+      "extends": "EntitySet"
+    },
+    {
+      "className": "Deletable",
+      "extends": "DatabaseObjectLike"
+    },
+    {
+      "className": "Deleted",
+      "extends": "MetaDatabaseObject",
+      "fields": [
+        {
+          "name": "curatorComment",
+          "type": "String"
+        },
+        {
+          "name": "deletedInstance",
+          "collection": "List",
+          "elementType": "DeletedInstance"
+        },
+        {
+          "name": "reason",
+          "type": "DeletedControlledVocabulary"
+        },
+        {
+          "name": "replacementInstances",
+          "collection": "List",
+          "elementType": "Deletable"
+        },
+        {
+          "name": "deletedInstanceDbId",
+          "collection": "List",
+          "elementType": "Integer"
+        },
+        {
+          "name": "replacementInstanceDbIds",
+          "collection": "List",
+          "elementType": "Integer"
+        }
+      ]
+    },
+    {
+      "className": "DeletedControlledVocabulary",
+      "extends": "ControlledVocabulary"
+    },
+    {
+      "className": "DeletedInstance",
+      "extends": "MetaDatabaseObject",
+      "fields": [
+        {
+          "name": "clazz",
+          "type": "String"
+        },
+        {
+          "name": "deletedInstanceDbId",
+          "type": "Integer"
+        },
+        {
+          "name": "name",
+          "type": "String"
+        },
+        {
+          "name": "deletedStId",
+          "type": "String"
+        },
+        {
+          "name": "species",
+          "collection": "List",
+          "elementType": "Taxon"
+        }
+      ]
+    },
+    {
+      "className": "Depolymerisation",
+      "extends": "ReactionLikeEvent"
+    },
+    {
+      "className": "DirectedInteraction",
+      "extends": "Interaction",
+      "fields": [
+        {
+          "name": "source",
+          "type": "ReferenceEntity"
+        },
+        {
+          "name": "target",
+          "type": "ReferenceEntity"
+        }
+      ]
+    },
+    {
+      "className": "Disease",
+      "extends": "ExternalOntology"
+    },
+    {
+      "className": "Drug",
+      "extends": "PhysicalEntity",
+      "fields": [
+        {
+          "name": "referenceEntity",
+          "type": "ReferenceTherapeutic"
+        }
+      ]
+    },
+    {
+      "className": "DrugActionType",
+      "extends": "ReactionType",
+      "fields": [
+        {
+          "name": "instanceOf",
+          "collection": "List",
+          "elementType": "DrugActionType"
+        }
+      ]
+    },
+    {
+      "className": "DrugType",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "definition",
+          "type": "String"
+        },
+        {
+          "name": "name",
+          "collection": "List",
+          "elementType": "String"
+        }
+      ]
+    },
+    {
+      "className": "EntityFunctionalStatus",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "functionalStatus",
+          "collection": "List",
+          "elementType": "FunctionalStatus"
+        },
+        {
+          "name": "diseaseEntity",
+          "type": "PhysicalEntity"
+        },
+        {
+          "name": "normalEntity",
+          "type": "PhysicalEntity"
+        }
+      ]
+    },
+    {
+      "className": "EntitySet",
+      "extends": "PhysicalEntity",
+      "fields": [
+        {
+          "name": "isOrdered",
+          "type": "Boolean"
+        },
+        {
+          "name": "hasMember",
+          "collection": "SortedSet",
+          "elementType": "HasMember"
+        },
+        {
+          "name": "species",
+          "collection": "List",
+          "elementType": "Species"
+        },
+        {
+          "name": "relatedSpecies",
+          "collection": "List",
+          "elementType": "Species"
+        }
+      ]
+    },
+    {
+      "className": "EntityWithAccessionedSequence",
+      "extends": "GenomeEncodedEntity",
+      "fields": [
+        {
+          "name": "endCoordinate",
+          "type": "Integer"
+        },
+        {
+          "name": "referenceType",
+          "type": "String"
+        },
+        {
+          "name": "startCoordinate",
+          "type": "Integer"
+        },
+        {
+          "name": "hasModifiedResidue",
+          "collection": "SortedSet",
+          "elementType": "HasModifiedResidue"
+        },
+        {
+          "name": "referenceEntity",
+          "type": "ReferenceSequence"
+        }
+      ]
+    },
+    {
+      "className": "Event",
+      "extends": "DatabaseObject",
+      "implements": [
+        "Trackable",
+        "Deletable"
+      ],
+      "fields": [
+        {
+          "name": "definition",
+          "type": "String"
+        },
+        {
+          "name": "isInDisease",
+          "type": "Boolean"
+        },
+        {
+          "name": "isInferred",
+          "type": "Boolean"
+        },
+        {
+          "name": "name",
+          "collection": "List",
+          "elementType": "String"
+        },
+        {
+          "name": "releaseDate",
+          "type": "String"
+        },
+        {
+          "name": "releaseStatus",
+          "type": "String"
+        },
+        {
+          "name": "speciesName",
+          "type": "String"
+        },
+        {
+          "name": "doRelease",
+          "type": "Boolean"
+        },
+        {
+          "name": "authored",
+          "collection": "List",
+          "elementType": "InstanceEdit"
+        },
+        {
+          "name": "crossReference",
+          "collection": "List",
+          "elementType": "DatabaseIdentifier"
+        },
+        {
+          "name": "compartment",
+          "collection": "SortedSet",
+          "elementType": "HasCompartment"
+        },
+        {
+          "name": "disease",
+          "collection": "List",
+          "elementType": "Disease"
+        },
+        {
+          "name": "edited",
+          "collection": "List",
+          "elementType": "InstanceEdit"
+        },
+        {
+          "name": "eventOf",
+          "collection": "List",
+          "elementType": "Pathway"
+        },
+        {
+          "name": "evidenceType",
+          "type": "EvidenceType"
+        },
+        {
+          "name": "figure",
+          "collection": "List",
+          "elementType": "Figure"
+        },
+        {
+          "name": "precedingEvent",
+          "collection": "List",
+          "elementType": "Event"
+        },
+        {
+          "name": "followingEvent",
+          "collection": "List",
+          "elementType": "Event"
+        },
+        {
+          "name": "goBiologicalProcess",
+          "type": "GO_BiologicalProcess"
+        },
+        {
+          "name": "inferredFrom",
+          "collection": "Set",
+          "elementType": "Event"
+        },
+        {
+          "name": "literatureReference",
+          "collection": "List",
+          "elementType": "Publication"
+        },
+        {
+          "name": "orthologousEvent",
+          "collection": "Set",
+          "elementType": "Event"
+        },
+        {
+          "name": "relatedSpecies",
+          "collection": "List",
+          "elementType": "Species"
+        },
+        {
+          "name": "reviewed",
+          "collection": "List",
+          "elementType": "InstanceEdit"
+        },
+        {
+          "name": "revised",
+          "collection": "List",
+          "elementType": "InstanceEdit"
+        },
+        {
+          "name": "species",
+          "collection": "List",
+          "elementType": "Species"
+        },
+        {
+          "name": "summation",
+          "collection": "List",
+          "elementType": "Summation"
+        },
+        {
+          "name": "negativePrecedingEvent",
+          "collection": "List",
+          "elementType": "NegativePrecedingEvent"
+        },
+        {
+          "name": "reviewStatus",
+          "type": "ReviewStatus"
+        },
+        {
+          "name": "previousReviewStatus",
+          "type": "ReviewStatus"
+        },
+        {
+          "name": "internalReviewed",
+          "collection": "List",
+          "elementType": "InstanceEdit"
+        },
+        {
+          "name": "structureModified",
+          "collection": "SortedSet",
+          "elementType": "StructureModified"
+        },
+        {
+          "name": "deleted",
+          "collection": "List",
+          "elementType": "Deleted"
+        },
+        {
+          "name": "updateTrackers",
+          "collection": "List",
+          "elementType": "UpdateTracker"
+        }
+      ]
+    },
+    {
+      "className": "EvidenceType",
+      "extends": "ExternalOntology"
+    },
+    {
+      "className": "ExternalOntology",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "databaseName",
+          "type": "String"
+        },
+        {
+          "name": "definition",
+          "type": "String"
+        },
+        {
+          "name": "identifier",
+          "type": "String"
+        },
+        {
+          "name": "name",
+          "collection": "List",
+          "elementType": "String"
+        },
+        {
+          "name": "synonym",
+          "collection": "List",
+          "elementType": "String"
+        },
+        {
+          "name": "url",
+          "type": "String"
+        },
+        {
+          "name": "instanceOf",
+          "collection": "List",
+          "elementType": "ExternalOntology"
+        },
+        {
+          "name": "referenceDatabase",
+          "type": "ReferenceDatabase"
+        }
+      ]
+    },
+    {
+      "className": "FailedReaction",
+      "extends": "ReactionLikeEvent"
+    },
+    {
+      "className": "Figure",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "url",
+          "type": "String"
+        }
+      ]
+    },
+    {
+      "className": "FragmentDeletionModification",
+      "extends": "FragmentModification"
+    },
+    {
+      "className": "FragmentInsertionModification",
+      "extends": "FragmentModification",
+      "fields": [
+        {
+          "name": "coordinate",
+          "type": "Integer"
+        }
+      ]
+    },
+    {
+      "className": "FragmentModification",
+      "extends": "GeneticallyModifiedResidue",
+      "fields": [
+        {
+          "name": "endPositionInReferenceSequence",
+          "type": "Integer"
+        },
+        {
+          "name": "startPositionInReferenceSequence",
+          "type": "Integer"
+        }
+      ]
+    },
+    {
+      "className": "FragmentReplacedModification",
+      "extends": "FragmentModification",
+      "fields": [
+        {
+          "name": "alteredAminoAcidFragment",
+          "type": "String"
+        }
+      ]
+    },
+    {
+      "className": "FunctionalStatus",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "functionalStatusType",
+          "type": "FunctionalStatusType"
+        },
+        {
+          "name": "structuralVariant",
+          "type": "SequenceOntology"
+        }
+      ]
+    },
+    {
+      "className": "FunctionalStatusType",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "definition",
+          "type": "String"
+        },
+        {
+          "name": "name",
+          "collection": "List",
+          "elementType": "String"
+        }
+      ]
+    },
+    {
+      "className": "GO_BiologicalProcess",
+      "extends": "GO_Term"
+    },
+    {
+      "className": "GO_CellularComponent",
+      "extends": "GO_Term",
+      "fields": [
+        {
+          "name": "componentOf",
+          "collection": "List",
+          "elementType": "GO_CellularComponent"
+        },
+        {
+          "name": "hasPart",
+          "collection": "List",
+          "elementType": "GO_CellularComponent"
+        },
+        {
+          "name": "instanceOf",
+          "collection": "List",
+          "elementType": "GO_CellularComponent"
+        },
+        {
+          "name": "surroundedBy",
+          "collection": "List",
+          "elementType": "GO_CellularComponent"
+        }
+      ]
+    },
+    {
+      "className": "GO_MolecularFunction",
+      "extends": "GO_Term",
+      "fields": [
+        {
+          "name": "ecNumber",
+          "type": "String"
+        }
+      ]
+    },
+    {
+      "className": "GO_Term",
+      "extends": "ExternalOntology"
+    },
+    {
+      "className": "GeneticallyModifiedResidue",
+      "extends": "AbstractModifiedResidue"
+    },
+    {
+      "className": "GenomeEncodedEntity",
+      "extends": "PhysicalEntity",
+      "fields": [
+        {
+          "name": "species",
+          "type": "Taxon"
+        }
+      ]
+    },
+    {
+      "className": "GroupModifiedResidue",
+      "extends": "TranslationalModification",
+      "fields": [
+        {
+          "name": "modification",
+          "type": "DatabaseObject"
+        }
+      ]
+    },
+    {
+      "className": "InstanceEdit",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "dateTime",
+          "type": "String"
+        },
+        {
+          "name": "note",
+          "type": "String"
+        },
+        {
+          "name": "author",
+          "collection": "List",
+          "elementType": "Person"
+        }
+      ]
+    },
+    {
+      "className": "InterChainCrosslinkedResidue",
+      "extends": "CrosslinkedResidue",
+      "fields": [
+        {
+          "name": "equivalentTo",
+          "collection": "List",
+          "elementType": "InterChainCrosslinkedResidue"
+        },
+        {
+          "name": "secondReferenceSequence",
+          "collection": "Set",
+          "elementType": "ReferenceSequence"
+        }
+      ]
+    },
+    {
+      "className": "Interaction",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "referenceDatabase",
+          "type": "ReferenceDatabase"
+        },
+        {
+          "name": "databaseName",
+          "type": "String"
+        },
+        {
+          "name": "score",
+          "type": "Double"
+        },
+        {
+          "name": "accession",
+          "collection": "List",
+          "elementType": "String"
+        },
+        {
+          "name": "pubmed",
+          "collection": "List",
+          "elementType": "String"
+        },
+        {
+          "name": "url",
+          "type": "String"
+        }
+      ]
+    },
+    {
+      "className": "InteractionEvent",
+      "extends": "Event",
+      "fields": [
+        {
+          "name": "partners",
+          "collection": "List",
+          "elementType": "PhysicalEntity"
+        }
+      ]
+    },
+    {
+      "className": "IntraChainCrosslinkedResidue",
+      "extends": "CrosslinkedResidue"
+    },
+    {
+      "className": "LiteratureReference",
+      "extends": "Publication",
+      "fields": [
+        {
+          "name": "PUBMED_URL",
+          "type": "String",
+          "static": true,
+          "transient": true
+        },
+        {
+          "name": "pages",
+          "type": "String"
+        },
+        {
+          "name": "pubMedIdentifier",
+          "type": "Integer"
+        },
+        {
+          "name": "volume",
+          "type": "Integer"
+        },
+        {
+          "name": "year",
+          "type": "Integer"
+        },
+        {
+          "name": "retractionStatus",
+          "type": "RetractionStatus"
+        }
+      ]
+    },
+    {
+      "className": "MarkerReference",
+      "extends": "ControlReference",
+      "fields": [
+        {
+          "name": "marker",
+          "type": "EntityWithAccessionedSequence"
+        },
+        {
+          "name": "cell",
+          "collection": "List",
+          "elementType": "Cell"
+        }
+      ]
+    },
+    {
+      "className": "MetaDatabaseObject",
+      "extends": "DatabaseObject"
+    },
+    {
+      "className": "ModifiedNucleotide",
+      "extends": "TranscriptionalModification",
+      "fields": [
+        {
+          "name": "coordinate",
+          "type": "Integer"
+        },
+        {
+          "name": "modification",
+          "type": "DatabaseObject"
+        }
+      ]
+    },
+    {
+      "className": "ModifiedResidue",
+      "extends": "TranslationalModification"
+    },
+    {
+      "className": "NegativeGeneExpressionRegulation",
+      "extends": "NegativeRegulation"
+    },
+    {
+      "className": "NegativePrecedingEvent",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "comment",
+          "type": "String"
+        },
+        {
+          "name": "precedingEvent",
+          "collection": "List",
+          "elementType": "Event"
+        },
+        {
+          "name": "reason",
+          "type": "NegativePrecedingEventReason"
+        }
+      ]
+    },
+    {
+      "className": "NegativePrecedingEventReason",
+      "extends": "ControlledVocabulary"
+    },
+    {
+      "className": "NegativeRegulation",
+      "extends": "Regulation"
+    },
+    {
+      "className": "NonsenseMutation",
+      "extends": "ReplacedResidue"
+    },
+    {
+      "className": "Ontology",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "ontology",
+          "type": "byte[]"
+        }
+      ]
+    },
+    {
+      "className": "OtherEntity",
+      "extends": "PhysicalEntity"
+    },
+    {
+      "className": "Pathway",
+      "extends": "Event",
+      "fields": [
+        {
+          "name": "doi",
+          "type": "String"
+        },
+        {
+          "name": "hasDiagram",
+          "type": "Boolean"
+        },
+        {
+          "name": "hasEHLD",
+          "type": "Boolean"
+        },
+        {
+          "name": "diagramWidth",
+          "type": "Integer"
+        },
+        {
+          "name": "diagramHeight",
+          "type": "Integer"
+        },
+        {
+          "name": "isCanonical",
+          "type": "Boolean"
+        },
+        {
+          "name": "lastUpdatedDate",
+          "type": "String"
+        },
+        {
+          "name": "hasEvent",
+          "collection": "SortedSet",
+          "elementType": "HasEvent"
+        },
+        {
+          "name": "hasEncapsulatedEvent",
+          "collection": "SortedSet",
+          "elementType": "HasEncapsulatedEvent"
+        },
+        {
+          "name": "normalPathway",
+          "type": "Pathway"
+        },
+        {
+          "name": "cell",
+          "type": "Cell"
+        }
+      ]
+    },
+    {
+      "className": "PathwayDiagram",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "representedPathway",
+          "collection": "List",
+          "elementType": "Pathway"
+        },
+        {
+          "name": "renderedInstance",
+          "collection": "List",
+          "elementType": "DatabaseObject"
+        },
+        {
+          "name": "jsonFile",
+          "type": "String"
+        },
+        {
+          "name": "width",
+          "type": "int"
+        },
+        {
+          "name": "height",
+          "type": "int"
+        }
+      ]
+    },
+    {
+      "className": "Person",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "firstname",
+          "type": "String"
+        },
+        {
+          "name": "initial",
+          "type": "String"
+        },
+        {
+          "name": "orcidId",
+          "type": "String"
+        },
+        {
+          "name": "project",
+          "type": "String"
+        },
+        {
+          "name": "surname",
+          "type": "String"
+        },
+        {
+          "name": "affiliation",
+          "collection": "List",
+          "elementType": "Affiliation"
+        },
+        {
+          "name": "crossReference",
+          "collection": "List",
+          "elementType": "DatabaseIdentifier"
+        },
+        {
+          "name": "publicationAuthorList",
+          "collection": "List",
+          "elementType": "AuthorPublication"
+        }
+      ]
+    },
+    {
+      "className": "PhysicalEntity",
+      "extends": "DatabaseObject",
+      "implements": [
+        "Trackable",
+        "Deletable"
+      ],
+      "fields": [
+        {
+          "name": "definition",
+          "type": "String"
+        },
+        {
+          "name": "isInDisease",
+          "type": "Boolean"
+        },
+        {
+          "name": "name",
+          "collection": "List",
+          "elementType": "String"
+        },
+        {
+          "name": "speciesName",
+          "type": "String"
+        },
+        {
+          "name": "systematicName",
+          "type": "String"
+        },
+        {
+          "name": "authored",
+          "type": "InstanceEdit"
+        },
+        {
+          "name": "catalystActivities",
+          "collection": "List",
+          "elementType": "CatalystActivity"
+        },
+        {
+          "name": "compartment",
+          "collection": "SortedSet",
+          "elementType": "HasCompartment"
+        },
+        {
+          "name": "componentOf",
+          "collection": "SortedSet",
+          "elementType": "HasComponentForComplex"
+        },
+        {
+          "name": "crossReference",
+          "collection": "List",
+          "elementType": "DatabaseIdentifier"
+        },
+        {
+          "name": "disease",
+          "collection": "List",
+          "elementType": "Disease"
+        },
+        {
+          "name": "edited",
+          "collection": "List",
+          "elementType": "InstanceEdit"
+        },
+        {
+          "name": "figure",
+          "collection": "List",
+          "elementType": "Figure"
+        },
+        {
+          "name": "goCellularComponent",
+          "type": "GO_CellularComponent"
+        },
+        {
+          "name": "inferredTo",
+          "collection": "List",
+          "elementType": "PhysicalEntity"
+        },
+        {
+          "name": "inferredFrom",
+          "collection": "List",
+          "elementType": "PhysicalEntity"
+        },
+        {
+          "name": "isRequired",
+          "collection": "List",
+          "elementType": "Requirement"
+        },
+        {
+          "name": "literatureReference",
+          "collection": "List",
+          "elementType": "Publication"
+        },
+        {
+          "name": "memberOf",
+          "collection": "List",
+          "elementType": "PhysicalEntity"
+        },
+        {
+          "name": "negativelyRegulates",
+          "collection": "List",
+          "elementType": "NegativeRegulation"
+        },
+        {
+          "name": "positivelyRegulates",
+          "collection": "List",
+          "elementType": "PositiveRegulation"
+        },
+        {
+          "name": "repeatedUnitOf",
+          "collection": "Set",
+          "elementType": "RepeatedUnitForPhysicalEntity"
+        },
+        {
+          "name": "consumedByEvent",
+          "collection": "List",
+          "elementType": "InputForReactionLikeEvent"
+        },
+        {
+          "name": "producedByEvent",
+          "collection": "List",
+          "elementType": "OutputForReactionLikeEvent"
+        },
+        {
+          "name": "reviewed",
+          "collection": "List",
+          "elementType": "InstanceEdit"
+        },
+        {
+          "name": "revised",
+          "collection": "List",
+          "elementType": "InstanceEdit"
+        },
+        {
+          "name": "summation",
+          "collection": "List",
+          "elementType": "Summation"
+        },
+        {
+          "name": "cellType",
+          "collection": "List",
+          "elementType": "CellType"
+        },
+        {
+          "name": "markingReferences",
+          "collection": "List",
+          "elementType": "MarkerReference"
+        },
+        {
+          "name": "deleted",
+          "collection": "List",
+          "elementType": "Deleted"
+        },
+        {
+          "name": "updateTrackers",
+          "collection": "List",
+          "elementType": "UpdateTracker"
+        }
+      ]
+    },
+    {
+      "className": "PhysicalEntityCellType",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "physicalEntity",
+          "type": "PhysicalEntity"
+        },
+        {
+          "name": "cell",
+          "type": "Cell"
+        }
+      ]
+    },
+    {
+      "className": "Polymer",
+      "extends": "PhysicalEntity",
+      "fields": [
+        {
+          "name": "maxUnitCount",
+          "type": "Integer"
+        },
+        {
+          "name": "minUnitCount",
+          "type": "Integer"
+        },
+        {
+          "name": "repeatedUnit",
+          "collection": "SortedSet",
+          "elementType": "RepeatedUnit"
+        },
+        {
+          "name": "species",
+          "collection": "List",
+          "elementType": "Species"
+        }
+      ]
+    },
+    {
+      "className": "Polymerisation",
+      "extends": "ReactionLikeEvent"
+    },
+    {
+      "className": "PositiveGeneExpressionRegulation",
+      "extends": "PositiveRegulation"
+    },
+    {
+      "className": "PositiveRegulation",
+      "extends": "Regulation"
+    },
+    {
+      "className": "ProteinDrug",
+      "extends": "Drug"
+    },
+    {
+      "className": "PsiMod",
+      "extends": "ExternalOntology",
+      "fields": [
+        {
+          "name": "label",
+          "type": "String"
+        }
+      ]
+    },
+    {
+      "className": "Publication",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "title",
+          "type": "String"
+        },
+        {
+          "name": "author",
+          "collection": "SortedSet",
+          "elementType": "PublicationAuthor"
+        }
+      ]
+    },
+    {
+      "className": "RNADrug",
+      "extends": "Drug"
+    },
+    {
+      "className": "Reaction",
+      "extends": "ReactionLikeEvent",
+      "fields": [
+        {
+          "name": "reverseReaction",
+          "type": "Reaction"
+        }
+      ]
+    },
+    {
+      "className": "ReactionLikeEvent",
+      "extends": "Event",
+      "fields": [
+        {
+          "name": "isChimeric",
+          "type": "Boolean"
+        },
+        {
+          "name": "systematicName",
+          "type": "String"
+        },
+        {
+          "name": "category",
+          "type": "String"
+        },
+        {
+          "name": "catalystActivity",
+          "collection": "List",
+          "elementType": "CatalystActivity"
+        },
+        {
+          "name": "catalystActivityReference",
+          "type": "CatalystActivityReference"
+        },
+        {
+          "name": "entityFunctionalStatus",
+          "collection": "List",
+          "elementType": "EntityFunctionalStatus"
+        },
+        {
+          "name": "entityOnOtherCell",
+          "collection": "List",
+          "elementType": "PhysicalEntity"
+        },
+        {
+          "name": "input",
+          "collection": "Set",
+          "elementType": "Input"
+        },
+        {
+          "name": "output",
+          "collection": "Set",
+          "elementType": "Output"
+        },
+        {
+          "name": "normalReaction",
+          "type": "ReactionLikeEvent"
+        },
+        {
+          "name": "regulatedBy",
+          "collection": "List",
+          "elementType": "Regulation"
+        },
+        {
+          "name": "regulationReference",
+          "collection": "List",
+          "elementType": "RegulationReference"
+        },
+        {
+          "name": "requiredInputComponent",
+          "collection": "Set",
+          "elementType": "PhysicalEntity"
+        },
+        {
+          "name": "hasInteraction",
+          "collection": "List",
+          "elementType": "InteractionEvent"
+        },
+        {
+          "name": "reactionType",
+          "collection": "List",
+          "elementType": "ReactionType"
+        },
+        {
+          "name": "participantCellType",
+          "collection": "List",
+          "elementType": "PhysicalEntityCellType"
+        }
+      ]
+    },
+    {
+      "className": "ReactionType",
+      "extends": "ControlledVocabulary"
+    },
+    {
+      "className": "ReferenceDNASequence",
+      "extends": "ReferenceSequence"
+    },
+    {
+      "className": "ReferenceDatabase",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "accessUrl",
+          "type": "String"
+        },
+        {
+          "name": "name",
+          "collection": "List",
+          "elementType": "String"
+        },
+        {
+          "name": "url",
+          "type": "String"
+        },
+        {
+          "name": "resourceIdentifier",
+          "type": "String"
+        }
+      ]
+    },
+    {
+      "className": "ReferenceEntity",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "databaseName",
+          "type": "String"
+        },
+        {
+          "name": "identifier",
+          "type": "String"
+        },
+        {
+          "name": "name",
+          "collection": "List",
+          "elementType": "String"
+        },
+        {
+          "name": "otherIdentifier",
+          "collection": "List",
+          "elementType": "String"
+        },
+        {
+          "name": "url",
+          "type": "String"
+        },
+        {
+          "name": "crossReference",
+          "collection": "List",
+          "elementType": "DatabaseIdentifier"
+        },
+        {
+          "name": "referenceDatabase",
+          "type": "ReferenceDatabase"
+        },
+        {
+          "name": "physicalEntity",
+          "collection": "List",
+          "elementType": "PhysicalEntity"
+        }
+      ]
+    },
+    {
+      "className": "ReferenceGeneProduct",
+      "extends": "ReferenceSequence",
+      "fields": [
+        {
+          "name": "chain",
+          "collection": "List",
+          "elementType": "String"
+        },
+        {
+          "name": "referenceGene",
+          "collection": "List",
+          "elementType": "ReferenceDNASequence"
+        },
+        {
+          "name": "referenceTranscript",
+          "collection": "List",
+          "elementType": "ReferenceRNASequence"
+        }
+      ]
+    },
+    {
+      "className": "ReferenceGroup",
+      "extends": "ReferenceEntity",
+      "fields": [
+        {
+          "name": "formula",
+          "type": "String"
+        }
+      ]
+    },
+    {
+      "className": "ReferenceIsoform",
+      "extends": "ReferenceGeneProduct",
+      "fields": [
+        {
+          "name": "variantIdentifier",
+          "type": "String"
+        },
+        {
+          "name": "isoformParent",
+          "collection": "List",
+          "elementType": "ReferenceGeneProduct"
+        }
+      ]
+    },
+    {
+      "className": "ReferenceMolecule",
+      "extends": "ReferenceEntity",
+      "fields": [
+        {
+          "name": "formula",
+          "type": "String"
+        },
+        {
+          "name": "trivial",
+          "type": "Boolean"
+        }
+      ]
+    },
+    {
+      "className": "ReferenceRNASequence",
+      "extends": "ReferenceSequence",
+      "fields": [
+        {
+          "name": "referenceGene",
+          "collection": "List",
+          "elementType": "ReferenceDNASequence"
+        }
+      ]
+    },
+    {
+      "className": "ReferenceSequence",
+      "extends": "ReferenceEntity",
+      "fields": [
+        {
+          "name": "checksum",
+          "type": "String"
+        },
+        {
+          "name": "comment",
+          "collection": "List",
+          "elementType": "String"
+        },
+        {
+          "name": "description",
+          "collection": "List",
+          "elementType": "String"
+        },
+        {
+          "name": "geneName",
+          "collection": "List",
+          "elementType": "String"
+        },
+        {
+          "name": "isSequenceChanged",
+          "type": "Boolean"
+        },
+        {
+          "name": "keyword",
+          "collection": "List",
+          "elementType": "String"
+        },
+        {
+          "name": "secondaryIdentifier",
+          "collection": "List",
+          "elementType": "String"
+        },
+        {
+          "name": "sequenceLength",
+          "type": "Integer"
+        },
+        {
+          "name": "species",
+          "type": "Species"
+        }
+      ]
+    },
+    {
+      "className": "ReferenceTherapeutic",
+      "extends": "ReferenceEntity",
+      "fields": [
+        {
+          "name": "abbreviation",
+          "type": "String"
+        },
+        {
+          "name": "approvalSource",
+          "collection": "List",
+          "elementType": "String"
+        },
+        {
+          "name": "approved",
+          "type": "Boolean"
+        },
+        {
+          "name": "inn",
+          "type": "String"
+        },
+        {
+          "name": "type",
+          "type": "String"
+        }
+      ]
+    },
+    {
+      "className": "Regulation",
+      "extends": "DatabaseObject",
+      "implements": [
+        "Deletable"
+      ],
+      "fields": [
+        {
+          "name": "releaseDate",
+          "type": "String"
+        },
+        {
+          "name": "activeUnit",
+          "collection": "List",
+          "elementType": "PhysicalEntity"
+        },
+        {
+          "name": "activity",
+          "type": "GO_MolecularFunction"
+        },
+        {
+          "name": "authored",
+          "type": "InstanceEdit"
+        },
+        {
+          "name": "edited",
+          "collection": "List",
+          "elementType": "InstanceEdit"
+        },
+        {
+          "name": "goBiologicalProcess",
+          "type": "GO_BiologicalProcess"
+        },
+        {
+          "name": "inferredTo",
+          "collection": "List",
+          "elementType": "Regulation"
+        },
+        {
+          "name": "inferredFrom",
+          "collection": "List",
+          "elementType": "Regulation"
+        },
+        {
+          "name": "literatureReference",
+          "collection": "List",
+          "elementType": "Publication"
+        },
+        {
+          "name": "regulatedEntity",
+          "collection": "List",
+          "elementType": "ReactionLikeEvent"
+        },
+        {
+          "name": "regulator",
+          "type": "PhysicalEntity"
+        },
+        {
+          "name": "reviewed",
+          "collection": "List",
+          "elementType": "InstanceEdit"
+        },
+        {
+          "name": "revised",
+          "collection": "List",
+          "elementType": "InstanceEdit"
+        },
+        {
+          "name": "summation",
+          "collection": "List",
+          "elementType": "Summation"
+        },
+        {
+          "name": "deleted",
+          "collection": "List",
+          "elementType": "Deleted"
+        }
+      ]
+    },
+    {
+      "className": "RegulationReference",
+      "extends": "ControlReference",
+      "fields": [
+        {
+          "name": "regulation",
+          "type": "Regulation"
+        }
+      ]
+    },
+    {
+      "className": "RegulationType",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "name",
+          "type": "String"
+        }
+      ]
+    },
+    {
+      "className": "Release",
+      "extends": "MetaDatabaseObject",
+      "fields": [
+        {
+          "name": "releaseDate",
+          "type": "String"
+        },
+        {
+          "name": "releaseNumber",
+          "type": "Integer"
+        }
+      ]
+    },
+    {
+      "className": "ReplacedResidue",
+      "extends": "GeneticallyModifiedResidue",
+      "fields": [
+        {
+          "name": "coordinate",
+          "type": "Integer"
+        },
+        {
+          "name": "psiMod",
+          "collection": "List",
+          "elementType": "PsiMod"
+        }
+      ]
+    },
+    {
+      "className": "Requirement",
+      "extends": "PositiveRegulation"
+    },
+    {
+      "className": "RetractionStatus",
+      "extends": "ControlledVocabulary"
+    },
+    {
+      "className": "ReviewStatus",
+      "extends": "ControlledVocabulary"
+    },
+    {
+      "className": "SequenceOntology",
+      "extends": "ExternalOntology"
+    },
+    {
+      "className": "SimpleEntity",
+      "extends": "PhysicalEntity",
+      "fields": [
+        {
+          "name": "referenceType",
+          "type": "String"
+        },
+        {
+          "name": "referenceEntity",
+          "type": "ReferenceMolecule"
+        },
+        {
+          "name": "species",
+          "type": "Species"
+        }
+      ]
+    },
+    {
+      "className": "Species",
+      "extends": "Taxon",
+      "fields": [
+        {
+          "name": "abbreviation",
+          "type": "String"
+        }
+      ]
+    },
+    {
+      "className": "StableIdentifier",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "identifier",
+          "type": "String"
+        },
+        {
+          "name": "identifierVersion",
+          "type": "String"
+        },
+        {
+          "name": "oldIdentifier",
+          "type": "String"
+        },
+        {
+          "name": "oldIdentifierVersion",
+          "type": "String"
+        },
+        {
+          "name": "released",
+          "type": "Boolean"
+        }
+      ]
+    },
+    {
+      "className": "Summation",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "text",
+          "type": "String"
+        },
+        {
+          "name": "literatureReference",
+          "collection": "List",
+          "elementType": "Publication"
+        }
+      ]
+    },
+    {
+      "className": "Taxon",
+      "extends": "DatabaseObject",
+      "fields": [
+        {
+          "name": "name",
+          "collection": "List",
+          "elementType": "String"
+        },
+        {
+          "name": "taxId",
+          "type": "String"
+        },
+        {
+          "name": "crossReference",
+          "collection": "List",
+          "elementType": "DatabaseIdentifier"
+        },
+        {
+          "name": "superTaxon",
+          "type": "Taxon"
+        }
+      ]
+    },
+    {
+      "className": "TopLevelPathway",
+      "extends": "Pathway"
+    },
+    {
+      "className": "Trackable",
+      "extends": "DatabaseObjectLike"
+    },
+    {
+      "className": "TranscriptionalModification",
+      "extends": "AbstractModifiedResidue"
+    },
+    {
+      "className": "TranslationalModification",
+      "extends": "AbstractModifiedResidue",
+      "fields": [
+        {
+          "name": "coordinate",
+          "type": "Integer"
+        },
+        {
+          "name": "label",
+          "type": "String"
+        },
+        {
+          "name": "psiMod",
+          "type": "PsiMod"
+        }
+      ]
+    },
+    {
+      "className": "URL",
+      "extends": "Publication",
+      "fields": [
+        {
+          "name": "uniformResourceLocator",
+          "type": "String"
+        }
+      ]
+    },
+    {
+      "className": "UndirectedInteraction",
+      "extends": "Interaction",
+      "fields": [
+        {
+          "name": "interactor",
+          "collection": "List",
+          "elementType": "ReferenceEntity"
+        }
+      ]
+    },
+    {
+      "className": "UpdateTracker",
+      "extends": "MetaDatabaseObject",
+      "fields": [
+        {
+          "name": "action",
+          "collection": "List",
+          "elementType": "String"
+        },
+        {
+          "name": "release",
+          "type": "Release"
+        },
+        {
+          "name": "updatedInstance",
+          "collection": "List",
+          "elementType": "Trackable"
+        }
+      ]
+    }
+  ]
+}

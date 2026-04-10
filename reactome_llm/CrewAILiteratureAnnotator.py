@@ -15,7 +15,7 @@ Author: GitHub Copilot & Reactome Team
 import json
 import logging
 from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
 from crewai import Crew, Process
@@ -24,6 +24,7 @@ from crewai.task import Task
 from zmq import log
 
 from ReactomeAgents import ReactomeAgents
+from CrewAIEventLogger import emit_agent_event
 from ReactomeTasks import ReactomeTasks  
 from ReactomeTools import ReactomeToolkit
 from GenePathwayAnnotator import GenePathwayAnnotator 
@@ -40,8 +41,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class AnnotationRequest:
     """Input data structure for literature annotation requests"""
-    gene: str
-    papers: List[str]  # List of PMIDs mapped to local PDFs at data/papers/<pmid>.pdf
+    gene: Optional[str] = None
+    papers: List[str] = field(default_factory=list)  # List of PMIDs mapped to local PDFs at data/papers/<pmid>.pdf
     pathways: Optional[List[str]] = None  # Target pathways for focused annotation
     schema_path: Optional[str] = 'resources/reactome_domain_model.json'  # Optional JSON schema file used during QA validation
     max_papers: int = 8
@@ -147,6 +148,7 @@ class CrewAILiteratureAnnotator:
         Raises:
             CrewAIAnnotationError: When multi-agent annotation workflow fails
         """
+        request.gene = (request.gene or "").strip() or "UNSPECIFIED_GENE"
         logger.info(f"Starting multi-agent annotation for gene: {request.gene}")
         
         try:
@@ -211,6 +213,7 @@ class CrewAILiteratureAnnotator:
     async def _phase_1_literature_extraction(self, request: AnnotationRequest) -> Dict[str, Any]:
         """Phase 1: Extract and structure information from literature"""
         logger.info(f"Phase 1: Literature extraction for {request.gene}")
+        emit_agent_event("LiteratureExtractor", "start", phase="phase_1_literature_extraction", gene=request.gene)
         
         # Create dynamic task for literature extraction
         extraction_task = self.tasks.create_literature_extraction_task(
@@ -231,6 +234,7 @@ class CrewAILiteratureAnnotator:
             "papers": request.papers,
             "max_papers": request.max_papers
         })
+        emit_agent_event("LiteratureExtractor", "end", phase="phase_1_literature_extraction", gene=request.gene)
         
         return {
             "raw_result": extraction_result,
@@ -244,6 +248,7 @@ class CrewAILiteratureAnnotator:
                                           extraction_context: Dict[str, Any]) -> Dict[str, Any]:
         """Phase 2: Convert structured information to Reactome data model instances"""
         logger.info(f"Phase 2: Data model creation for {request.gene}")
+        emit_agent_event("ReactomeCurator", "start", phase="phase_2_data_model_creation", gene=request.gene)
         
         # Create curation task
         curation_task = self.tasks.create_reactome_curation_task(
@@ -261,6 +266,7 @@ class CrewAILiteratureAnnotator:
             "gene": request.gene,
             "target_pathways": str(request.pathways or [])
         })
+        emit_agent_event("ReactomeCurator", "end", phase="phase_2_data_model_creation", gene=request.gene)
         
         return {
             "raw_result": curation_result,
@@ -275,6 +281,7 @@ class CrewAILiteratureAnnotator:
                                     curation_context: Dict[str, Any]) -> Dict[str, Any]:
         """Phase 3: Domain expert validation of generated instances"""
         logger.info(f"Phase 3: Expert review for {request.gene}")
+        emit_agent_event("Reviewer", "start", phase="phase_3_expert_review", gene=request.gene)
         
         # Create review task
         review_task = self.tasks.create_expert_review_task(
@@ -292,6 +299,7 @@ class CrewAILiteratureAnnotator:
             "gene": request.gene,
             "quality_threshold": request.quality_threshold
         })
+        emit_agent_event("Reviewer", "end", phase="phase_3_expert_review", gene=request.gene)
         
         return {
             "raw_result": review_result,
@@ -308,6 +316,7 @@ class CrewAILiteratureAnnotator:
                                         review_context: Dict[str, Any]) -> Dict[str, Any]:
         """Phase 4: Final QA check and consistency validation"""
         logger.info(f"Phase 4: Quality assurance for {request.gene}")
+        emit_agent_event("QualityChecker", "start", phase="phase_4_quality_assurance", gene=request.gene)
         
         # Create QA task
         qa_task = self.tasks.create_quality_assurance_task(
@@ -326,6 +335,7 @@ class CrewAILiteratureAnnotator:
             "gene": request.gene,
             "quality_threshold": request.quality_threshold
         })
+        emit_agent_event("QualityChecker", "end", phase="phase_4_quality_assurance", gene=request.gene)
         
         return {
             "raw_result": qa_result,
@@ -341,6 +351,7 @@ class CrewAILiteratureAnnotator:
                                                qa_context: Dict[str, Any]) -> Dict[str, Any]:
         """Phase 5: Virtual meeting among all agents for a final consensus decision"""
         logger.info(f"Phase 5: Final consensus meeting for {request.gene}")
+        emit_agent_event("ConsensusMeeting", "start", phase="phase_5_final_consensus", gene=request.gene)
 
         role_to_agent = {
             "reactome_curator": self.curator_agent,
@@ -351,6 +362,7 @@ class CrewAILiteratureAnnotator:
 
         votes: Dict[str, Any] = {}
         for role_name, agent in role_to_agent.items():
+            emit_agent_event(role_name, "start", phase="phase_5_final_vote", gene=request.gene)
             vote_task = self.tasks.create_final_vote_task(
                 gene=request.gene,
                 agent_role=role_name,
@@ -368,6 +380,7 @@ class CrewAILiteratureAnnotator:
                 "quality_threshold": str(request.quality_threshold)
             })
             votes[role_name] = self._parse_vote_result(vote_result)
+            emit_agent_event(role_name, "end", phase="phase_5_final_vote", gene=request.gene)
 
         consensus_task = self.tasks.create_final_consensus_task(
             gene=request.gene,
@@ -376,10 +389,13 @@ class CrewAILiteratureAnnotator:
         )
         consensus_task.agent = self.reviewer_agent
         self.crew.tasks = [consensus_task]
+        emit_agent_event("Reviewer", "start", phase="phase_5_consensus_synthesis", gene=request.gene)
         consensus_result = self.crew.kickoff({
             "gene": request.gene,
             "quality_threshold": str(request.quality_threshold)
         })
+        emit_agent_event("Reviewer", "end", phase="phase_5_consensus_synthesis", gene=request.gene)
+        emit_agent_event("ConsensusMeeting", "end", phase="phase_5_final_consensus", gene=request.gene)
 
         return {
             "individual_votes": votes,

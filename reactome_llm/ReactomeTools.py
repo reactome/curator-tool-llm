@@ -23,6 +23,7 @@ from pydantic import Field
 from GenePathwayAnnotator import GenePathwayAnnotator
 import ReactomeUtils as utils
 import ReactomeNeo4jUtils as neo4j_utils
+from CrewAIEventLogger import emit_tool_event
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,7 @@ class FullTextAnalysisTool(BaseTool):
     
     gene_annotator: GenePathwayAnnotator = Field(..., description="Gene annotator instance")
     
-    def _run(self, pmid: str, gene: str) -> str:
+    def _run(self, pmid: str, gene: str = "") -> str:
         """Analyze full-text paper for gene-related information.
         
         `pmid` may be a bare PMID string (e.g. '25391454') or an explicit local PDF path
@@ -86,6 +87,7 @@ class FullTextAnalysisTool(BaseTool):
         data/papers/<pmid>.pdf relative to the working directory.
         """
         try:
+            analysis_gene = (gene or "").strip() or "UNSPECIFIED_GENE"
             # Resolve a bare PMID to the expected local PDF path.
             pdf_path = pmid if str(pmid).lower().endswith(".pdf") else f"data/papers/{pmid}.pdf"
 
@@ -93,13 +95,13 @@ class FullTextAnalysisTool(BaseTool):
             if not _Path(pdf_path).exists():
                 return json.dumps({
                     "pmid": pmid,
-                    "gene": gene,
+                    "gene": analysis_gene,
                     "status": "skipped",
                     "error": f"Local PDF not found at '{pdf_path}'; full-text analysis skipped."
                 })
 
             model = self.gene_annotator.get_default_llm()
-            result = self.gene_annotator.analyze_full_paper(pdf_path, gene, model=model)
+            result = self.gene_annotator.analyze_full_paper(pdf_path, analysis_gene, model=model)
 
             # Convert model responses (e.g., LangChain AIMessage) into JSON-safe data.
             def _json_default(obj: Any) -> Any:
@@ -109,14 +111,14 @@ class FullTextAnalysisTool(BaseTool):
 
             return json.dumps({
                 "pmid": pmid,
-                "gene": gene,
+                "gene": analysis_gene,
                 "analysis": result,
                 "status": "success"
             }, default=_json_default)
         except Exception as e:
             return json.dumps({
                 "pmid": pmid,
-                "gene": gene, 
+                "gene": (gene or "").strip() or "UNSPECIFIED_GENE",
                 "error": str(e),
                 "status": "failed"
             })
@@ -433,6 +435,39 @@ class ReactomeToolkit:
         self.consistency_check = ConsistencyCheckTool(gene_annotator=self.gene_annotator)
         self.evidence_evaluation = EvidenceEvaluationTool(gene_annotator=self.gene_annotator)
         self.quality_metrics = QualityMetricsTool(gene_annotator=self.gene_annotator)
+        for tool in self.get_all_tools():
+            self._instrument_tool(tool)
+
+    def _instrument_tool(self, tool: BaseTool):
+        """Wrap tool execution to emit structured start/end events."""
+        if getattr(tool, "_crewai_structured_logging_wrapped", False):
+            return
+
+        original_run = tool._run
+
+        def wrapped_run(*args, **kwargs):
+            emit_tool_event(tool.name, "start")
+            try:
+                result = original_run(*args, **kwargs)
+                result_status = "end"
+                if isinstance(result, str):
+                    try:
+                        payload = json.loads(result)
+                        status_value = payload.get("status")
+                        if status_value in {"failed", "error"}:
+                            result_status = "error"
+                        else:
+                            result_status = "end"
+                    except Exception:
+                        result_status = "end"
+                emit_tool_event(tool.name, result_status)
+                return result
+            except Exception as exc:
+                emit_tool_event(tool.name, "error", error=str(exc))
+                raise
+
+        tool._run = wrapped_run
+        tool._crewai_structured_logging_wrapped = True
     
     def get_extractor_tools(self) -> List[BaseTool]:
         """Get tools for Literature Extractor agent"""

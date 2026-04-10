@@ -29,7 +29,7 @@ class ReactomeTasks:
         pass
     
     def create_literature_extraction_task(self, 
-                                        gene: str,
+                                        gene: Optional[str],
                                         papers: List[str], 
                                         max_papers: int = 8,
                                         enable_full_text: bool = False,
@@ -50,26 +50,44 @@ class ReactomeTasks:
         Returns:
             Configured Task instance
         """
-        if enable_literature_search:
+        query_gene = (gene or "").strip()
+        has_papers = len(papers) > 0
+        tool_gene = query_gene if query_gene else "UNSPECIFIED_GENE"
+        gene_label = query_gene if query_gene else "gene-agnostic full-text corpus"
+
+        if enable_literature_search and query_gene:
             if enable_full_text:
                 workflow_instructions = f"""
-        Step 1 — Call `literature_search` with gene="{gene}" to retrieve abstracts and metadata.
+        Step 1 — Call `literature_search` with gene="{query_gene}" to retrieve abstracts and metadata.
                The JSON result will contain a `papers` list, each entry with a `pmid` field.
-        Step 2 — For each PMID in the search results, call `fulltext_analysis` with pmid=<pmid_value> and gene="{gene}" to analyze the local PDF if available. If the file is not found, skip that PMID and continue.
+        Step 2 — For each PMID in the search results, call `fulltext_analysis` with pmid=<pmid_value> and gene="{tool_gene}" to analyze the local PDF if available. If the file is not found, skip that PMID and continue.
         Step 3 — Combine the available abstract and full-text evidence into the structured JSON output below.
                 """
             else:
                 workflow_instructions = f"""
-        Step 1 — Call `literature_search` with gene="{gene}" to retrieve abstracts and metadata.
+        Step 1 — Call `literature_search` with gene="{query_gene}" to retrieve abstracts and metadata.
                The JSON result will contain a `papers` list, each entry with a `pmid` field.
         Step 2 — Full-text analysis is disabled for this run; use the search results only.
         Step 3 — Combine the available evidence into the structured JSON output below.
                 """
-        else:
-            if enable_full_text:
+        elif has_papers:
+            if enable_literature_search and not query_gene:
+                if enable_full_text:
+                    workflow_instructions = f"""
+        Step 1 — A query gene was not provided, so literature search is unavailable for this run.
+        Step 2 — Use only the provided PMID list and call `fulltext_analysis` with gene="{tool_gene}" for each paper.
+        Step 3 — Extract candidate genes, interactions, and pathways directly from the full text and aggregate into the output JSON.
+                    """
+                else:
+                    workflow_instructions = """
+        Step 1 — A query gene was not provided, so literature search is unavailable for this run.
+        Step 2 — Full-text analysis is disabled; use only the provided PMID metadata/context.
+        Step 3 — Return a conservative structured output and record that evidence is limited without full-text parsing.
+                    """
+            elif enable_full_text:
                 workflow_instructions = f"""
         Step 1 — Use only the provided PMID list as the paper set for this run. Do not call `literature_search`.
-        Step 2 — For each provided PMID, call `fulltext_analysis` with pmid=<pmid_value> and gene="{gene}". The tool resolves the PMID to `data/papers/<pmid>.pdf`. If a PDF is missing, skip that PMID and continue.
+        Step 2 — For each provided PMID, call `fulltext_analysis` with pmid=<pmid_value> and gene="{tool_gene}". The tool resolves the PMID to `data/papers/<pmid>.pdf`. If a PDF is missing, skip that PMID and continue.
         Step 3 — Combine findings from the provided PMID set into the structured JSON output below.
                 """
             else:
@@ -78,9 +96,15 @@ class ReactomeTasks:
         Step 2 — Full-text analysis is disabled for this run; do not expand beyond the provided PMID list.
         Step 3 — Combine findings from the provided PMID set into the structured JSON output below.
                 """
+        else:
+            workflow_instructions = """
+        Step 1 — No papers were provided and literature search is unavailable in the current settings.
+        Step 2 — Return an empty, well-formed structured output with a note that no evidence sources were available.
+        Step 3 — Do not fabricate interactions/pathways without evidence.
+            """
 
         description = f"""
-        Extract and structure molecular information about gene {gene} from scientific literature.
+        Extract and structure molecular information about {gene_label} from scientific literature.
         
         **Primary Objectives:**
         1. Process up to {max_papers} scientific papers (PMIDs provided: {papers[:5]}...)
@@ -100,7 +124,7 @@ class ReactomeTasks:
         Provide a structured JSON output with the following format:
         ```json
         {{
-            "gene": "{gene}",
+            "gene": "{tool_gene}",
             "interactions": [
                 {{
                     "partner": "GENE_SYMBOL",
@@ -141,7 +165,7 @@ class ReactomeTasks:
         """
         
         expected_output = f"""
-        A comprehensive structured analysis of gene {gene} based on literature evidence,
+        A comprehensive structured analysis of {gene_label} based on literature evidence,
         including molecular interactions, pathway roles, and functional annotations,
         formatted as detailed JSON with confidence assessments and evidence citations.
         """

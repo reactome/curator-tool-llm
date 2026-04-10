@@ -1,5 +1,10 @@
+import asyncio
 import logging as log
 import os
+import threading
+import uuid
+from datetime import datetime, timezone
+from dataclasses import asdict
 from pathlib import Path
 
 import ReactomeNeo4jUtils as neo4jutils
@@ -8,10 +13,11 @@ import GenePathwayAnnotator as gpa
 
 import re
 from flask_cors import CORS
-from flask import Flask, request
+from flask import Flask, request, jsonify
 import warnings
 
 from ReactomeLLMErrors import NoAbstractFoundError, NoAbstractSupportingInteractingPathwayError, NoInteractingPathwayFoundError, NoProteinInteractionFoundError
+from CrewAIEventLogger import clear_event_sink, set_event_sink
 from CrewAILiteratureAnnotator import CrewAILiteratureAnnotator, AnnotationRequest
 from ModelConfig import create_reactome_chat_model, get_crewai_model_settings
 warnings.filterwarnings('ignore')
@@ -47,6 +53,33 @@ crewai_annotator = CrewAILiteratureAnnotator(
 # TODO: Add cellular locations and cell types reuqest into the prompts!
 # TODO: This is important. Add GUIs to configure the cutoff of FIs and pathway FDRs and also make sure they are 
 # consistent across the whole application.
+
+# ---------------------------------------------------------------------------
+# In-memory job store for long-running CrewAI annotation requests.
+# Maps job_id (str) -> dict with keys: status, result, error
+# ---------------------------------------------------------------------------
+_crewai_jobs: dict = {}
+_crewai_jobs_lock = threading.Lock()
+_crewai_job_logs: dict = {}
+_crewai_job_logs_lock = threading.Lock()
+
+
+def _append_job_event(job_id: str, event: dict):
+    if not job_id:
+        return
+    with _crewai_job_logs_lock:
+        logs = _crewai_job_logs.setdefault(job_id, [])
+        logs.append({
+            'seq': len(logs),
+            'ts': datetime.now(timezone.utc).isoformat(),
+            **event,
+        })
+
+
+def _make_job_event_sink(job_id: str):
+    def _sink(event: dict):
+        _append_job_event(job_id, event)
+    return _sink
 
 # Most likely this is temporary. Need to think how to encript it.
 @api.route('/openai_key')
@@ -216,93 +249,182 @@ def _collect_pathway_names(docs: str) -> list[str]:
 
 
 @api.route('/crewai/annotate', methods=['POST'])
-async def crewai_annotate_gene():
+def crewai_annotate_gene():
     """
-    Multi-agent literature annotation endpoint using CrewAI framework.
-    
-    Provides a more sophisticated annotation pipeline with specialized agents
-    for extraction, curation, review, and quality assurance.
+    Submit a multi-agent CrewAI annotation job.
+
+    Request body (JSON):
+        queryGene          (str)        – optional; if omitted, framework runs in gene-agnostic mode
+        pmids              (list[str])  – optional list of PMIDs whose PDFs live in data/papers/<pmid>.pdf
+        papers             (list[str])  – optional alias for pmids
+        numberOfPubmed     (int)        – max papers, default 8
+        targetPathways     (list[str])  – optional pathway focus
+        qualityThreshold   (float)      – default 0.7
+        enableFullText     (bool)       – default true
+        enableLiteratureSearch (bool)   – default false; set true to search PubMed instead of using pmids
+        schemaPath         (str)        – default 'resources/reactome_domain_model.json'
+
+    Returns:
+        {"job_id": "<uuid>", "status": "running"}
     """
-    data = request.get_json()
-    
-    # Extract parameters
-    gene = data.get('queryGene')
-    max_papers = data.get('numberOfPubmed', 8)
-    target_pathways = data.get('targetPathways', None)  # Optional pathway focus
-    quality_threshold = data.get('qualityThreshold', 0.7)
-    enable_full_text = data.get('enableFullText', False)
-    
-    # Get papers from existing PubMed functionality
+    data = request.get_json(force=True)
+    gene = (data.get('queryGene') or '').strip() or None
+    papers = data.get('pmids') or data.get('papers') or []
+    if not isinstance(papers, list):
+        return jsonify({'error': 'pmids/papers must be a list'}), 400
+    if len(papers) == 0:
+        return jsonify({'error': 'pmids or papers is required and must contain at least one item'}), 400
+    if data.get('enableLiteratureSearch', False) and not gene:
+        return jsonify({'error': 'queryGene is required when enableLiteratureSearch is true'}), 400
+
+    job_id = str(uuid.uuid4())
+    with _crewai_jobs_lock:
+        _crewai_jobs[job_id] = {'status': 'running', 'gene': gene or 'UNSPECIFIED_GENE'}
+    _append_job_event(job_id, {
+        'event_type': 'job',
+        'status': 'queued',
+        'gene': gene or 'UNSPECIFIED_GENE',
+        'papers_count': len(papers),
+    })
+
+    def _run():
+        set_event_sink(_make_job_event_sink(job_id), job_id=job_id)
+        try:
+            _append_job_event(job_id, {
+                'event_type': 'job',
+                'status': 'start',
+                'gene': gene or 'UNSPECIFIED_GENE',
+                'papers_count': len(papers),
+            })
+            req = AnnotationRequest(
+                gene=gene,
+                papers=papers,
+                pathways=data.get('targetPathways'),
+                max_papers=data.get('numberOfPubmed', 8),
+                quality_threshold=data.get('qualityThreshold', 0.7),
+                enable_full_text=data.get('enableFullText', True),
+                enable_literature_search=data.get('enableLiteratureSearch', False),
+                schema_path=data.get('schemaPath', 'resources/reactome_domain_model.json'),
+            )
+            result = asyncio.run(crewai_annotator.annotate_literature(req))
+            with _crewai_jobs_lock:
+                _crewai_jobs[job_id] = {
+                    'status': 'done',
+                    'gene': result.gene,
+                    'result': asdict(result),
+                }
+            _append_job_event(job_id, {
+                'event_type': 'job',
+                'status': 'end',
+                'gene': result.gene,
+                'outcome': 'success',
+            })
+        except Exception as exc:
+            log.error(f'CrewAI job {job_id} failed: {exc}')
+            with _crewai_jobs_lock:
+                _crewai_jobs[job_id] = {
+                    'status': 'error',
+                    'gene': gene or 'UNSPECIFIED_GENE',
+                    'error': str(exc),
+                }
+            _append_job_event(job_id, {
+                'event_type': 'job',
+                'status': 'end',
+                'gene': gene or 'UNSPECIFIED_GENE',
+                'outcome': 'error',
+                'error': str(exc),
+            })
+        finally:
+            clear_event_sink()
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({'job_id': job_id, 'status': 'running'})
+
+
+@api.route('/crewai/result/<job_id>')
+def crewai_result(job_id: str):
+    """
+    Poll for the result of a submitted CrewAI annotation job.
+
+    Returns one of:
+        {"status": "running", "gene": "..."}
+        {"status": "done",    "gene": "...", "result": {...AnnotationResult fields...}}
+        {"status": "error",   "gene": "...", "error": "..."}
+        {"status": "not_found"}
+    """
+    with _crewai_jobs_lock:
+        job = _crewai_jobs.get(job_id)
+    if job is None:
+        return jsonify({'status': 'not_found'}), 404
+    return jsonify(job)
+
+
+@api.route('/crewai/logs/<job_id>')
+def crewai_logs(job_id: str):
+    """
+        Fetch incremental structured runtime events for a submitted CrewAI job.
+
+    Query params:
+      since (int, default 0): Return logs with seq >= since.
+      limit (int, default 200): Max logs returned in one response.
+
+    Returns:
+      {
+        "status": "running|done|error",
+        "gene": "...",
+                "logs": [
+                    {"seq": 0, "ts": "...", "event_type": "job", "status": "start", "gene": "..."},
+                    {"seq": 1, "ts": "...", "event_type": "agent", "status": "start", "agent": "LiteratureExtractor", "phase": "phase_1_literature_extraction", "gene": "..."},
+                    {"seq": 2, "ts": "...", "event_type": "tool", "status": "start", "tool": "fulltext_analysis"},
+                    {"seq": 3, "ts": "...", "event_type": "tool", "status": "end", "tool": "fulltext_analysis"}
+                ],
+        "next_since": 12
+      }
+    """
+    since_raw = request.args.get('since', '0')
+    limit_raw = request.args.get('limit', '200')
     try:
-        pubmed_maxdate = '2024/12/31'
-        max_query_length = 1000
-        
-        # Get papers using existing PubMed retrieval
-        pubmed_results = await annotator.query_pubmed_abstracts_for_gene(
-            gene, 
-            pubmed_maxdate=pubmed_maxdate,
-            top_k_results=max_papers,
-            max_query_length=max_query_length
-        )
-        
-        # Extract PMIDs from results
-        papers = []
-        for doc in pubmed_results:
-            pmid = doc.metadata.get("uid", "")
-            if pmid:
-                papers.append(pmid)
-        
-        # Create annotation request
-        request_obj = AnnotationRequest(
-            gene=gene,
-            papers=papers,
-            pathways=target_pathways,
-            max_papers=max_papers,
-            quality_threshold=quality_threshold,
-            enable_full_text=enable_full_text
-        )
-        
-        # Run multi-agent annotation
-        result = await crewai_annotator.annotate_literature(request_obj)
-        
-        # Convert result to JSON-serializable format
-        return {
-            'gene': result.gene,
-            'reactome_instances': result.reactome_instances,
-            'literature_evidence': result.literature_evidence,
-            'quality_scores': result.quality_scores,
-            'validation_report': result.validation_report,
-            'consistency_check': result.consistency_check,
-            'processing_metadata': result.processing_metadata,
-            'status': 'success'
-        }
-        
-    except Exception as e:
-        log.error(f'CrewAI annotation error for {gene}: {str(e)}')
-        return {
-            'gene': gene,
-            'error': str(e),
-            'status': 'failed'
-        }
+        since = max(0, int(since_raw))
+    except ValueError:
+        since = 0
+    try:
+        limit = min(1000, max(1, int(limit_raw)))
+    except ValueError:
+        limit = 200
+
+    with _crewai_jobs_lock:
+        job = _crewai_jobs.get(job_id)
+    if job is None:
+        return jsonify({'status': 'not_found', 'logs': [], 'next_since': since}), 404
+
+    with _crewai_job_logs_lock:
+        logs = _crewai_job_logs.get(job_id, [])
+        selected_logs = logs[since:since + limit]
+        next_since = since + len(selected_logs)
+
+    return jsonify({
+        'status': job.get('status', 'running'),
+        'gene': job.get('gene'),
+        'logs': selected_logs,
+        'next_since': next_since,
+    })
 
 
 @api.route('/crewai/status')
-async def crewai_status():
-    """Get status of CrewAI annotation system"""
-    try:
-        return {
-            'status': 'active',
-            'model': crewai_annotator.model,
-            'temperature': crewai_annotator.temperature,
-            'max_iterations': crewai_annotator.max_iter,
-            'agent_count': 4,
-            'agents': ['ReactomeCurator', 'LiteratureExtractor', 'Reviewer', 'QualityChecker']
-        }
-    except Exception as e:
-        return {
-            'status': 'error',
-            'error': str(e)
-        }
+def crewai_status():
+    """Get status of CrewAI annotation system and queued jobs."""
+    with _crewai_jobs_lock:
+        running = sum(1 for j in _crewai_jobs.values() if j['status'] == 'running')
+        done = sum(1 for j in _crewai_jobs.values() if j['status'] == 'done')
+        errors = sum(1 for j in _crewai_jobs.values() if j['status'] == 'error')
+    return jsonify({
+        'status': 'active',
+        'model': crewai_annotator.model,
+        'temperature': crewai_annotator.temperature,
+        'max_iterations': crewai_annotator.max_iter,
+        'agents': ['ReactomeCurator', 'LiteratureExtractor', 'Reviewer', 'QualityChecker'],
+        'jobs': {'running': running, 'done': done, 'error': errors},
+    })
 
 
 # Run the api at the terminal with this command: flask --app reactome_llm/ReactomeLLMRestAPI run (--debug for debug)
