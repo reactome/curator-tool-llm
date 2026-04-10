@@ -63,6 +63,49 @@ _crewai_jobs_lock = threading.Lock()
 _crewai_job_logs: dict = {}
 _crewai_job_logs_lock = threading.Lock()
 
+_CREWAI_DASHBOARD_CONFIG = {
+    'phases': [
+        {'id': 'phase_1_literature_extraction', 'label': 'Phase 1: Literature Extraction'},
+        {'id': 'phase_2_data_model_creation', 'label': 'Phase 2: Data Model Creation'},
+        {'id': 'phase_3_expert_review', 'label': 'Phase 3: Expert Review'},
+        {'id': 'phase_4_quality_assurance', 'label': 'Phase 4: Quality Assurance'},
+        {'id': 'phase_5_final_consensus', 'label': 'Phase 5: Final Consensus'},
+    ],
+    'agents': [
+        {'id': 'extractor', 'label': 'LiteratureExtractor', 'phases': ['phase_1_literature_extraction']},
+        {'id': 'curator', 'label': 'ReactomeCurator', 'phases': ['phase_2_data_model_creation']},
+        {'id': 'reviewer', 'label': 'Reviewer', 'phases': ['phase_3_expert_review', 'phase_5_final_consensus']},
+        {'id': 'qa_checker', 'label': 'QualityChecker', 'phases': ['phase_4_quality_assurance']},
+    ],
+    'toolsByAgent': {
+        'extractor': [
+            {'id': 'literature_search', 'label': 'literature_search'},
+            {'id': 'fulltext_analysis', 'label': 'fulltext_analysis'},
+            {'id': 'protein_interactions', 'label': 'protein_interactions'},
+            {'id': 'evidence_evaluation', 'label': 'evidence_evaluation'},
+        ],
+        'curator': [
+            {'id': 'reactome_query', 'label': 'reactome_query'},
+            {'id': 'schema_validation', 'label': 'schema_validation'},
+            {'id': 'protein_interactions', 'label': 'protein_interactions'},
+            {'id': 'evidence_evaluation', 'label': 'evidence_evaluation'},
+        ],
+        'reviewer': [
+            {'id': 'literature_search', 'label': 'literature_search'},
+            {'id': 'reactome_query', 'label': 'reactome_query'},
+            {'id': 'evidence_evaluation', 'label': 'evidence_evaluation'},
+            {'id': 'quality_metrics', 'label': 'quality_metrics'},
+            {'id': 'consistency_check', 'label': 'consistency_check'},
+        ],
+        'qa_checker': [
+            {'id': 'schema_validation', 'label': 'schema_validation'},
+            {'id': 'consistency_check', 'label': 'consistency_check'},
+            {'id': 'quality_metrics', 'label': 'quality_metrics'},
+            {'id': 'reactome_query', 'label': 'reactome_query'},
+        ],
+    }
+}
+
 
 def _append_job_event(job_id: str, event: dict):
     if not job_id:
@@ -115,10 +158,30 @@ async def analyze_full_text(pmid, gene):
     return full_text_return_json
 
 
+@api.route('/fulltext/list')
+def listPdfs():
+    """Return a list of all PMIDs that have a PDF available in PDF_PAPERS_FOLDER."""
+    if not PDF_PAPERS_FOLDER:
+        return jsonify({'papers': [], 'error': 'PDF_PAPERS_FOLDER not configured'}), 500
+    folder = Path(PDF_PAPERS_FOLDER)
+    if not folder.is_dir():
+        return jsonify({'papers': [], 'error': f'Folder not found: {PDF_PAPERS_FOLDER}'}), 500
+    papers = [
+        {
+            'pmid': p.stem,
+            'exists': True,
+            'size_bytes': p.stat().st_size,
+        }
+        for p in sorted(folder.glob('*.pdf'))
+        if p.stem.isdigit()
+    ]
+    return jsonify({'papers': papers})
+
+
 @api.route('/fulltext/check_pdf/<pmid>')
 async def pdfExists(pmid: str) -> bool:
     file_path = Path(PDF_PAPERS_FOLDER, '{}.pdf'.format(pmid))
-    return True if file_path.exists else False
+    return True if file_path.exists() else False
 
 
 @api.route('/fulltext/uploadPDF', methods=['POST'])
@@ -304,6 +367,9 @@ def crewai_annotate_gene():
                 quality_threshold=data.get('qualityThreshold', 0.7),
                 enable_full_text=data.get('enableFullText', True),
                 enable_literature_search=data.get('enableLiteratureSearch', False),
+                enabled_phases=data.get('enabledPhases'),
+                enabled_agents=data.get('enabledAgents'),
+                enabled_tools=data.get('enabledTools'),
                 schema_path=data.get('schemaPath', 'resources/reactome_domain_model.json'),
             )
             result = asyncio.run(crewai_annotator.annotate_literature(req))
@@ -339,6 +405,12 @@ def crewai_annotate_gene():
 
     threading.Thread(target=_run, daemon=True).start()
     return jsonify({'job_id': job_id, 'status': 'running'})
+
+
+@api.route('/crewai/dashboard')
+def crewai_dashboard():
+    """Get configurable phases/agents/tools for the Paper2Path agent dashboard."""
+    return jsonify(_CREWAI_DASHBOARD_CONFIG)
 
 
 @api.route('/crewai/result/<job_id>')

@@ -469,42 +469,52 @@ class ReactomeToolkit:
         tool._run = wrapped_run
         tool._crewai_structured_logging_wrapped = True
     
-    def get_extractor_tools(self) -> List[BaseTool]:
+    def _filter_tools(self, tools: List[BaseTool], enabled_names: List[str] | None) -> List[BaseTool]:
+        if not enabled_names:
+            return tools
+        enabled_set = set(enabled_names)
+        return [tool for tool in tools if tool.name in enabled_set]
+
+    def get_extractor_tools(self, enabled_names: List[str] | None = None) -> List[BaseTool]:
         """Get tools for Literature Extractor agent"""
-        return [
+        tools = [
             self.literature_search,
             self.fulltext_analysis,
             self.protein_interactions,
             self.evidence_evaluation
         ]
+        return self._filter_tools(tools, enabled_names)
     
-    def get_curator_tools(self) -> List[BaseTool]:
+    def get_curator_tools(self, enabled_names: List[str] | None = None) -> List[BaseTool]:
         """Get tools for Reactome Curator agent"""
-        return [
+        tools = [
             self.reactome_query,
             self.schema_validation,
             self.protein_interactions,
             self.evidence_evaluation
         ]
+        return self._filter_tools(tools, enabled_names)
     
-    def get_reviewer_tools(self) -> List[BaseTool]:
+    def get_reviewer_tools(self, enabled_names: List[str] | None = None) -> List[BaseTool]:
         """Get tools for Domain Expert Reviewer agent"""
-        return [
+        tools = [
             self.literature_search,
             self.reactome_query, 
             self.evidence_evaluation,
             self.quality_metrics,
             self.consistency_check
         ]
+        return self._filter_tools(tools, enabled_names)
     
-    def get_qa_tools(self) -> List[BaseTool]:
+    def get_qa_tools(self, enabled_names: List[str] | None = None) -> List[BaseTool]:
         """Get tools for Quality Checker agent"""
-        return [
+        tools = [
             self.schema_validation,
             self.consistency_check,
             self.quality_metrics,
             self.reactome_query
         ]
+        return self._filter_tools(tools, enabled_names)
     
     def get_all_tools(self) -> List[BaseTool]:
         """Get all available tools"""
