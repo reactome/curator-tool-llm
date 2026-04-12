@@ -125,9 +125,9 @@ def _make_job_event_sink(job_id: str):
     return _sink
 
 # Most likely this is temporary. Need to think how to encript it.
-@api.route('/openai_key')
-async def get_openai_key():
-    return os.getenv('OPENAI_API_KEY')
+# @api.route('/openai_key')
+# async def get_openai_key():
+#     return os.getenv('OPENAI_API_KEY')
 
 
 @api.route('/fulltext/<pmid>/<gene>')
@@ -332,12 +332,13 @@ def crewai_annotate_gene():
     """
     data = request.get_json(force=True)
     gene = (data.get('queryGene') or '').strip() or None
+    enable_literature_search = data.get('enableLiteratureSearch', False)
     papers = data.get('pmids') or data.get('papers') or []
     if not isinstance(papers, list):
         return jsonify({'error': 'pmids/papers must be a list'}), 400
-    if len(papers) == 0:
+    if not enable_literature_search and len(papers) == 0:
         return jsonify({'error': 'pmids or papers is required and must contain at least one item'}), 400
-    if data.get('enableLiteratureSearch', False) and not gene:
+    if enable_literature_search and not gene:
         return jsonify({'error': 'queryGene is required when enableLiteratureSearch is true'}), 400
 
     job_id = str(uuid.uuid4())
@@ -366,7 +367,7 @@ def crewai_annotate_gene():
                 max_papers=data.get('numberOfPubmed', 8),
                 quality_threshold=data.get('qualityThreshold', 0.7),
                 enable_full_text=data.get('enableFullText', True),
-                enable_literature_search=data.get('enableLiteratureSearch', False),
+                enable_literature_search=enable_literature_search,
                 enabled_phases=data.get('enabledPhases'),
                 enabled_agents=data.get('enabledAgents'),
                 enabled_tools=data.get('enabledTools'),
