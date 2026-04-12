@@ -42,7 +42,7 @@ pip install -r requirements.txt
 # Install CrewAI for multi-agent framework
 pip install crewai crewai-tools
 ```
-**Note**: At the local mac, use the paperqa env, which has installed all dependencies. 
+**Note**: At the local mac, use the paperqa env, which has installed all dependencies. At curator.reactome.org, use conda create env create -f environment.yml to create an env first, then actiate it. After that, install all dependencies??? (to be figured out later, most likely need to install one by one!!!).
 
 ### Environment Setup
 Create a `.env` file:
