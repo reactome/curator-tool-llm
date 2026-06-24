@@ -279,8 +279,8 @@ async def main():
     setup_output_directory()
     
     # Check environment
-    if not os.getenv('OPENAI_API_KEY'):
-        print("Error: OPENAI_API_KEY environment variable not set")
+    if not os.getenv('ANTHROPIC_API_KEY'):
+        print("Error: ANTHROPIC_API_KEY environment variable not set")
         return
     
     if not os.getenv('REACTOME_NEO4J_URI'):
