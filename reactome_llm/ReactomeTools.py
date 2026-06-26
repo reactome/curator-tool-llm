@@ -135,7 +135,7 @@ class ReactomeQueryTool(BaseTool):
     def _run(self, gene: str, query_type: str = "pathways", pathway: str = "") -> str:
         """Query Reactome database for gene information"""
         try:
-            if query_type == "pathways":
+            if query_type in ("pathways", "pathway"):
                 pathways = neo4j_utils.query_pathways_for_gene(gene)
                 return json.dumps({
                     "gene": gene,
@@ -221,9 +221,18 @@ class SchemaValidationTool(BaseTool):
     
     gene_annotator: GenePathwayAnnotator = Field(..., description="Gene annotator instance")
     
-    def _run(self, instances: str, schema: str = "", schema_path: str = "") -> str:
+    def _run(self, instances: str = "", schema: str = "", schema_path: str = "") -> str:
         """Validate instances against Reactome schema"""
         try:
+            # Guard against the agent calling this tool before it has assembled the
+            # instance JSON. Returning a readable result (instead of letting pydantic
+            # raise a hard "field required" error) lets the agent recover instead of
+            # looping on the same malformed call.
+            if not instances:
+                return json.dumps({
+                    "valid": False,
+                    "error": "No instances provided. Re-call schema_validation with `instances` set to the Reactome instance JSON you generated."
+                })
             # Parse instances
             data = json.loads(instances) if isinstance(instances, str) else instances
             schema_data = None

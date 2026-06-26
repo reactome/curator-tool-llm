@@ -3,7 +3,7 @@ from langchain_anthropic import ChatAnthropic
 
 REACTOME_MODEL_NAME = "claude-sonnet-4-6"
 REACTOME_MODEL_TEMPERATURE = 1.0
-CREWAI_MODEL_NAME = "claude-sonnet-4-6"
+CREWAI_MODEL_NAME = "anthropic/claude-sonnet-4-6"
 CREWAI_MODEL_TEMPERATURE = 0.1
 
 def get_reactome_model_settings() -> Tuple[str, float]:

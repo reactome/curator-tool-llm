@@ -10,7 +10,7 @@ import re
 import logging as log
 import dotenv
 import asyncio
-from langchain_openai import ChatOpenAI
+from langchain_anthropic import ChatAnthropic
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import ReactomeNeo4jUtils as neo4jutils
@@ -125,7 +125,7 @@ async def main():
     # List of genes to process
     genes = ['TANC1', 'FADD', 'NTN1', 'ICAM1', 'RACK1', 'ABCC1', 'SPIDR', 'XRCC6', 'MPDZ', 'TNFRSF14']
     genes = ['TANC1']
-    model = ChatOpenAI(temperature=0, model='gpt-3.5-turbo')
+    model = ChatAnthropic(temperature=0, model='claude-sonnet-4-6')
 
     # Process each gene
     for gene in genes:

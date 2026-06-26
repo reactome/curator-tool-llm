@@ -160,7 +160,7 @@ class CrewAILiteratureAnnotator:
             process=Process.sequential,  # Phases are explicitly orchestrated in code
             verbose=self.verbose,
             tracing=True,
-            memory=True,  # Enable memory for context between tasks
+            memory=False,  # Disabled: requires OpenAI embedder for ChromaDB
             max_iter=self.max_iter
         )
 
@@ -283,7 +283,7 @@ class CrewAILiteratureAnnotator:
         self.crew.tasks = [extraction_task]
         
         # Execute extraction
-        extraction_result = self.crew.kickoff({
+        extraction_result = await self.crew.kickoff_async({
             "gene": request.gene,
             "papers": request.papers,
             "max_papers": request.max_papers
@@ -325,7 +325,7 @@ class CrewAILiteratureAnnotator:
         self.crew.tasks = [curation_task]
         
         # Execute curation
-        curation_result = self.crew.kickoff({
+        curation_result = await self.crew.kickoff_async({
             "gene": request.gene,
             "target_pathways": str(request.pathways or [])
         })
@@ -368,7 +368,7 @@ class CrewAILiteratureAnnotator:
         self.crew.tasks = [review_task]
         
         # Execute review
-        review_result = self.crew.kickoff({
+        review_result = await self.crew.kickoff_async({
             "gene": request.gene,
             "quality_threshold": request.quality_threshold
         })
@@ -412,7 +412,7 @@ class CrewAILiteratureAnnotator:
         self.crew.tasks = [qa_task]
         
         # Execute QA
-        qa_result = self.crew.kickoff({
+        qa_result = await self.crew.kickoff_async({
             "gene": request.gene,
             "quality_threshold": request.quality_threshold
         })
@@ -465,7 +465,7 @@ class CrewAILiteratureAnnotator:
             )
             vote_task.agent = agent
             self.crew.tasks = [vote_task]
-            vote_result = self.crew.kickoff({
+            vote_result = await self.crew.kickoff_async({
                 "gene": request.gene,
                 "agent_role": role_name,
                 "quality_threshold": str(request.quality_threshold)
@@ -490,7 +490,7 @@ class CrewAILiteratureAnnotator:
         consensus_task.agent = self.reviewer_agent
         self.crew.tasks = [consensus_task]
         emit_agent_event("Reviewer", "start", phase="phase_5_consensus_synthesis", gene=request.gene)
-        consensus_result = self.crew.kickoff({
+        consensus_result = await self.crew.kickoff_async({
             "gene": request.gene,
             "quality_threshold": str(request.quality_threshold)
         })
