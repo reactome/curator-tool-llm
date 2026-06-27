@@ -30,6 +30,8 @@ from ModelConfig import create_reactome_chat_model
 from ReactomePubMed import ReactomePubMedRetriever
 import ReactomeUtils as utils
 import ProteinProteinInteractionsLoader as ppi_loader
+import ReactomeNeo4jUtils as neo4j_utils
+import requests
 
 # This script should be the main entry.
 import logging_config
@@ -87,6 +89,56 @@ class GenePathwayAnnotator:
         if self.ppi_loader is None:
             self.ppi_loader = ppi_loader.PPILoader()
         return self.ppi_loader
+
+    def resolve_uniprot_accession(self, gene: str) -> str | None:
+        """Resolve a gene symbol to its canonical UniProt accession deterministically.
+
+        Looks the gene up in the Reactome graph first (reusing the accession Reactome
+        already stores, which also avoids creating a duplicate of an existing entity),
+        then falls back to the reviewed-human UniProt REST API for genes not yet in
+        Reactome. This replaces letting the LLM agents recall accessions from training,
+        which was the source of the cross-phase identifier inconsistency.
+
+        Args:
+            gene (str): Gene symbol (e.g. 'TANC1').
+
+        Returns:
+            str | None: The verified UniProt accession, or None if it could not be resolved.
+        """
+        if not gene:
+            return None
+        # 1) Reactome's own graph — authoritative, and reuses the existing entity.
+        accession = neo4j_utils.query_accession_for_gene(gene)
+        if accession:
+            logger.info(f"Resolved {gene} -> {accession} from the Reactome graph")
+            return accession
+        # 2) Fall back to UniProt for genes not yet in Reactome.
+        accession = self._lookup_uniprot_accession(gene)
+        if accession:
+            logger.info(f"Resolved {gene} -> {accession} from the UniProt REST API")
+        else:
+            logger.warning(f"Could not resolve a UniProt accession for {gene}")
+        return accession
+
+    def _lookup_uniprot_accession(self, gene: str) -> str | None:
+        """Query the UniProt REST API for the reviewed human accession of a gene symbol."""
+        url = "https://rest.uniprot.org/uniprotkb/search"
+        params = {
+            "query": f"gene_exact:{gene} AND organism_id:9606 AND reviewed:true",
+            "fields": "accession",
+            "format": "tsv",
+            "size": "1",
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=15)
+            resp.raise_for_status()
+            lines = resp.text.strip().splitlines()
+            # Line 0 is the "Entry" header; line 1 (if present) is the accession.
+            if len(lines) >= 2:
+                return lines[1].strip()
+        except Exception as e:
+            logger.warning(f"UniProt REST lookup failed for {gene}: {e}")
+        return None
     
     def set_ppi_loader(self, ppi_loader):
         self.ppi_loader = ppi_loader

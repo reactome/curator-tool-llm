@@ -33,7 +33,8 @@ class ReactomeTasks:
                                         papers: List[str], 
                                         max_papers: int = 8,
                                         enable_full_text: bool = False,
-                                        enable_literature_search: bool = False) -> Task:
+                                        enable_literature_search: bool = False,
+                                        accession: Optional[str] = None) -> Task:
         """
         Create a task for the Literature Extractor agent.
         
@@ -54,6 +55,12 @@ class ReactomeTasks:
         has_papers = len(papers) > 0
         tool_gene = query_gene if query_gene else "UNSPECIFIED_GENE"
         gene_label = query_gene if query_gene else "gene-agnostic full-text corpus"
+        accession_directive = (
+            f"\n        **VERIFIED UniProt ACCESSION:** The canonical UniProt accession for {tool_gene} is "
+            f"{accession}. Whenever you record a UniProt identifier for {tool_gene}, use this exact value; "
+            f"do not infer, recall, or guess a different accession.\n"
+            if accession else ""
+        )
 
         if enable_literature_search and query_gene:
             if enable_full_text:
@@ -120,6 +127,7 @@ class ReactomeTasks:
         - Disease associations and phenotypes
         - Experimental evidence and confidence levels
         
+        {accession_directive}
         **Output Requirements:**
         Provide a structured JSON output with the following format:
         ```json
@@ -180,7 +188,8 @@ class ReactomeTasks:
                                     gene: str,
                                     structured_info: Dict[str, Any],
                                     target_pathways: Optional[List[str]] = None,
-                                    schema_path: Optional[str] = None) -> Task:
+                                    schema_path: Optional[str] = None,
+                                    accession: Optional[str] = None) -> Task:
         """
         Create a task for the Reactome Curator agent.
         
@@ -196,6 +205,13 @@ class ReactomeTasks:
             Configured Task instance
         """
         structured_info_json = json.dumps(structured_info, indent=2, default=str) if structured_info else "No structured information provided."
+        accession_directive = (
+            f"\n        **VERIFIED IDENTIFIER (use exactly):** The canonical UniProt accession for {gene} is "
+            f"{accession}. Use this exact value for the `identifier` and `referenceEntity.identifier` of the "
+            f"{gene} protein entity. Do NOT generate, infer, or substitute any other accession. If {gene} already "
+            f"exists in Reactome under this accession, reuse that entity rather than creating a duplicate.\n"
+            if accession else ""
+        )
 
         description = f"""
         Convert structured literature information about gene {gene} into valid Reactome 
@@ -209,6 +225,7 @@ class ReactomeTasks:
         reactions, and pathways you create. Each annotation must be traceable to an entry
         in this input (via pmid or interaction partner).
         
+        {accession_directive}
         **Primary Objectives:**
         1. Create valid Reactome Entity instances for {gene} and interaction partners
         2. Model biochemical reactions and regulatory relationships
@@ -294,7 +311,8 @@ class ReactomeTasks:
                                 gene: str,
                                 reactome_instances: List[Dict[str, Any]], 
                                 original_papers: List[Dict[str, Any]],
-                                quality_threshold: float = 0.7) -> Task:
+                                quality_threshold: float = 0.7,
+                                accession: Optional[str] = None) -> Task:
         """
         Create a task for the Domain Expert Reviewer agent.
         
@@ -310,7 +328,13 @@ class ReactomeTasks:
         Returns:
             Configured Task instance
         """
+        accession_directive = (
+            f"\n        **VERIFIED IDENTIFIER:** The canonical UniProt accession for {gene} is {accession}. "
+            f"Treat this as ground truth when judging identifier correctness; do not substitute another accession.\n"
+            if accession else ""
+        )
         description = f"""
+        {accession_directive}
         Perform expert domain validation of generated Reactome instances for gene {gene}.
         
         **Review Scope:**
@@ -408,7 +432,8 @@ class ReactomeTasks:
                                     reactome_instances: List[Dict[str, Any]],
                                     validation_report: Dict[str, Any],
                                     schema_path: Optional[str] = None,
-                                    quality_threshold: float = 0.7) -> Task:
+                                    quality_threshold: float = 0.7,
+                                    accession: Optional[str] = None) -> Task:
         """
         Create a task for the Quality Checker agent.
         
@@ -424,8 +449,15 @@ class ReactomeTasks:
         Returns:
             Configured Task instance
         """
+        accession_directive = (
+            f"\n        **VERIFIED IDENTIFIER (ground truth):** The canonical UniProt accession for {gene} is {accession}. "
+            f"Validate that every instance uses exactly this accession; do NOT introduce, recall, or substitute any "
+            f"other accession in your report, and flag any deviation from {accession} as an error.\n"
+            if accession else ""
+        )
         description = f"""
-        Perform comprehensive quality assurance and consistency checking for 
+        {accession_directive}
+        Perform comprehensive quality assurance and consistency checking for
         Reactome instances related to gene {gene}.
         
         **QA Scope:**
@@ -550,13 +582,19 @@ class ReactomeTasks:
                               curation_context: Dict[str, Any],
                               review_context: Dict[str, Any],
                               qa_context: Dict[str, Any],
-                              quality_threshold: float = 0.7) -> Task:
+                              quality_threshold: float = 0.7,
+                              accession: Optional[str] = None) -> Task:
         """
         Create an individual vote task for one specialist in the final virtual meeting.
 
         Each agent casts a structured vote based on all previous phase outputs.
         """
+        accession_directive = (
+            f"\n        Note: the verified UniProt accession for {gene} is {accession}; reference only this value if you mention an identifier.\n"
+            if accession else ""
+        )
         description = f"""
+        {accession_directive}
         You are acting as {agent_role} in the final virtual meeting for gene {gene}.
 
         Review all outputs from phases 1-4 and cast your vote.
@@ -598,11 +636,17 @@ class ReactomeTasks:
     def create_final_consensus_task(self,
                                    gene: str,
                                    individual_votes: Dict[str, Any],
-                                   quality_threshold: float = 0.7) -> Task:
+                                   quality_threshold: float = 0.7,
+                                   accession: Optional[str] = None) -> Task:
         """
         Create the final synthesis task that consolidates all specialist votes.
         """
+        accession_directive = (
+            f"\n        Note: the verified UniProt accession for {gene} is {accession}; reference only this value.\n"
+            if accession else ""
+        )
         description = f"""
+        {accession_directive}
         Chair the final virtual meeting for gene {gene} by synthesizing all specialist votes.
 
         Individual votes:

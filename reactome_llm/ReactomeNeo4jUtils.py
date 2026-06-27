@@ -111,6 +111,34 @@ def query_pathways_for_gene(gene: str) -> list[dict]:
     return result_df.to_dict(orient='records')
 
 
+def query_accession_for_gene(gene: str) -> str | None:
+    """Look up the canonical UniProt accession for a gene from the Reactome graph.
+
+    Resolves a gene symbol to the reviewed UniProt accession Reactome already stores,
+    preferring the entry where the symbol is the primary gene name and the canonical
+    (non-isoform) identifier. Returns None if the gene is not present in the graph, in
+    which case callers should fall back to an external lookup (e.g. the UniProt REST API).
+
+    Args:
+        gene (str): Gene symbol (e.g. 'TANC1').
+
+    Returns:
+        str | None: The canonical UniProt accession (e.g. 'Q9C0D5'), or None if not found.
+    """
+    query = """
+        MATCH (rgp:ReferenceGeneProduct)
+        WHERE $gene IN rgp.geneName AND rgp.databaseName = 'UniProt'
+        RETURN rgp.identifier AS accession
+        ORDER BY (rgp.geneName[0] = $gene) DESC, (rgp.variantIdentifier IS NULL) DESC
+        LIMIT 1
+    """
+    with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        records = driver.execute_query(query, db=DB, gene=gene).records
+    if not records:
+        return None
+    return records[0]["accession"]
+
+
 def query_reaction_roles_of_pathway(pathway: str,
                                     genes: list[str]) -> pd.DataFrame:
     """Get the reactions and roles for a list of genes in a specific pathway.

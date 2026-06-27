@@ -106,6 +106,8 @@ class CrewAILiteratureAnnotator:
         self.temperature = default_temperature if temperature is None else temperature
         self.max_iter = max_iter
         self.verbose = verbose
+        # Verified UniProt accession for the gene, resolved once per run (see annotate_literature)
+        self.resolved_accession = None
         
         # Initialize components
         self.toolkit = ReactomeToolkit(gene_annotator)
@@ -195,6 +197,13 @@ class CrewAILiteratureAnnotator:
 
         try:
             self._configure_runtime(request)
+            # Resolve the gene's UniProt accession once, deterministically (Reactome graph,
+            # then UniProt), so every phase uses the same verified identifier instead of each
+            # agent recalling its own guess. Resolving here (not in an agent) is the fix for
+            # the cross-phase accession inconsistency.
+            self.resolved_accession = self.gene_annotator.resolve_uniprot_accession(request.gene)
+            logger.info(f"Resolved UniProt accession for {request.gene}: {self.resolved_accession}")
+
             # Phase 1: Literature Extraction and Preprocessing
             extraction_context = await self._phase_1_literature_extraction(request)
 
@@ -275,7 +284,8 @@ class CrewAILiteratureAnnotator:
             papers=request.papers,
             max_papers=request.max_papers,
             enable_full_text=request.enable_full_text,
-            enable_literature_search=request.enable_literature_search
+            enable_literature_search=request.enable_literature_search,
+            accession=self.resolved_accession
         )
         extraction_task.agent = self.extractor_agent
         
@@ -318,7 +328,8 @@ class CrewAILiteratureAnnotator:
             gene=request.gene,
             structured_info=extraction_context["structured_information"],
             target_pathways=request.pathways,
-            schema_path=request.schema_path
+            schema_path=request.schema_path,
+            accession=self.resolved_accession
         )
         curation_task.agent = self.curator_agent
         
@@ -361,7 +372,8 @@ class CrewAILiteratureAnnotator:
             gene=request.gene,
             reactome_instances=curation_context["reactome_instances"],
             original_papers=extraction_context["structured_information"],
-            quality_threshold=request.quality_threshold
+            quality_threshold=request.quality_threshold,
+            accession=self.resolved_accession
         )
         review_task.agent = self.reviewer_agent
         
@@ -405,7 +417,8 @@ class CrewAILiteratureAnnotator:
             reactome_instances=curation_context["reactome_instances"],
             validation_report=review_context["validation_report"],
             schema_path=request.schema_path,
-            quality_threshold=request.quality_threshold
+            quality_threshold=request.quality_threshold,
+            accession=self.resolved_accession
         )
         qa_task.agent = self.qa_agent
         
@@ -461,7 +474,8 @@ class CrewAILiteratureAnnotator:
                 curation_context=curation_context,
                 review_context=review_context,
                 qa_context=qa_context,
-                quality_threshold=request.quality_threshold
+                quality_threshold=request.quality_threshold,
+                accession=self.resolved_accession
             )
             vote_task.agent = agent
             self.crew.tasks = [vote_task]
@@ -485,7 +499,8 @@ class CrewAILiteratureAnnotator:
         consensus_task = self.tasks.create_final_consensus_task(
             gene=request.gene,
             individual_votes=votes,
-            quality_threshold=request.quality_threshold
+            quality_threshold=request.quality_threshold,
+            accession=self.resolved_accession
         )
         consensus_task.agent = self.reviewer_agent
         self.crew.tasks = [consensus_task]
