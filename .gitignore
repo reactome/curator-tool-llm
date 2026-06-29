@@ -13,3 +13,4 @@ __pycache__/
 results/
 mongo_ingest.out
 *.out
+data/
