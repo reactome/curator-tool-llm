@@ -14,6 +14,7 @@ import logging
 from typing import List, Dict, Any, Optional
 
 from crewai import Agent
+from crewai import LLM
 
 from ModelConfig import get_crewai_model_settings
 
@@ -28,12 +29,19 @@ class ReactomeAgents:
         Initialize agent factory with LLM configuration
         
         Args:
-            model: OpenAI model to use for all agents (falls back to environment config)
+            model: Anthropic model to use for all agents (falls back to environment config)
             temperature: Temperature setting for creativity vs consistency (falls back to environment config)
         """
         default_model, default_temperature = get_crewai_model_settings()
         self.model = model or default_model
         self.temperature = default_temperature if temperature is None else temperature
+        self.llm = LLM(
+            model=self.model,
+            temperature=self.temperature,
+            max_tokens=16000,   # ← stops the reviewer report from truncating
+            timeout=600,        # ← stops the infinite hangs
+            max_retries=3,
+        )
         
     def create_reactome_curator(self, tools: List) -> Agent:
         """
@@ -76,7 +84,7 @@ class ReactomeAgents:
             verbose=True,
             allow_delegation=False,
             tools=tools,
-            llm=self.model
+            llm=self.llm
         )
     
     def create_literature_extractor(self, tools: List) -> Agent:
@@ -123,7 +131,7 @@ class ReactomeAgents:
             verbose=True,
             allow_delegation=False, 
             tools=tools,
-            llm=self.model
+            llm=self.llm
         )
     
     def create_reviewer(self, tools: List) -> Agent:
@@ -173,7 +181,7 @@ class ReactomeAgents:
             verbose=True,
             allow_delegation=False,
             tools=tools,
-            llm=self.model
+            llm=self.llm
         )
     
     def create_quality_checker(self, tools: List) -> Agent:
@@ -226,7 +234,7 @@ class ReactomeAgents:
             verbose=True,
             allow_delegation=False,
             tools=tools,
-            llm=self.model
+            llm=self.llm
         )
     
     def get_all_agents(self, toolkit) -> Dict[str, Agent]:

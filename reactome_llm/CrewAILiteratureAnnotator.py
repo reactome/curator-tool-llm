@@ -13,6 +13,7 @@ Author: GitHub Copilot & Reactome Team
 """
 
 import json
+import re
 import logging
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict, field
@@ -303,7 +304,7 @@ class CrewAILiteratureAnnotator:
         return {
             "raw_result": extraction_result,
             "structured_information": self._parse_extraction_result(extraction_result),
-            "papers_processed": len(request.papers),
+            "papers_processed": self._count_papers_processed(extraction_result, request),
             "gene": request.gene
         }
     
@@ -518,6 +519,29 @@ class CrewAILiteratureAnnotator:
             "gene": request.gene
         }
     
+    def _extract_json(self, text: Any) -> Any:
+        """Extract a JSON object/array from an agent response. Agent outputs are usually
+        markdown containing a ```json ... ``` block (plus prose), so try the fenced block
+        first, then the largest {...}/[...] span, then the whole string. Returns the parsed
+        object, or None if nothing parseable is found."""
+        if isinstance(text, (dict, list)):
+            return text
+        s = str(text)
+        candidates = []
+        fence = re.search(r"```(?:json)?\s*(.*?)```", s, re.DOTALL)
+        if fence:
+            candidates.append(fence.group(1).strip())
+        brace = re.search(r"(\{.*\}|\[.*\])", s, re.DOTALL)
+        if brace:
+            candidates.append(brace.group(1).strip())
+        candidates.append(s.strip())
+        for c in candidates:
+            try:
+                return json.loads(c)
+            except (json.JSONDecodeError, ValueError):
+                continue
+        return None
+
     def _parse_extraction_result(self, result: Any) -> List[Dict[str, Any]]:
         """Parse literature extraction results into structured format"""
         try:
@@ -552,12 +576,12 @@ class CrewAILiteratureAnnotator:
         return {"qa_check": str(result)}  # Placeholder
 
     def _parse_vote_result(self, result: Any) -> Dict[str, Any]:
-        """Parse one agent's vote in the final consensus meeting"""
-        parsed_list = self._parse_extraction_result(result)
-        if isinstance(parsed_list, list) and len(parsed_list) > 0:
-            first_item = parsed_list[0]
-            if isinstance(first_item, dict):
-                return first_item
+        """Parse one agent's vote in the final consensus meeting."""
+        parsed = self._extract_json(result)
+        if isinstance(parsed, list) and parsed:
+            parsed = parsed[0]
+        if isinstance(parsed, dict):
+            return parsed
         return {
             "decision": "unknown",
             "confidence": 0.0,
@@ -566,10 +590,15 @@ class CrewAILiteratureAnnotator:
         }
 
     def _parse_consensus_result(self, result: Any) -> Dict[str, Any]:
-        """Parse final synthesis result from the virtual meeting"""
-        parsed_list = self._parse_extraction_result(result)
-        if isinstance(parsed_list, list) and len(parsed_list) > 0 and isinstance(parsed_list[0], dict):
-            return parsed_list[0]
+        """Parse final synthesis result from the virtual meeting. The consensus agent returns
+        markdown-wrapped JSON; extract it so the real decision / vote_tally / blocking_issues are
+        captured instead of falling back to an opaque raw-text blob (which left final_decision
+        showing 'unknown')."""
+        parsed = self._extract_json(result)
+        if isinstance(parsed, list) and parsed:
+            parsed = parsed[0]
+        if isinstance(parsed, dict) and "decision" in parsed:
+            return parsed
         return {
             "decision": "requires_revision",
             "confidence": 0.5,
@@ -577,14 +606,45 @@ class CrewAILiteratureAnnotator:
             "summary": str(result)
         }
     
+    def _count_papers_processed(self, extraction_result: Any, request: 'AnnotationRequest') -> int:
+        """Count how many papers the pipeline actually used. With manual papers, that's the
+        provided count. With literature search enabled, the extractor pulls papers via the tool
+        (never landing in request.papers), so count the unique PMIDs referenced in its output."""
+        if getattr(request, "papers", None):
+            return len(request.papers)
+        text = str(extraction_result)
+        pmids = set(re.findall(r'"?pmid"?\s*:\s*"?(\d{6,9})', text, re.IGNORECASE))
+        if not pmids:
+            pmids = set(re.findall(r'\bPMID[:\s]+(\d{6,9})', text, re.IGNORECASE))
+        return len(pmids)
+
     def _count_pathways_created(self, result: Any) -> int:
         """Count number of pathways created during curation"""
         # Placeholder implementation
         return 1
     
     def _extract_quality_scores(self, result: Any) -> Dict[str, float]:
-        """Extract quality scores from review results"""
-        return {"overall_quality": 0.8}  # Placeholder
+        """Extract the reviewer's actual quality score from its (markdown-wrapped JSON) output
+        instead of returning a hardcoded value. Looks for 'overall_score' (the reviewer's field)
+        then 'overall_quality'; returns {"overall_quality": None} if it cannot be found."""
+        parsed = self._extract_json(result)
+        if isinstance(parsed, list) and parsed:
+            parsed = parsed[0]
+        if isinstance(parsed, dict):
+            score = parsed.get("overall_score", parsed.get("overall_quality"))
+            if score is not None:
+                try:
+                    return {"overall_quality": float(score)}
+                except (TypeError, ValueError):
+                    pass
+        # Fallback: the reviewer's JSON is often unfenced and sometimes truncated (token limit),
+        # so the whole blob may not parse. Pull the score directly with a regex.
+        m = (re.search(r'"overall_score"\s*:\s*([0-9]*\.?[0-9]+)', str(result))
+             or re.search(r'"overall_quality"\s*:\s*([0-9]*\.?[0-9]+)', str(result)))
+        if m:
+            return {"overall_quality": float(m.group(1))}
+        logger.warning("Could not extract overall quality score from review result.")
+        return {"overall_quality": None}
     
     def _extract_recommendations(self, result: Any) -> List[str]:
         """Extract recommendations from review results"""

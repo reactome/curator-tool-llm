@@ -1,3 +1,17 @@
+# OPTIMIZATION IDEA (future work): semantic re-ranking of abstracts
+#
+# Now: esearch returns PMIDs by PubMed's own relevance (keyword/citation based) and we
+# take the top MAX_PAPERS. That's generic relevance, not tailored to this gene's biology.
+#
+# Better: over-fetch (e.g. top ~50 by PubMed relevance), embed each abstract with
+# TextEmbedder.py (BioBERT), score semantic similarity to the gene + target concepts
+# (protein interactions, pathways, PSD, ...), then keep the top MAX_PAPERS by that score.
+# Goal: feed the extractor the most TASK-relevant abstracts -> better evidence quality.
+#
+# NOTE: this raises evidence/quality scores, but does NOT by itself flip the
+# approve/requires_revision decision -- that's gated on reviewer agents finding zero
+# high-severity blocking issues (annotation structure, e.g. pathway placement), not paper count.
+
 """
 Specialized Tools for Reactome Multi-Agent Literature Annotation
 
@@ -172,13 +186,20 @@ class ProteinInteractionTool(BaseTool):
     """Tool for retrieving protein-protein interactions"""
     
     name: str = "protein_interactions"
-    description: str = "Get protein-protein interactions from IntAct and BioGRID databases"
-    
+    description: str = (
+        "Get protein-protein interactions. interaction_source must be "
+        "'intact_biogrid' (default, combines IntAct + BioGRID) or 'reactome_fis'."
+    )
+
     gene_annotator: GenePathwayAnnotator = Field(..., description="Gene annotator instance")
-    
+
     def _run(self, gene: str, interaction_source: str = "intact_biogrid") -> str:
         """Get protein interactions for gene"""
         try:
+            # Normalize loose values the agent may pass (e.g. 'IntAct', 'BioGRID')
+            # to the exact value the loader accepts; otherwise it raises ValueError.
+            if interaction_source.lower() in ("intact", "biogrid", "intact_biogrid"):
+                interaction_source = "intact_biogrid"
             # Use existing PPI functionality
             interactions = self.gene_annotator.get_ppi_loader().get_interactions(
                 query_gene=gene,
@@ -199,12 +220,14 @@ class ProteinInteractionTool(BaseTool):
                 if enrichment_df is not None and not enrichment_df.empty:
                     pathway_enrichment = enrichment_df.head(20).to_dict("records")
             
+            # default=list so the set-valued interaction PMIDs serialize to JSON arrays
+            # (interactions is {partner: set(pmids)}; sets aren't JSON-serializable).
             return json.dumps({
                 "gene": gene,
                 "interaction_source": interaction_source,
                 "interactions": interactions,
                 "pathway_enrichment": pathway_enrichment
-            })
+            }, default=list)
             
         except Exception as e:
             return json.dumps({

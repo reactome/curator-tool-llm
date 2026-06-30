@@ -48,6 +48,9 @@ class ReactomePubMedRetriever(PubMedRetriever):
             + "db=pubmed&term="
             + str(urllib.parse.quote(query))
             + f"&retmode=json&retmax={self.top_k_results}&usehistory=y"
+            # Sort by relevance, not the default "most recent": the MongoDB cache is a frozen
+            # PubMed baseline, so newest-first returns post-baseline papers -> 0 cache hits.
+            + "&sort=relevance"
             + ('' if self.maxdate is None else '&mindate=1900/01/01&maxdate={}&datetype=pdat'.format(self.maxdate))
             + '&api_key={}'.format(pubmed_api_key)
         )
