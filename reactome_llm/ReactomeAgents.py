@@ -23,26 +23,35 @@ logger = logging.getLogger(__name__)
 
 class ReactomeAgents:
     """Factory class for creating specialized Reactome annotation agents"""
-    
-    def __init__(self, model: Optional[str] = None, temperature: Optional[float] = None):
+
+    def __init__(self, model: Optional[str] = None, temperature: Optional[float] = None,
+                 max_iter: int = 3):
         """
         Initialize agent factory with LLM configuration
-        
+
         Args:
             model: Anthropic model to use for all agents (falls back to environment config)
             temperature: Temperature setting for creativity vs consistency (falls back to environment config)
+            max_iter: Max ReAct iterations per agent. Set on the AGENT (not just the Crew) so the
+                tool-use loop is actually capped — otherwise agents run at CrewAI's high default.
         """
         default_model, default_temperature = get_crewai_model_settings()
         self.model = model or default_model
         self.temperature = default_temperature if temperature is None else temperature
+        self.max_iter = max_iter
+        # max_tokens is a CEILING, not a target: a high value does not slow down agents that
+        # generate little, it only prevents truncation of the ones that legitimately generate a
+        # lot (e.g. the curator's full Reactome data model). A low cap truncated that JSON mid-
+        # string and broke Pydantic parsing. Speed comes from concise prompts + parallel votes,
+        # not from clamping this. Keep it high enough to never cut off valid structured output.
         self.llm = LLM(
             model=self.model,
             temperature=self.temperature,
-            max_tokens=16000,   # ← stops the reviewer report from truncating
-            timeout=600,        # ← stops the infinite hangs
+            max_tokens=16000,
+            timeout=600,
             max_retries=3,
         )
-        
+
     def create_reactome_curator(self, tools: List) -> Agent:
         """
         Create the Reactome Curator agent.
@@ -84,7 +93,8 @@ class ReactomeAgents:
             verbose=True,
             allow_delegation=False,
             tools=tools,
-            llm=self.llm
+            llm=self.llm,
+            max_iter=self.max_iter
         )
     
     def create_literature_extractor(self, tools: List) -> Agent:
@@ -129,9 +139,10 @@ class ReactomeAgents:
             that preserves the original evidence and context while enabling downstream
             processing by other specialized agents.""",
             verbose=True,
-            allow_delegation=False, 
+            allow_delegation=False,
             tools=tools,
-            llm=self.llm
+            llm=self.llm,
+            max_iter=self.max_iter
         )
     
     def create_reviewer(self, tools: List) -> Agent:
@@ -181,9 +192,10 @@ class ReactomeAgents:
             verbose=True,
             allow_delegation=False,
             tools=tools,
-            llm=self.llm
+            llm=self.llm,
+            max_iter=self.max_iter
         )
-    
+
     def create_quality_checker(self, tools: List) -> Agent:
         """
         Create the Quality Checker agent.
@@ -234,9 +246,50 @@ class ReactomeAgents:
             verbose=True,
             allow_delegation=False,
             tools=tools,
-            llm=self.llm
+            llm=self.llm,
+            max_iter=self.max_iter
         )
-    
+
+    def create_vote_agent(self, role_name: str) -> Agent:
+        """Create a lightweight agent for a single consensus vote (Phase 5).
+
+        Votes are simple: read the inlined phase outputs and decide. These agents carry NO
+        tools (no tool-loop round-trips) and are spun up fresh per vote so the four votes can
+        run concurrently on independent crews."""
+        return Agent(
+            role=f"Consensus Meeting Specialist ({role_name})",
+            goal="Cast a concise, well-reasoned vote on the proposed Reactome annotation",
+            backstory=(
+                "You are a specialist reviewing the full output of the annotation pipeline "
+                "(extraction, curation, expert review, QA) to cast a final vote. You are "
+                "decisive and concise, focusing only on the top blocking issues."
+            ),
+            verbose=False,
+            allow_delegation=False,
+            tools=[],
+            llm=self.llm,
+            max_iter=self.max_iter
+        )
+
+    def create_consensus_agent(self) -> Agent:
+        """Create a lightweight agent that chairs the final synthesis (Phase 5).
+
+        Synthesis just applies deterministic rules over the collected votes, so it carries no
+        tools."""
+        return Agent(
+            role="Consensus Meeting Chair",
+            goal="Synthesize all specialist votes into a single deterministic final decision",
+            backstory=(
+                "You chair the final virtual meeting. You tally the specialists' votes and apply "
+                "the stated decision rules exactly, producing one consolidated, concise decision."
+            ),
+            verbose=False,
+            allow_delegation=False,
+            tools=[],
+            llm=self.llm,
+            max_iter=self.max_iter
+        )
+
     def get_all_agents(self, toolkit) -> Dict[str, Agent]:
         """
         Get all agents configured with appropriate tools

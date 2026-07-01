@@ -18,6 +18,15 @@ from typing import List, Dict, Any, Optional
 
 from crewai import Task
 
+from ReactomeModels import (
+    LiteratureExtraction,
+    ReactomeDataModel,
+    ExpertReview,
+    QAReport,
+    AgentVote,
+    ConsensusDecision,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -139,15 +148,18 @@ class ReactomeTasks:
                     "interaction_type": "binding/regulation/etc",
                     "evidence": "experimental_method",
                     "confidence": "high/medium/low",
+                    "evidence_strength_score": 0.0,
                     "pmid": "paper_id",
                     "context": "brief_description"
                 }}
             ],
             "pathways": [
                 {{
-                    "pathway_name": "pathway_description", 
+                    "pathway_name": "pathway_description",
                     "role": "catalyst/regulator/target",
                     "evidence": "supporting_evidence",
+                    "confidence": "high/medium/low",
+                    "evidence_strength_score": 0.0,
                     "pmid": "paper_id"
                 }}
             ],
@@ -155,6 +167,8 @@ class ReactomeTasks:
                 {{
                     "function": "molecular_function_description",
                     "evidence": "experimental_support",
+                    "confidence": "high/medium/low",
+                    "evidence_strength_score": 0.0,
                     "pmid": "paper_id"
                 }}
             ],
@@ -173,17 +187,18 @@ class ReactomeTasks:
         """
         
         expected_output = f"""
-        A comprehensive structured analysis of {gene_label} based on literature evidence,
-        including molecular interactions, pathway roles, and functional annotations,
-        formatted as detailed JSON with confidence assessments and evidence citations.
+        Structured molecular evidence for {gene_label}: interactions, pathway roles, and
+        functions with confidence and PMIDs. Return ONLY the structured fields defined above
+        — do not write a long prose report or narrative outside the schema.
         """
         
         return Task(
             description=description,
             expected_output=expected_output,
             agent=None,  # Will be assigned when creating crew
+            output_pydantic=LiteratureExtraction,
         )
-    
+
     def create_reactome_curation_task(self,
                                     gene: str,
                                     structured_info: Dict[str, Any],
@@ -254,6 +269,14 @@ class ReactomeTasks:
                     "referenceEntity": "reference_details"
                 }}
             ],
+            "complexes": [
+                {{
+                    "class": "Complex",
+                    "displayName": "complex_name",
+                    "components": ["member_entities"],
+                    "literatureReference": ["supporting_pmids"]
+                }}
+            ],
             "reactions": [
                 {{
                     "class": "Reaction", 
@@ -296,17 +319,18 @@ class ReactomeTasks:
         """
         
         expected_output = f"""
-        Valid Reactome data model instances for gene {gene} including entities, 
-        reactions, and pathway structures, formatted as JSON with proper schema
-        compliance and evidence attribution.
+        Valid Reactome data model instances for gene {gene} (entities, complexes, reactions,
+        pathways). Return ONLY the structured fields defined above — do not write a long prose
+        report or narrative outside the schema.
         """
         
         return Task(
             description=description,
             expected_output=expected_output,
             agent=None,
+            output_pydantic=ReactomeDataModel,
         )
-    
+
     def create_expert_review_task(self,
                                 gene: str,
                                 reactome_instances: List[Dict[str, Any]], 
@@ -333,10 +357,25 @@ class ReactomeTasks:
             f"Treat this as ground truth when judging identifier correctness; do not substitute another accession.\n"
             if accession else ""
         )
+        instances_json = json.dumps(reactome_instances, indent=2, default=str) if reactome_instances else "No instances were provided."
+        papers_json = json.dumps(original_papers, indent=2, default=str) if original_papers else "No literature evidence was provided."
         description = f"""
         {accession_directive}
         Perform expert domain validation of generated Reactome instances for gene {gene}.
-        
+
+        **Reactome instances to review (curator output):**
+        ```json
+        {instances_json}
+        ```
+
+        **Original literature evidence (extractor output):**
+        ```json
+        {papers_json}
+        ```
+        Review the instances above. They ARE present — evaluate their biological accuracy and
+        quality against the literature evidence and your domain knowledge. Do not report that
+        instances are missing.
+
         **Review Scope:**
         You will evaluate the biological accuracy and quality of generated Reactome
         instances by comparing them against:
@@ -416,17 +455,18 @@ class ReactomeTasks:
         """
         
         expected_output = f"""
-        A comprehensive domain expert review of Reactome instances for gene {gene},
-        including detailed quality scores, issue identification, improvement 
-        recommendations, and final approval status.
+        A domain expert review of Reactome instances for gene {gene}: overall_score,
+        criterion_scores, instance_reviews, and approval_status. Return ONLY the structured
+        fields defined above — do not write a long prose report or narrative outside the schema.
         """
         
         return Task(
             description=description,
             expected_output=expected_output,
             agent=None,
+            output_pydantic=ExpertReview,
         )
-    
+
     def create_quality_assurance_task(self,
                                     gene: str,
                                     reactome_instances: List[Dict[str, Any]],
@@ -455,11 +495,19 @@ class ReactomeTasks:
             f"other accession in your report, and flag any deviation from {accession} as an error.\n"
             if accession else ""
         )
+        instances_json = json.dumps(reactome_instances, indent=2, default=str) if reactome_instances else "No instances were provided."
         description = f"""
         {accession_directive}
         Perform comprehensive quality assurance and consistency checking for
         Reactome instances related to gene {gene}.
-        
+
+        **Reactome instances to QA (curator output):**
+        ```json
+        {instances_json}
+        ```
+        QA the instances above. They ARE present — assess schema compliance, referential
+        integrity, consistency, and integration for them. Do not report that instances are missing.
+
         **QA Scope:**
         1. Technical compliance with Reactome schema and standards
         2. Data consistency and referential integrity
@@ -518,13 +566,7 @@ class ReactomeTasks:
         ```json
         {{
             "gene": "{gene}",
-            "qa_summary": {{
-                "schema_compliance": 0.95,
-                "referential_integrity": 0.90,
-                "data_consistency": 0.92,
-                "integration_compatibility": 0.88,
-                "overall_qa_score": 0.91
-            }},
+            "qa_score": 0.91,
             "technical_issues": [
                 {{
                     "severity": "high/medium/low",
@@ -534,25 +576,15 @@ class ReactomeTasks:
                     "resolution": "recommended_fix"
                 }}
             ],
-            "automated_test_results": {{
-                "schema_validation": "pass/fail",
-                "duplicate_check": "pass/fail", 
-                "cross_reference_validation": "pass/fail",
-                "performance_check": "pass/fail"
-            }},
             "integration_assessment": {{
                 "conflicts_detected": false,
                 "performance_impact": "minimal/moderate/significant",
                 "compatibility_score": 0.9
-            }},
-            "final_recommendation": {{
-                "status": "approve/conditional_approval/reject",
-                "confidence": 0.9,
-                "conditions": ["list_of_required_fixes"],
-                "deployment_ready": true
             }}
         }}
         ```
+        `qa_score` is your single overall QA score (0.0-1.0) combining schema compliance,
+        referential integrity, data consistency, and integration compatibility.
         
         **Decision Criteria:**
         - Approve: QA score >= {quality_threshold}, no high-severity issues, expert approved
@@ -564,15 +596,16 @@ class ReactomeTasks:
         """
         
         expected_output = f"""
-        A comprehensive technical QA report for gene {gene} including automated 
-        test results, consistency validation, integration assessment, and final
-        deployment recommendations with specific conditions if applicable.
+        A technical QA report for gene {gene}: qa_score, technical_issues, and
+        integration_assessment. Return ONLY the structured fields defined above — do not write
+        a long prose report or narrative outside the schema.
         """
         
         return Task(
             description=description,
             expected_output=expected_output,
             agent=None,
+            output_pydantic=QAReport,
         )
 
     def create_final_vote_task(self,
@@ -631,6 +664,7 @@ class ReactomeTasks:
             description=description,
             expected_output=expected_output,
             agent=None,
+            output_pydantic=AgentVote,
         )
 
     def create_final_consensus_task(self,
@@ -680,4 +714,5 @@ class ReactomeTasks:
             description=description,
             expected_output=expected_output,
             agent=None,
+            output_pydantic=ConsensusDecision,
         )

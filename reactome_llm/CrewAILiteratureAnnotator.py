@@ -12,8 +12,8 @@ into Reactome pathway model instances. The framework consists of 4 specialized a
 Author: GitHub Copilot & Reactome Team
 """
 
+import asyncio
 import json
-import re
 import logging
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict, field
@@ -59,8 +59,8 @@ class AnnotationRequest:
 class AnnotationResult:
     """Output data structure for annotation results"""
     gene: str
-    reactome_instances: List[Dict[str, Any]]
-    literature_evidence: List[Dict[str, Any]]
+    reactome_instances: Dict[str, Any]  # ReactomeDataModel dump: {gene, entities, complexes, reactions, pathways}
+    literature_evidence: Dict[str, Any]  # LiteratureExtraction dump: {gene, interactions, pathways, functions, summary}
     quality_scores: Dict[str, float]
     validation_report: Dict[str, Any]
     consistency_check: Dict[str, Any]
@@ -112,7 +112,7 @@ class CrewAILiteratureAnnotator:
         
         # Initialize components
         self.toolkit = ReactomeToolkit(gene_annotator)
-        self.agents = ReactomeAgents(self.model, self.temperature)
+        self.agents = ReactomeAgents(self.model, self.temperature, max_iter=self.max_iter)
         self.tasks = ReactomeTasks()
         
         # Create the crew
@@ -300,11 +300,17 @@ class CrewAILiteratureAnnotator:
             "max_papers": request.max_papers
         })
         emit_agent_event("LiteratureExtractor", "end", phase="phase_1_literature_extraction", gene=request.gene)
-        
+
+        extraction = self._structured(extraction_result, "LiteratureExtraction")
+        # papers_processed = unique PMIDs cited across all extracted evidence — read straight
+        # off the validated model instead of regex-scraping the raw text.
+        evidence_items = extraction.interactions + extraction.pathways + extraction.functions
+        pmids = {item.pmid.strip() for item in evidence_items if item.pmid and item.pmid.strip()}
+
         return {
-            "raw_result": extraction_result,
-            "structured_information": self._parse_extraction_result(extraction_result),
-            "papers_processed": self._count_papers_processed(extraction_result, request),
+            "raw_result": extraction_result.raw,
+            "structured_information": extraction.model_dump(),
+            "papers_processed": len(pmids),
             "gene": request.gene
         }
     
@@ -342,11 +348,13 @@ class CrewAILiteratureAnnotator:
             "target_pathways": str(request.pathways or [])
         })
         emit_agent_event("ReactomeCurator", "end", phase="phase_2_data_model_creation", gene=request.gene)
-        
+
+        curation = self._structured(curation_result, "ReactomeDataModel")
         return {
-            "raw_result": curation_result,
-            "reactome_instances": self._parse_curation_result(curation_result),
-            "pathways_created": self._count_pathways_created(curation_result),
+            "raw_result": curation_result.raw,
+            # by_alias=True so the Reactome "class" key is emitted (the model field is `cls`).
+            "reactome_instances": curation.model_dump(by_alias=True),
+            "pathways_created": len(curation.pathways),
             "gene": request.gene
         }
     
@@ -386,12 +394,16 @@ class CrewAILiteratureAnnotator:
             "quality_threshold": request.quality_threshold
         })
         emit_agent_event("Reviewer", "end", phase="phase_3_expert_review", gene=request.gene)
-        
+
+        review = self._structured(review_result, "ExpertReview")
         return {
-            "raw_result": review_result,
-            "validation_report": self._parse_review_result(review_result),
-            "quality_scores": self._extract_quality_scores(review_result),
-            "recommendations": self._extract_recommendations(review_result),
+            "raw_result": review_result.raw,
+            "validation_report": review.model_dump(),
+            # Flatten the reviewer's scores into the {name: float} shape the result expects.
+            "quality_scores": {
+                "overall_quality": review.overall_score,
+                **review.criterion_scores.model_dump(),
+            },
             "gene": request.gene
         }
     
@@ -431,10 +443,11 @@ class CrewAILiteratureAnnotator:
             "quality_threshold": request.quality_threshold
         })
         emit_agent_event("QualityChecker", "end", phase="phase_4_quality_assurance", gene=request.gene)
-        
+
+        qa = self._structured(qa_result, "QAReport")
         return {
-            "raw_result": qa_result,
-            "consistency_check": self._parse_qa_result(qa_result),
+            "raw_result": qa_result.raw,
+            "consistency_check": qa.model_dump(),
             "gene": request.gene
         }
 
@@ -463,11 +476,14 @@ class CrewAILiteratureAnnotator:
             "quality_checker": self.qa_agent,
         }
 
-        votes: Dict[str, Any] = {}
-        for role_name, agent in role_to_agent.items():
-            if agent is None:
-                continue
-            emit_agent_event(role_name, "start", phase="phase_5_final_vote", gene=request.gene)
+        # Only enabled specialists participate in the vote.
+        participating = [(role, agent) for role, agent in role_to_agent.items() if agent is not None]
+
+        async def _cast_vote(role_name: str):
+            """Run one specialist's vote on its own crew + lightweight tool-less agent.
+            Independent crews are what let the votes run concurrently — they don't share
+            self.crew, so there's no task-list race."""
+            vote_agent = self.agents.create_vote_agent(role_name)
             vote_task = self.tasks.create_final_vote_task(
                 gene=request.gene,
                 agent_role=role_name,
@@ -478,15 +494,26 @@ class CrewAILiteratureAnnotator:
                 quality_threshold=request.quality_threshold,
                 accession=self.resolved_accession
             )
-            vote_task.agent = agent
-            self.crew.tasks = [vote_task]
-            vote_result = await self.crew.kickoff_async({
+            vote_task.agent = vote_agent
+            vote_crew = Crew(
+                agents=[vote_agent],
+                tasks=[vote_task],
+                process=Process.sequential,
+                verbose=self.verbose,
+                memory=False,
+            )
+            emit_agent_event(role_name, "start", phase="phase_5_final_vote", gene=request.gene)
+            vote_result = await vote_crew.kickoff_async({
                 "gene": request.gene,
                 "agent_role": role_name,
                 "quality_threshold": str(request.quality_threshold)
             })
-            votes[role_name] = self._parse_vote_result(vote_result)
             emit_agent_event(role_name, "end", phase="phase_5_final_vote", gene=request.gene)
+            return role_name, self._structured(vote_result, "AgentVote").model_dump()
+
+        # Cast all votes concurrently — they're independent, so there's no reason to serialize.
+        vote_pairs = await asyncio.gather(*[_cast_vote(role) for role, _ in participating])
+        votes: Dict[str, Any] = dict(vote_pairs)
 
         if self.reviewer_agent is None:
             emit_job_event("skip", phase="phase_5_consensus_synthesis", gene=request.gene, reason="reviewer_disabled")
@@ -497,159 +524,54 @@ class CrewAILiteratureAnnotator:
                 "gene": request.gene
             }
 
+        # Synthesis is mechanical (apply decision rules over the votes) -> lightweight agent.
+        consensus_agent = self.agents.create_consensus_agent()
         consensus_task = self.tasks.create_final_consensus_task(
             gene=request.gene,
             individual_votes=votes,
             quality_threshold=request.quality_threshold,
             accession=self.resolved_accession
         )
-        consensus_task.agent = self.reviewer_agent
-        self.crew.tasks = [consensus_task]
-        emit_agent_event("Reviewer", "start", phase="phase_5_consensus_synthesis", gene=request.gene)
-        consensus_result = await self.crew.kickoff_async({
+        consensus_task.agent = consensus_agent
+        consensus_crew = Crew(
+            agents=[consensus_agent],
+            tasks=[consensus_task],
+            process=Process.sequential,
+            verbose=self.verbose,
+            memory=False,
+        )
+        emit_agent_event("ConsensusChair", "start", phase="phase_5_consensus_synthesis", gene=request.gene)
+        consensus_result = await consensus_crew.kickoff_async({
             "gene": request.gene,
             "quality_threshold": str(request.quality_threshold)
         })
-        emit_agent_event("Reviewer", "end", phase="phase_5_consensus_synthesis", gene=request.gene)
+        emit_agent_event("ConsensusChair", "end", phase="phase_5_consensus_synthesis", gene=request.gene)
         emit_agent_event("ConsensusMeeting", "end", phase=phase_id, gene=request.gene)
 
         return {
             "individual_votes": votes,
-            "final_consensus": self._parse_consensus_result(consensus_result),
+            "final_consensus": self._structured(consensus_result, "ConsensusDecision").model_dump(),
             "gene": request.gene
         }
     
-    def _extract_json(self, text: Any) -> Any:
-        """Extract a JSON object/array from an agent response. Agent outputs are usually
-        markdown containing a ```json ... ``` block (plus prose), so try the fenced block
-        first, then the largest {...}/[...] span, then the whole string. Returns the parsed
-        object, or None if nothing parseable is found."""
-        if isinstance(text, (dict, list)):
-            return text
-        s = str(text)
-        candidates = []
-        fence = re.search(r"```(?:json)?\s*(.*?)```", s, re.DOTALL)
-        if fence:
-            candidates.append(fence.group(1).strip())
-        brace = re.search(r"(\{.*\}|\[.*\])", s, re.DOTALL)
-        if brace:
-            candidates.append(brace.group(1).strip())
-        candidates.append(s.strip())
-        for c in candidates:
-            try:
-                return json.loads(c)
-            except (json.JSONDecodeError, ValueError):
-                continue
-        return None
+    def _structured(self, result: Any, model_name: str) -> Any:
+        """Return the validated Pydantic model CrewAI attached to a task result.
 
-    def _parse_extraction_result(self, result: Any) -> List[Dict[str, Any]]:
-        """Parse literature extraction results into structured format"""
-        try:
-            if isinstance(result, str):
-                # Try to parse as JSON
-                try:
-                    return json.loads(result)
-                except json.JSONDecodeError:
-                    # Fall back to text parsing
-                    return [{"content": result, "type": "raw_text"}]
-            elif isinstance(result, dict):
-                return [result] 
-            elif isinstance(result, list):
-                return result
-            else:
-                return [{"content": str(result), "type": "unknown"}]
-        except Exception as e:
-            logger.warning(f"Failed to parse extraction result: {e}")
-            return [{"content": str(result), "type": "parse_error", "error": str(e)}]
-    
-    def _parse_curation_result(self, result: Any) -> List[Dict[str, Any]]:
-        """Parse curation results into Reactome instances"""
-        # Implementation depends on the specific format returned by curator agent
-        return self._parse_extraction_result(result)  # Placeholder
-    
-    def _parse_review_result(self, result: Any) -> Dict[str, Any]:
-        """Parse expert review results"""
-        return {"review": str(result)}  # Placeholder
-    
-    def _parse_qa_result(self, result: Any) -> Dict[str, Any]:
-        """Parse QA results into consistency check format"""
-        return {"qa_check": str(result)}  # Placeholder
+        With output_pydantic set on every Task, CrewAI validates the agent's answer
+        against the schema and re-prompts the LLM until it matches, exposing the typed
+        object on `result.pydantic`. This just unwraps it — there is no JSON scraping or
+        regex fallback anywhere downstream. If `pydantic` is None, structured output
+        genuinely failed after CrewAI's own retries, so we fail loudly rather than
+        silently degrade to a placeholder."""
+        model = getattr(result, "pydantic", None)
+        if model is None:
+            raw = str(getattr(result, "raw", result))[:500]
+            raise CrewAIAnnotationError(
+                f"{model_name}: no validated structured output (result.pydantic is None) "
+                f"after CrewAI retries. Raw output began: {raw!r}"
+            )
+        return model
 
-    def _parse_vote_result(self, result: Any) -> Dict[str, Any]:
-        """Parse one agent's vote in the final consensus meeting."""
-        parsed = self._extract_json(result)
-        if isinstance(parsed, list) and parsed:
-            parsed = parsed[0]
-        if isinstance(parsed, dict):
-            return parsed
-        return {
-            "decision": "unknown",
-            "confidence": 0.0,
-            "blocking_issues": [],
-            "summary": str(result)
-        }
-
-    def _parse_consensus_result(self, result: Any) -> Dict[str, Any]:
-        """Parse final synthesis result from the virtual meeting. The consensus agent returns
-        markdown-wrapped JSON; extract it so the real decision / vote_tally / blocking_issues are
-        captured instead of falling back to an opaque raw-text blob (which left final_decision
-        showing 'unknown')."""
-        parsed = self._extract_json(result)
-        if isinstance(parsed, list) and parsed:
-            parsed = parsed[0]
-        if isinstance(parsed, dict) and "decision" in parsed:
-            return parsed
-        return {
-            "decision": "requires_revision",
-            "confidence": 0.5,
-            "required_revisions": ["Consensus output was not parseable JSON"],
-            "summary": str(result)
-        }
-    
-    def _count_papers_processed(self, extraction_result: Any, request: 'AnnotationRequest') -> int:
-        """Count how many papers the pipeline actually used. With manual papers, that's the
-        provided count. With literature search enabled, the extractor pulls papers via the tool
-        (never landing in request.papers), so count the unique PMIDs referenced in its output."""
-        if getattr(request, "papers", None):
-            return len(request.papers)
-        text = str(extraction_result)
-        pmids = set(re.findall(r'"?pmid"?\s*:\s*"?(\d{6,9})', text, re.IGNORECASE))
-        if not pmids:
-            pmids = set(re.findall(r'\bPMID[:\s]+(\d{6,9})', text, re.IGNORECASE))
-        return len(pmids)
-
-    def _count_pathways_created(self, result: Any) -> int:
-        """Count number of pathways created during curation"""
-        # Placeholder implementation
-        return 1
-    
-    def _extract_quality_scores(self, result: Any) -> Dict[str, float]:
-        """Extract the reviewer's actual quality score from its (markdown-wrapped JSON) output
-        instead of returning a hardcoded value. Looks for 'overall_score' (the reviewer's field)
-        then 'overall_quality'; returns {"overall_quality": None} if it cannot be found."""
-        parsed = self._extract_json(result)
-        if isinstance(parsed, list) and parsed:
-            parsed = parsed[0]
-        if isinstance(parsed, dict):
-            score = parsed.get("overall_score", parsed.get("overall_quality"))
-            if score is not None:
-                try:
-                    return {"overall_quality": float(score)}
-                except (TypeError, ValueError):
-                    pass
-        # Fallback: the reviewer's JSON is often unfenced and sometimes truncated (token limit),
-        # so the whole blob may not parse. Pull the score directly with a regex.
-        m = (re.search(r'"overall_score"\s*:\s*([0-9]*\.?[0-9]+)', str(result))
-             or re.search(r'"overall_quality"\s*:\s*([0-9]*\.?[0-9]+)', str(result)))
-        if m:
-            return {"overall_quality": float(m.group(1))}
-        logger.warning("Could not extract overall quality score from review result.")
-        return {"overall_quality": None}
-    
-    def _extract_recommendations(self, result: Any) -> List[str]:
-        """Extract recommendations from review results"""
-        return ["No specific recommendations"]  # Placeholder
-    
     def export_results(self, result: AnnotationResult, output_path: str) -> None:
         """Export annotation results to JSON file"""
         output_file = Path(output_path)

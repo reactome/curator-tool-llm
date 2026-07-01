@@ -1,17 +1,3 @@
-# OPTIMIZATION IDEA (future work): semantic re-ranking of abstracts
-#
-# Now: esearch returns PMIDs by PubMed's own relevance (keyword/citation based) and we
-# take the top MAX_PAPERS. That's generic relevance, not tailored to this gene's biology.
-#
-# Better: over-fetch (e.g. top ~50 by PubMed relevance), embed each abstract with
-# TextEmbedder.py (BioBERT), score semantic similarity to the gene + target concepts
-# (protein interactions, pathways, PSD, ...), then keep the top MAX_PAPERS by that score.
-# Goal: feed the extractor the most TASK-relevant abstracts -> better evidence quality.
-#
-# NOTE: this raises evidence/quality scores, but does NOT by itself flip the
-# approve/requires_revision decision -- that's gated on reviewer agents finding zero
-# high-severity blocking issues (annotation structure, e.g. pathway placement), not paper count.
-
 """
 Specialized Tools for Reactome Multi-Agent Literature Annotation
 
@@ -28,6 +14,7 @@ Tool categories:
 
 import json
 import logging
+import re
 from typing import Any, List
 from pathlib import Path
 
@@ -40,6 +27,47 @@ import ReactomeNeo4jUtils as neo4j_utils
 from CrewAIEventLogger import emit_tool_event
 
 logger = logging.getLogger(__name__)
+
+
+def parse_agent_json(text: Any) -> Any:
+    """Parse JSON an agent passed as a tool argument.
+
+    Agents rarely send clean JSON: they wrap it in a ```json ... ``` fence, surround
+    it with prose, or send a single-element list where a dict is expected. Bare
+    json.loads() then raises 'Expecting value...' and the tool returns an error blob
+    even though the data was recoverable. This strips a fenced block (or the largest
+    {...}/[...] span) before parsing, so the tools stop choking on well-formed output
+    that merely had markdown around it.
+
+    Returns the parsed object (dict/list passed through untouched), or raises
+    ValueError with a readable message the agent can act on.
+    """
+    if isinstance(text, (dict, list)):
+        return text
+    s = str(text or "").strip()
+    if not s:
+        raise ValueError("no JSON provided (empty input)")
+    candidate = s
+    fence = re.search(r"```(?:json)?\s*(.*?)```", s, re.DOTALL)
+    if fence:
+        candidate = fence.group(1).strip()
+    else:
+        span = re.search(r"(\{.*\}|\[.*\])", s, re.DOTALL)
+        if span:
+            candidate = span.group(1).strip()
+    try:
+        return json.loads(candidate)
+    except (json.JSONDecodeError, ValueError) as e:
+        raise ValueError(f"could not parse JSON from input: {e}")
+
+
+def as_dict(parsed: Any) -> dict:
+    """Coerce parsed agent JSON to a dict. A single-element list wrapping a dict is
+    unwrapped; anything else non-dict becomes {} so downstream .get() calls never
+    raise 'list' object has no attribute 'get'."""
+    if isinstance(parsed, list):
+        parsed = parsed[0] if len(parsed) == 1 else {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 class LiteratureSearchTool(BaseTool):
@@ -142,21 +170,22 @@ class ReactomeQueryTool(BaseTool):
     """Tool for querying existing Reactome data"""
     
     name: str = "reactome_query"
-    description: str = "Query existing Reactome database for pathway, reaction, and entity information"
-    
+    description: str = (
+        "Query existing Reactome data for a gene. query_type must be 'pathways' (default, "
+        "returns the pathways the gene participates in) or 'reactions' (requires a 'pathway' "
+        "argument, returns that pathway's reactions). Any other query_type falls back to 'pathways'."
+    )
+
     gene_annotator: GenePathwayAnnotator = Field(..., description="Gene annotator instance")
-    
+
     def _run(self, gene: str, query_type: str = "pathways", pathway: str = "") -> str:
         """Query Reactome database for gene information"""
         try:
-            if query_type in ("pathways", "pathway"):
-                pathways = neo4j_utils.query_pathways_for_gene(gene)
-                return json.dumps({
-                    "gene": gene,
-                    "query_type": query_type,
-                    "pathways": pathways
-                })
-            elif query_type == "reactions":
+            # 'reactions' is the only branch that needs an extra argument (pathway), so it can't
+            # be a safe fallback. Anything that isn't an explicit 'reactions' request — including
+            # invented types the agent makes up (entity, comprehensive, ...) — routes to
+            # 'pathways', which only needs the gene and so always returns useful data.
+            if query_type == "reactions":
                 if not pathway:
                     return json.dumps({
                         "gene": gene,
@@ -169,12 +198,19 @@ class ReactomeQueryTool(BaseTool):
                     "query_type": query_type,
                     "reactions": reactions_df.to_dict(orient="records")
                 })
-            else:
-                return json.dumps({
-                    "gene": gene,
-                    "error": f"Unknown query_type: {query_type}. Use 'pathways' or 'reactions'."
-                })
-                
+
+            if query_type not in ("pathways", "pathway"):
+                logger.info(
+                    f"reactome_query: unrecognized query_type {query_type!r}; defaulting to 'pathways'."
+                )
+            pathways = neo4j_utils.query_pathways_for_gene(gene)
+            return json.dumps({
+                "gene": gene,
+                "query_type": "pathways",
+                "requested_query_type": query_type,
+                "pathways": pathways
+            })
+
         except Exception as e:
             return json.dumps({
                 "gene": gene,
@@ -256,14 +292,15 @@ class SchemaValidationTool(BaseTool):
                     "valid": False,
                     "error": "No instances provided. Re-call schema_validation with `instances` set to the Reactome instance JSON you generated."
                 })
-            # Parse instances
-            data = json.loads(instances) if isinstance(instances, str) else instances
+            # Parse instances (tolerates markdown-wrapped / prose-wrapped JSON; coerce
+            # to a dict so the "entities"/"reactions" field checks below stay safe).
+            data = as_dict(parse_agent_json(instances))
             schema_data = None
 
             if schema_path:
                 schema_data = json.loads(Path(schema_path).read_text(encoding="utf-8"))
             elif schema:
-                schema_data = json.loads(schema) if isinstance(schema, str) else schema
+                schema_data = parse_agent_json(schema)
             
             # Basic validation checks
             validation_results = {
@@ -324,9 +361,10 @@ class ConsistencyCheckTool(BaseTool):
     def _run(self, instances: str, gene: str) -> str:
         """Check consistency with existing data"""
         try:
-            # Parse instances
-            data = json.loads(instances) if isinstance(instances, str) else instances
-            
+            # Parse instances (tolerates markdown-wrapped / prose-wrapped JSON, then
+            # coerce to a dict so the "pathways" lookup below can't crash on a list).
+            data = as_dict(parse_agent_json(instances))
+
             # Get existing data for comparison
             existing_pathways = neo4j_utils.query_pathways_for_gene(gene)
             
@@ -410,10 +448,12 @@ class QualityMetricsTool(BaseTool):
     def _run(self, instances: str, evidence_data: str) -> str:
         """Calculate quality metrics"""
         try:
-            # Parse inputs
-            instances_data = json.loads(instances) if isinstance(instances, str) else instances
-            evidence = json.loads(evidence_data) if isinstance(evidence_data, str) else evidence_data
-            
+            # Parse inputs (tolerate markdown/prose wrapping; coerce to dicts so the
+            # .get() breakdown below can't crash on a list — the bug that produced
+            # "'list' object has no attribute 'get'").
+            instances_data = as_dict(parse_agent_json(instances))
+            evidence = as_dict(parse_agent_json(evidence_data))
+
             # Calculate metrics
             metrics = {
                 "completeness": 0.8,  # Placeholder
