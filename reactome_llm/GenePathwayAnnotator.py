@@ -73,7 +73,7 @@ class GenePathwayAnnotator:
         return embeddings
     
     def _get_pubmed_retriver(self, 
-                             maxdate: str = '2024/12/31',
+                             maxdate: str = '2026/03/31',
                              top_k_results: int = 8,
                              max_query_length: int = 1000) -> ReactomePubMedRetriever:
         pubmed_retriever = ReactomePubMedRetriever()
@@ -408,7 +408,7 @@ class GenePathwayAnnotator:
 
     async def query_pubmed_abstracts_for_gene(self,
                                               query_gene: str,
-                                              pubmed_maxdate: str='2024/12/31',
+                                              pubmed_maxdate: str='2026/03/31',
                                               top_k_results: int = 8,
                                               max_query_length: int = 1000) -> List[Document]:
         """Query pubmed about interactions, reactions, and pathways for a gene and return

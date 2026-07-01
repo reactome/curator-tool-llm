@@ -233,7 +233,7 @@ async def annotate_gene():
     interactionSource = data.get('interactionSource', 'intact_biogrid')
     filterPPIs = data.get('filterPPIs', True)
     # This is not set by the front-end and determined by the local pubmed abstracts latest date
-    pubmed_maxdate = '2024/12/31'
+    pubmed_maxdate = '2026/03/31'
 
     try:
         annotated_pathway_summary = await annotator.write_summary_of_annotated_pathways(gene)
