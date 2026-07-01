@@ -450,9 +450,18 @@ class QualityMetricsTool(BaseTool):
         try:
             # Parse inputs (tolerate markdown/prose wrapping; coerce to dicts so the
             # .get() breakdown below can't crash on a list — the bug that produced
-            # "'list' object has no attribute 'get'").
-            instances_data = as_dict(parse_agent_json(instances))
-            evidence = as_dict(parse_agent_json(evidence_data))
+            # "'list' object has no attribute 'get'"). Agents often reference the data
+            # in prose instead of pasting JSON; that used to raise ValueError and make
+            # the whole tool return an {"error": ...} blob ("Expecting value: line 1
+            # column 1"). Degrade gracefully instead: treat unparseable input as {} and
+            # flag it in validation_status, so the tool still returns usable metrics.
+            def _parse(x):
+                try:
+                    return as_dict(parse_agent_json(x)), True
+                except ValueError:
+                    return {}, False
+            instances_data, ok_instances = _parse(instances)
+            evidence, ok_evidence = _parse(evidence_data)
 
             # Calculate metrics
             metrics = {
@@ -469,7 +478,8 @@ class QualityMetricsTool(BaseTool):
                                  len(instances_data.get("reactions", [])) +
                                  len(instances_data.get("pathways", [])),
                 "evidence_count": len(evidence.get("papers", [])),
-                "validation_status": "preliminary"
+                "validation_status": "preliminary" if (ok_instances and ok_evidence)
+                                     else "preliminary (some inputs not parseable as JSON)"
             }
             
             return json.dumps({

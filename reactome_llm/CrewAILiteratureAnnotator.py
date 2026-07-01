@@ -15,6 +15,7 @@ Author: GitHub Copilot & Reactome Team
 import asyncio
 import json
 import logging
+import re
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
@@ -31,6 +32,7 @@ from ReactomeTools import ReactomeToolkit
 from GenePathwayAnnotator import GenePathwayAnnotator 
 from ReactomeLLMErrors import *
 from ModelConfig import get_crewai_model_settings
+from ReactomeModels import ReactomeEntity
 import logging_config
 
 # Set up logging
@@ -350,6 +352,7 @@ class CrewAILiteratureAnnotator:
         emit_agent_event("ReactomeCurator", "end", phase="phase_2_data_model_creation", gene=request.gene)
 
         curation = self._structured(curation_result, "ReactomeDataModel")
+        curation = self._repair_dangling_references(curation)
         return {
             "raw_result": curation_result.raw,
             # by_alias=True so the Reactome "class" key is emitted (the model field is `cls`).
@@ -357,6 +360,58 @@ class CrewAILiteratureAnnotator:
             "pathways_created": len(curation.pathways),
             "gene": request.gene
         }
+
+    def _repair_dangling_references(self, data: Any) -> Any:
+        """Guarantee referential integrity of the Phase 2 model.
+
+        The curator sometimes references a product species inline in a reaction
+        (e.g. 'STIM1 degradation products', 'NFE2L2 phospho-Ser40 (nuclear)') that it
+        never defined as an entity, producing a dangling reference that violates
+        Reactome integrity. For each simple (non-complex) reference in a reaction's
+        input/output/catalystActivity or a complex's components that resolves to
+        neither a defined entity nor a defined complex, create a minimal entity stub —
+        inheriting the UniProt identifier/species from a base-name match (stripping a
+        trailing '[compartment]' or '(qualifier)') when one exists — and log it.
+        Colon-notation references ('A:B') are complexes, not entities, so they are left
+        for QA to flag rather than materialised as bogus entities.
+        """
+        def base_name(name: str) -> str:
+            n = re.sub(r"\s*\[[^\]]*\]\s*$", "", name or "").strip()
+            n = re.sub(r"\s*\([^)]*\)\s*$", "", n).strip()
+            return n
+
+        entity_names = {e.displayName for e in data.entities}
+        entities_by_base = {base_name(e.displayName): e for e in data.entities}
+        complex_names = {c.displayName for c in data.complexes}
+
+        referenced: List[str] = []
+        for c in data.complexes:
+            referenced.extend(c.components)
+        for r in data.reactions:
+            referenced.extend(r.input)
+            referenced.extend(r.output)
+            referenced.extend(r.catalystActivity)
+
+        created: Dict[str, Any] = {}
+        for ref in referenced:
+            if (not ref) or ":" in ref or ref in entity_names or ref in complex_names or ref in created:
+                continue
+            src = entities_by_base.get(base_name(ref))
+            created[ref] = ReactomeEntity(
+                displayName=ref,
+                identifier=(src.identifier if src else ""),
+                species=(src.species if src else "Homo sapiens"),
+                referenceEntity=(src.referenceEntity if src else ""),
+            )
+
+        if created:
+            data.entities.extend(created.values())
+            logger.warning(
+                "Phase 2 integrity repair for %s: created %d stub entity(ies) for "
+                "dangling reference(s): %s",
+                data.gene, len(created), ", ".join(sorted(created)),
+            )
+        return data
     
     async def _phase_3_expert_review(self,
                                     request: AnnotationRequest,
