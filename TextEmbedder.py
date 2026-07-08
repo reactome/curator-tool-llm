@@ -126,3 +126,17 @@ def convert_to_matrix(pathway2embedding: dict) -> Tuple[np.ndarray, List[str]]:
             embedding_matrix = np.vstack((embedding_matrix, embedding_array))
     return embedding_matrix, pathway_list
 
+
+def cosine_similarity(vec_a, vec_b):
+    """Compute cosine similarity between two vectors.
+    
+    Args:
+        vec_a, vec_b: numpy arrays or lists of numbers
+    
+    Returns:
+        float: cosine similarity, between -1 and 1
+    """
+    dot_product = np.dot(vec_a, vec_b)
+    mag_a = np.linalg.norm(vec_a)
+    mag_b = np.linalg.norm(vec_b)
+    return dot_product / (mag_a * mag_b) 

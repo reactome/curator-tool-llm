@@ -225,3 +225,73 @@ def map_pathway_name_to_dbId(pathway_names: list[str]) -> dict[int, str]:
             name2id[row['displayName']] = row['dbId']
         return name2id
     return None
+
+def query_literature_references_for_gene(gene: str) -> list[int]:
+    """Get all PMIDs cited (at pathway or reaction level) for events the gene participates in.
+
+    Args:
+        gene (str): Gene symbol (e.g. 'SHANK3')
+
+    Returns:
+        list[int]: List of PMIDs
+    """
+    query = """
+        MATCH (ewas:EntityWithAccessionedSequence)-[:referenceEntity]->(g:ReferenceSequence)
+        WHERE g.geneName[0] = $gene_name AND ewas.speciesName = "Homo sapiens"
+        MATCH (p:Pathway)-[:hasEvent*]->(r:ReactionLikeEvent)
+              -[:input|catalystActivity|regulatedBy|physicalEntity|hasComponent|hasMember|hasCandidate*]->(ewas)
+        MATCH (p)-[:literatureReference]->(plit:LiteratureReference)
+        RETURN DISTINCT plit.pubMedIdentifier AS pmid
+
+        UNION
+
+        MATCH (ewas:EntityWithAccessionedSequence)-[:referenceEntity]->(g:ReferenceSequence)
+        WHERE g.geneName[0] = $gene_name
+        MATCH (p:Pathway)-[:hasEvent*]->(r:ReactionLikeEvent)
+              -[:input|catalystActivity|regulatedBy|physicalEntity|hasComponent|hasMember|hasCandidate*]->(ewas)
+        MATCH (r)-[:literatureReference]->(rlit:LiteratureReference)
+        RETURN DISTINCT rlit.pubMedIdentifier AS pmid
+    """
+    result_df = None
+    with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        result_df = driver.execute_query(query,
+                                         db=DB,
+                                         gene_name=gene,
+                                         result_transformer_=neo4j.Result.to_df)
+    if result_df is None or result_df.empty:
+        return []
+    return result_df['pmid'].to_list()
+
+
+
+def get_random_annotated_genes(n: int = 10, min_pathways: int = 3) -> list[str]:
+    """Get a random sample of gene names with at least min_pathways pathway annotations.
+
+    Args:
+        n (int): Number of genes to sample.
+        min_pathways (int): Minimum number of pathways a gene must appear in to qualify.
+
+    Returns:
+        list[str]: List of gene names.
+    """
+    query = """
+        MATCH (ewas:EntityWithAccessionedSequence)-[:referenceEntity]->(g:ReferenceSequence)
+        WHERE g.geneName IS NOT NULL AND ewas.speciesName = "Homo sapiens"
+        MATCH (p:Pathway)-[:hasEvent*]->(r:ReactionLikeEvent)
+            -[:input|catalystActivity|regulatedBy|physicalEntity|hasComponent|hasMember|hasCandidate*]->(ewas)
+        WITH g.geneName[0] AS gene, count(DISTINCT p) AS pathway_count
+        WHERE pathway_count >= $min_pathways
+        RETURN gene
+        ORDER BY rand()
+        LIMIT $n
+    """
+    result_df = None
+    with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        result_df = driver.execute_query(query,
+                                        db=DB,
+                                        min_pathways=min_pathways,
+                                        n=n,
+                                        result_transformer_=neo4j.Result.to_df)
+    if result_df is None or result_df.empty:
+        return []
+    return result_df['gene'].to_list()
