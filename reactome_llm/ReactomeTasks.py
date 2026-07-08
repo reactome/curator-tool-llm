@@ -199,12 +199,48 @@ class ReactomeTasks:
             output_pydantic=LiteratureExtraction,
         )
 
+    def _build_placement_directive(self, gene: str,
+                                   placement: Optional[Dict[str, Any]]) -> str:
+        """Render the deterministic pathway-placement suggestion as a curator directive.
+
+        The suggestion comes from suggest_pathway_placement() (FI-partner enrichment). The
+        curator's job is to VERIFY the primary against the literature evidence and fall back
+        to a secondary candidate if it doesn't fit -- not to re-derive placement. Returns ''
+        when there is no usable suggestion (no placement computed, or no significant pathway).
+        """
+        if not placement or placement.get("status") != "ok" or not placement.get("primary"):
+            return ""
+
+        primary = placement["primary"]
+        partners = ", ".join(primary.get("mapped_genes", [])) or "n/a"
+        secondary = placement.get("secondary", [])
+        if secondary:
+            alts = "; ".join(
+                f"{c['pathway_name']} (FDR {c['fdr']:.1e})" for c in secondary
+            )
+            secondary_line = f"Close alternatives (statistical ties): {alts}.\n        "
+        else:
+            secondary_line = "No close alternatives; the primary is the clear candidate.\n        "
+
+        return (
+            f"\n        **SUGGESTED PATHWAY PLACEMENT (verify against the evidence; do NOT re-derive):** "
+            f"Deterministic interaction-partner enrichment suggests {gene} most likely belongs to "
+            f"the Reactome pathway **{primary['pathway_name']}** (FDR {primary['fdr']:.1e}), "
+            f"supported by these enriched interaction partners: {partners}.\n        "
+            f"{secondary_line}"
+            f"Confirm the PRIMARY pathway is consistent with the literature evidence above and "
+            f"anchor the pathway/reaction instances you create to it. If the evidence clearly "
+            f"contradicts the primary, fall back to one of the close alternatives. Do not invent "
+            f"a placement outside these candidates unless the evidence contradicts all of them.\n"
+        )
+
     def create_reactome_curation_task(self,
                                     gene: str,
                                     structured_info: Dict[str, Any],
                                     target_pathways: Optional[List[str]] = None,
                                     schema_path: Optional[str] = None,
-                                    accession: Optional[str] = None) -> Task:
+                                    accession: Optional[str] = None,
+                                    placement: Optional[Dict[str, Any]] = None) -> Task:
         """
         Create a task for the Reactome Curator agent.
         
@@ -228,6 +264,8 @@ class ReactomeTasks:
             if accession else ""
         )
 
+        placement_directive = self._build_placement_directive(gene, placement)
+
         description = f"""
         Convert structured literature information about gene {gene} into valid Reactome 
         pathway model instances following the official Reactome data schema.
@@ -241,6 +279,7 @@ class ReactomeTasks:
         in this input (via pmid or interaction partner).
         
         {accession_directive}
+        {placement_directive}
         **Primary Objectives:**
         1. Create valid Reactome Entity instances for {gene} and interaction partners
         2. Model biochemical reactions and regulatory relationships

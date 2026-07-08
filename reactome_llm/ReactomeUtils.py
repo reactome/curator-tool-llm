@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from typing import Collection
 from langchain.text_splitter import SentenceTransformersTokenTextSplitter
@@ -24,7 +25,11 @@ logger = log.getLogger(__name__)
 
 # Used to query interacting pathways
 REACTOME_IDG_FI_API_URL = 'https://idg.reactome.org/idgpairwise/relationships/combinedScoreGenesForTerm/'
-REACTOME_PATHWAY_GENE_FILE = 'resources/ReactomePathwayGenes_Ver_91.txt'
+# Resolve relative to this module (repo_root/resources/...) so callers work regardless of
+# cwd (e.g. running from notebooks/). Points at the same file the cwd-relative path used to.
+REACTOME_PATHWAY_GENE_FILE = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), '..', 'resources',
+                 'ReactomePathwayGenes_Ver_91.txt'))
 
 RANDOM_STATE = 123456
 
@@ -472,3 +477,98 @@ def pathway_binomial_enrichment(gene_list, pathway_file: str = REACTOME_PATHWAY_
     df = df.sort_values(by="FDR").reset_index(drop=True)
 
     return df
+
+
+# --- Deterministic pathway placement (Part 3) --------------------------------------------
+# Lazily-constructed MongoFILoader singleton; its __init__ hits Mongo to load the gene
+# index, so build it once and reuse across genes.
+_fi_loader = None
+
+
+def _get_fi_loader():
+    global _fi_loader
+    if _fi_loader is None:
+        from ProteinProteinInteractionsLoader import MongoFILoader
+        _fi_loader = MongoFILoader()
+    return _fi_loader
+
+
+def _placement_candidate(row) -> dict:
+    """One enriched-pathway row -> a JSON-serializable candidate dict."""
+    return {
+        "pathway_id": int(row["pathway_id"]),
+        "pathway_name": row["pathway_name"],
+        "fdr": float(row["FDR"]),
+        "overlap_count": int(row["overlap_count"]),
+        "mapped_genes": list(row["mapped_genes"]),  # top-N partners hitting this pathway
+    }
+
+
+def suggest_pathway_placement(gene: str, fi_cutoff: float = 0.8, top_n: int = 10,
+                              fdr_cutoff: float = 0.05,
+                              tie_margin_orders: float = 1.0) -> dict:
+    """Suggest Reactome pathway placement for a gene from its top interaction partners.
+
+    Deterministic and LLM-free: ranks the gene's functional-interaction partners by FI score
+    (top ``top_n``), maps them into Reactome pathways, and runs binomial + BH-FDR enrichment.
+    The #1 FDR-ranked pathway is the primary suggestion; any pathway whose FDR is within
+    ``tie_margin_orders`` decades of the primary's FDR is surfaced as a close secondary
+    candidate (a genuine statistical tie, not a re-decision). This produces a ranked,
+    statistically-grounded suggestion for Phase 2's reactome_curator agent to *verify*; it
+    does not itself decide the answer beyond what the FDR ranking determines.
+
+    Returns a JSON-serializable dict:
+        gene, status, primary, secondary, partners_used, n_significant_total, params
+    status is one of:
+        "ok"                     -> primary populated
+        "no_partners"            -> gene has no FI partners above fi_cutoff
+        "no_significant_pathway" -> partners found but none clear fdr_cutoff
+    """
+    result = {
+        "gene": gene,
+        "status": "ok",
+        "primary": None,
+        "secondary": [],
+        "partners_used": [],
+        "n_significant_total": 0,
+        "params": {"fi_cutoff": fi_cutoff, "top_n": top_n,
+                   "fdr_cutoff": fdr_cutoff, "tie_margin_orders": tie_margin_orders},
+    }
+
+    fi_df = _get_fi_loader().fetch_fis(gene, fi_cutoff=fi_cutoff)
+    if fi_df is None or fi_df.empty:
+        result["status"] = "no_partners"
+        return result
+
+    top = fi_df.sort_values("score", ascending=False).head(top_n)
+    partners = list(top["gene"])
+    result["partners_used"] = [{"gene": g, "score": float(s)}
+                               for g, s in zip(top["gene"], top["score"])]
+
+    map_df = map_interactions_in_pathways({p: set() for p in partners},
+                                          pathway_file=REACTOME_PATHWAY_GENE_FILE)
+    if map_df is None or map_df.empty:
+        result["status"] = "no_significant_pathway"
+        return result
+
+    enriched = pathway_binomial_enrichment_df(map_df, partners,
+                                              pathway_file=REACTOME_PATHWAY_GENE_FILE,
+                                              fdr_cutoff=fdr_cutoff)
+    if enriched is None or enriched.empty:
+        result["status"] = "no_significant_pathway"
+        return result
+
+    result["n_significant_total"] = len(enriched)
+    primary_fdr = float(enriched.iloc[0]["FDR"])
+    result["primary"] = _placement_candidate(enriched.iloc[0])
+
+    # Close ties: within tie_margin_orders decades of the primary FDR. enriched is sorted by
+    # FDR ascending, so once a row exceeds the threshold every later row does too -> break.
+    # Floor the primary FDR to avoid a zero threshold when it underflows to 0.0.
+    threshold = max(primary_fdr, 1e-300) * (10 ** tie_margin_orders)
+    for _, row in enriched.iloc[1:].iterrows():
+        if float(row["FDR"]) <= threshold:
+            result["secondary"].append(_placement_candidate(row))
+        else:
+            break
+    return result

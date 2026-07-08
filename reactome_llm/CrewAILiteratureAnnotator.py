@@ -29,7 +29,8 @@ from ReactomeAgents import ReactomeAgents
 from CrewAIEventLogger import emit_agent_event, emit_job_event
 from ReactomeTasks import ReactomeTasks  
 from ReactomeTools import ReactomeToolkit
-from GenePathwayAnnotator import GenePathwayAnnotator 
+from GenePathwayAnnotator import GenePathwayAnnotator
+import ReactomeUtils as utils
 from ReactomeLLMErrors import *
 from ModelConfig import get_crewai_model_settings
 from ReactomeModels import ReactomeEntity
@@ -111,7 +112,10 @@ class CrewAILiteratureAnnotator:
         self.verbose = verbose
         # Verified UniProt accession for the gene, resolved once per run (see annotate_literature)
         self.resolved_accession = None
-        
+        # Deterministic pathway-placement suggestion (FI-partner enrichment), computed once per
+        # run when no explicit target pathways are given (see annotate_literature)
+        self.resolved_placement = None
+
         # Initialize components
         self.toolkit = ReactomeToolkit(gene_annotator)
         self.agents = ReactomeAgents(self.model, self.temperature, max_iter=self.max_iter)
@@ -206,6 +210,17 @@ class CrewAILiteratureAnnotator:
             # the cross-phase accession inconsistency.
             self.resolved_accession = self.gene_annotator.resolve_uniprot_accession(request.gene)
             logger.info(f"Resolved UniProt accession for {request.gene}: {self.resolved_accession}")
+
+            # Deterministic pathway placement from FI-partner enrichment: computed once here
+            # (not inside an agent) and injected into the Phase-2 curation task for the curator
+            # to VERIFY, not re-derive. Only when the caller gave no explicit target pathways —
+            # if they did, respect that intent and skip.
+            if not request.pathways:
+                self.resolved_placement = utils.suggest_pathway_placement(request.gene)
+                logger.info(
+                    f"Suggested pathway placement for {request.gene}: "
+                    f"{self.resolved_placement['status']}"
+                )
 
             # Phase 1: Literature Extraction and Preprocessing
             extraction_context = await self._phase_1_literature_extraction(request)
@@ -338,7 +353,8 @@ class CrewAILiteratureAnnotator:
             structured_info=extraction_context["structured_information"],
             target_pathways=request.pathways,
             schema_path=request.schema_path,
-            accession=self.resolved_accession
+            accession=self.resolved_accession,
+            placement=self.resolved_placement
         )
         curation_task.agent = self.curator_agent
         

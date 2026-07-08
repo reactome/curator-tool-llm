@@ -7,6 +7,7 @@ pathway context.
 """
 
 import json
+import os
 import re
 import urllib.error
 import urllib.request
@@ -15,6 +16,25 @@ import ReactomeNeo4jUtils as neo4jutils
 from ModelConfig import create_reactome_chat_model
 
 UNIPROT_REST_URL = "https://rest.uniprot.org/uniprotkb/{}.json"
+
+# Resolve the pathway-gene flat file relative to this module (repo_root/resources/...),
+# so enrichment works regardless of the caller's cwd (e.g. running from notebooks/).
+_PATHWAY_GENE_FILE = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "resources",
+                 "ReactomePathwayGenes_Ver_91.txt")
+)
+
+# Lazily-constructed MongoFILoader singleton — its __init__ hits Mongo to load the gene
+# index, so we build it once and reuse it across genes rather than per call.
+_fi_loader = None
+
+
+def _get_fi_loader():
+    global _fi_loader
+    if _fi_loader is None:
+        from ProteinProteinInteractionsLoader import MongoFILoader
+        _fi_loader = MongoFILoader()
+    return _fi_loader
 
 # Reactome top-level / mega-generic pathways whose huge result pools drown out relevance
 # ranking. Filtered out of pathway-based queries so specific leaf pathways dominate.
@@ -247,3 +267,61 @@ def build_union_query(gene: str, drop_generic: bool = True, max_pathways: int = 
     name_fragment = _or_join_terms([gene] + synonyms)
     pathway_fragment = _pathway_fragment(select_pathway_names(gene, drop_generic, max_pathways))
     return " OR ".join(frag for frag in (name_fragment, pathway_fragment) if frag)
+
+
+def select_partner_enriched_pathway_names(gene: str, fi_cutoff: float = 0.8,
+                                          top_n: int = 10, fdr_cutoff: float = 0.05,
+                                          drop_generic: bool = True,
+                                          max_pathways: int = 15) -> list[str]:
+    """Pathway names for a gene derived from FI-partner enrichment (not direct lookup).
+
+    Ranks the gene's functional-interaction partners by FI score (fetch_fis), takes the
+    top N, and runs Reactome pathway enrichment (binomial + BH-FDR) on them. Returns the
+    enriched, FDR-sorted leaf pathway names, generic-filtered and capped exactly like
+    select_pathway_names -- so this is a drop-in pathway-name source that also works for
+    genes with no direct Reactome annotation.
+
+    No PMIDs are involved: partners map into pathways as an unweighted gene set. Returns []
+    when the gene has no FI partners, none map to a pathway, or nothing clears fdr_cutoff.
+    """
+    # Lazy import: ReactomeUtils pulls in scanpy/faiss at module load, so only the
+    # partner-enrichment path (not every QueryBuilder import) pays that cost.
+    import ReactomeUtils as utils
+
+    fi_df = _get_fi_loader().fetch_fis(gene, fi_cutoff=fi_cutoff)
+    if fi_df is None or fi_df.empty:
+        return []
+    top_partners = list(fi_df.sort_values("score", ascending=False)["gene"].head(top_n))
+
+    interaction_dict = {partner: set() for partner in top_partners}  # no PMIDs needed
+    map_df = utils.map_interactions_in_pathways(interaction_dict,
+                                                pathway_file=_PATHWAY_GENE_FILE)
+    if map_df is None or map_df.empty:
+        return []
+    enriched = utils.pathway_binomial_enrichment_df(map_df, top_partners,
+                                                    pathway_file=_PATHWAY_GENE_FILE,
+                                                    fdr_cutoff=fdr_cutoff)
+    if enriched is None or enriched.empty:
+        return []
+
+    names = list(enriched["pathway_name"])  # already sorted ascending by FDR
+    if drop_generic:
+        names = [n for n in names if n not in GENERIC_PATHWAYS]
+    return names[:max_pathways]
+
+
+def build_partner_enrichment_query(gene: str, fi_cutoff: float = 0.8, top_n: int = 10,
+                                   fdr_cutoff: float = 0.05, drop_generic: bool = True,
+                                   max_pathways: int = 15) -> str:
+    """Build a PubMed query from FI-partner-enrichment pathway names.
+
+    Mirrors build_pathway_query but sources pathway names from interaction-partner
+    enrichment instead of the direct Reactome graph lookup, so it works for genes with no
+    existing Reactome annotation. The gene is deliberately NOT AND'd in: an `[gene] AND
+    (pathways)` form was validated and collapsed citation recall (36 -> 4 pool_hits over the
+    10 locked genes) because curator-cited papers often never name the gene (the section-3
+    recall ceiling). Falls back to the bare gene symbol when no enriched pathways are found.
+    """
+    names = select_partner_enriched_pathway_names(gene, fi_cutoff, top_n, fdr_cutoff,
+                                                   drop_generic, max_pathways)
+    return _pathway_fragment(names) if names else gene
