@@ -572,3 +572,22 @@ def suggest_pathway_placement(gene: str, fi_cutoff: float = 0.8, top_n: int = 10
         else:
             break
     return result
+
+
+def is_confident_placement(placement: dict, max_fdr: float = 1e-3,
+                           min_partners: int = 2) -> bool:
+    """Whether a suggest_pathway_placement result is confident enough to anchor retrieval /
+    the curation directive on (vs falling back to gene-name/synonym retrieval).
+
+    Gate tuned on a cold-start vs have-data sweep (2026-07-08): every have-data reference
+    placement clears FDR<=1.9e-5 with >=3 partners, while the TANC1-class failures (which
+    tanked the end-to-end annotation: 0.88 -> 0.48, approved -> rejected) had FDR>1e-3 and a
+    single supporting partner. Cost is asymmetric — a wrong anchor propagates through Stage-1
+    retrieval + rerank + the curator prompt, whereas a false negative just reverts to the safe
+    gene-name baseline — so the gate errs toward gating out.
+    """
+    if not placement or placement.get("status") != "ok" or not placement.get("primary"):
+        return False
+    primary = placement["primary"]
+    return (primary["fdr"] < max_fdr
+            and len(primary.get("mapped_genes", [])) >= min_partners)

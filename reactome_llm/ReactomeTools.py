@@ -25,6 +25,19 @@ from GenePathwayAnnotator import GenePathwayAnnotator
 import ReactomeUtils as utils
 import ReactomeNeo4jUtils as neo4j_utils
 from CrewAIEventLogger import emit_tool_event
+from QueryBuilder import build_retrieval_query, get_reranking_target
+from TextEmbedder import create_sentence_transformer, sentence_embed, cosine_similarity
+
+# Lazily-constructed sentence-transformer for Stage-2 re-ranking; built once on first use
+# (loading the model is expensive) and reused across tool calls.
+_rerank_model = None
+
+
+def _get_rerank_model():
+    global _rerank_model
+    if _rerank_model is None:
+        _rerank_model = create_sentence_transformer()
+    return _rerank_model
 
 logger = logging.getLogger(__name__)
 
@@ -78,39 +91,73 @@ class LiteratureSearchTool(BaseTool):
     
     gene_annotator: GenePathwayAnnotator = Field(..., description="Gene annotator instance")
     
-    def _run(self, gene: str, max_papers: int = 8, additional_terms: str = "") -> str:
-        """Search PubMed for gene-related literature"""
+    def _run(self, gene: str, max_papers: int = 5, additional_terms: str = "",
+             fetch_papers: int = 200) -> str:
+        """Search PubMed for gene-related literature using the validated retrieve-and-rerank
+        pipeline.
+
+        Stage 1: build_retrieval_query picks the query by annotation status (union for genes
+        with Reactome data, partner-enrichment for cold-start). Stage 2: re-rank the fetched
+        pool against pathway-level text (get_reranking_target, scored by MAX cosine over the
+        gene's per-pathway summaries) and keep the top max_papers -- this stops the re-ranker
+        discarding the pathway/mechanism-level papers that dominate curator citations (raised
+        final-recall retention from 36% to 54% on the validation set vs the old gene-specific
+        description). fetch_papers is the Stage-1 pool size re-ranked down to max_papers.
+        """
         try:
-            # Use existing PubMed functionality
-            query = f"{gene} interactions OR {gene} reactions OR {gene} pathways"
+            query = build_retrieval_query(gene)
             if additional_terms:
-                query += f" OR {additional_terms}"
-            
-            # Get PubMed abstracts via the existing retriever factory.
-            pubmed_retriever = self.gene_annotator._get_pubmed_retriver(top_k_results=max_papers)
-            docs = pubmed_retriever.get_relevant_documents(query)[:max_papers]
-            
-            # Structure the results
-            papers = []
-            for doc in docs:
-                papers.append({
-                    "pmid": doc.metadata.get("uid", ""),
-                    "title": doc.metadata.get("title", ""),
-                    "abstract": doc.page_content,
-                    "authors": doc.metadata.get("authors", ""),
-                    "journal": doc.metadata.get("source", ""),
-                    "year": doc.metadata.get("year", "")
-                })
-            
+                query = f"({query}) OR {additional_terms}"
+
+            # Fetch the Stage-1 pool (maxdate defaults to the frozen cache boundary). lazy_load
+            # yields cache dicts with 'uid' and 'Summary' (the abstract) -- the same path the
+            # validation harness used.
+            retriever = self.gene_annotator._get_pubmed_retriver(top_k_results=fetch_papers)
+            pool = [d for d in retriever.lazy_load(query=query) if d is not None]
+
+            ranked = self._rerank(gene, pool, max_papers)
+
+            papers = [{
+                "pmid": d.get("uid", ""),
+                "title": d.get("title", ""),
+                "abstract": d.get("Summary", ""),
+                "authors": d.get("authors", ""),
+                "journal": d.get("journal", ""),
+                "year": d.get("year", "")
+            } for d in ranked]
+
             return json.dumps({
                 "gene": gene,
                 "query": query,
+                "pool_size": len(pool),
                 "papers_found": len(papers),
                 "papers": papers
             })
-            
+
         except Exception as e:
             return json.dumps({"error": str(e), "gene": gene})
+
+    def _rerank(self, gene: str, pool: List[dict], max_papers: int) -> List[dict]:
+        """Re-rank pool docs by MAX cosine similarity to the gene's pathway-level targets,
+        returning the top max_papers. Falls back to pool order (first max_papers) if there are
+        no embeddable abstracts or no re-ranking targets."""
+        embeddable = [d for d in pool if d.get("Summary")]
+        if not embeddable:
+            return pool[:max_papers]
+
+        targets = get_reranking_target(gene)
+        if not targets:
+            return pool[:max_papers]
+
+        model = _get_rerank_model()
+        target_vecs = [sentence_embed(t, model) for t in targets]
+        scored = []
+        for d in embeddable:
+            dv = sentence_embed(d["Summary"], model)
+            score = max(cosine_similarity(dv, tv) for tv in target_vecs)
+            scored.append((score, d))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [d for _, d in scored[:max_papers]]
 
 
 class FullTextAnalysisTool(BaseTool):

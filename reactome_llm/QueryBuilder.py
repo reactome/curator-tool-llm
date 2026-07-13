@@ -325,3 +325,60 @@ def build_partner_enrichment_query(gene: str, fi_cutoff: float = 0.8, top_n: int
     names = select_partner_enriched_pathway_names(gene, fi_cutoff, top_n, fdr_cutoff,
                                                    drop_generic, max_pathways)
     return _pathway_fragment(names) if names else gene
+
+
+def build_retrieval_query(gene: str, drop_generic: bool = True, max_pathways: int = 15) -> str:
+    """Choose the Stage-1 retrieval query based on the gene's Reactome annotation status.
+
+    Has existing Reactome data  -> build_union_query (pathway names + UniProt synonyms), the
+        best-performing strategy on the validation set (76 pool_hits).
+    No data (cold-start gene)    -> build_partner_enrichment_query IF the partner-enrichment
+        placement is confident; otherwise fall back to build_synonym_search_query. A weak
+        placement (e.g. TANC1: FDR 9.8e-3, single partner) anchors retrieval on the wrong
+        pathways and degrades the annotation, so we only trust it when it clears the gate.
+    """
+    if neo4jutils.query_pathways_for_gene(gene):
+        return build_union_query(gene, drop_generic, max_pathways)
+
+    # Cold-start: gate partner-enrichment on placement confidence.
+    import ReactomeUtils as utils
+    if utils.is_confident_placement(utils.suggest_pathway_placement(gene)):
+        return build_partner_enrichment_query(gene)
+    return build_synonym_search_query(gene)
+
+
+def get_reranking_target(gene: str, drop_generic: bool = True,
+                         max_pathways: int = 15) -> list[str]:
+    """Pathway-level text(s) to re-rank retrieved papers against, replacing the gene-specific
+    description that mis-ranked pathway/mechanism-level ground-truth papers (final recall
+    collapsed to ~1% vs 2.8% pool recall).
+
+    Returns a LIST of texts (one per pathway); the re-ranker scores each paper by its MAX
+    cosine similarity across them, so a paper relevant to ANY of the gene's pathways ranks
+    high (no concatenation, no embedder truncation).
+
+    Has data   -> summation text of each of the gene's (generic-filtered, capped) pathways.
+    Cold-start -> summation text of the primary suggested pathway (suggest_pathway_placement).
+    Fallback   -> [gene-specific description] when no pathway/placement/summary is available,
+                  so re-ranking never breaks.
+    """
+    names = select_pathway_names(gene, drop_generic, max_pathways)
+    if not names:
+        # Cold-start: use the placement's primary pathway ONLY if the placement is confident;
+        # a weak placement would anchor re-ranking on the wrong pathway. Otherwise leave names
+        # empty so we fall through to the gene-description target below.
+        import ReactomeUtils as utils  # lazy: pulls in scanpy/faiss at module load
+        placement = utils.suggest_pathway_placement(gene)
+        if utils.is_confident_placement(placement):
+            names = [placement["primary"]["pathway_name"]]
+
+    summaries = [t for t in (neo4jutils.query_pathway_summary(n) for n in names) if t]
+    if summaries:
+        return summaries
+
+    # Last resort: gene symbol + UniProt synonyms as one identity text. Must be LLM-FREE:
+    # get_reranking_target runs inside LiteratureSearchTool within CrewAI's async flow, and a
+    # nested LLM call here (e.g. build_query_and_search_terms) collides with the event loop
+    # ("no running event loop" / empty-response -> pipeline abort). Synonyms are REST + Neo4j.
+    synonyms = get_uniprot_synonyms(neo4jutils.query_accession_for_gene(gene))
+    return [" ".join([gene] + synonyms)] if synonyms else [gene]

@@ -199,6 +199,25 @@ class ReactomeTasks:
             output_pydantic=LiteratureExtraction,
         )
 
+    def _build_description_context(self, gene: str, description: Optional[str]) -> str:
+        """Render the gene's background description as ORIENTATION, not evidence.
+
+        This is the model's prior knowledge of the gene (build_query_and_search_terms), NOT
+        literature from Phase 1. It is injected only in the cold-start + gated-out case, where
+        there is no placement directive, to give the curator a biological frame of reference.
+        It must never be cited: every instance still has to trace to the Phase-1 extraction.
+        Returns '' when no description is available.
+        """
+        if not description:
+            return ""
+        return (
+            f"\n        **GENE BACKGROUND (orientation only — NOT evidence, do NOT cite):** "
+            f"General reference on {gene}'s known biology: {description}\n        "
+            f"Use this ONLY to interpret the literature evidence above. Every entity, reaction, "
+            f"and pathway you create must still trace to the Phase-1 extraction (via pmid or "
+            f"interaction partner), never to this background.\n"
+        )
+
     def _build_placement_directive(self, gene: str,
                                    placement: Optional[Dict[str, Any]]) -> str:
         """Render the deterministic pathway-placement suggestion as a curator directive.
@@ -240,7 +259,8 @@ class ReactomeTasks:
                                     target_pathways: Optional[List[str]] = None,
                                     schema_path: Optional[str] = None,
                                     accession: Optional[str] = None,
-                                    placement: Optional[Dict[str, Any]] = None) -> Task:
+                                    placement: Optional[Dict[str, Any]] = None,
+                                    description: Optional[str] = None) -> Task:
         """
         Create a task for the Reactome Curator agent.
         
@@ -265,6 +285,7 @@ class ReactomeTasks:
         )
 
         placement_directive = self._build_placement_directive(gene, placement)
+        description_context = self._build_description_context(gene, description)
 
         description = f"""
         Convert structured literature information about gene {gene} into valid Reactome 
@@ -280,6 +301,7 @@ class ReactomeTasks:
         
         {accession_directive}
         {placement_directive}
+        {description_context}
         **Primary Objectives:**
         1. Create valid Reactome Entity instances for {gene} and interaction partners
         2. Model biochemical reactions and regulatory relationships

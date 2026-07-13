@@ -34,6 +34,7 @@ import ReactomeUtils as utils
 from ReactomeLLMErrors import *
 from ModelConfig import get_crewai_model_settings
 from ReactomeModels import ReactomeEntity
+from QueryBuilder import build_query_and_search_terms
 import logging_config
 
 # Set up logging
@@ -115,6 +116,9 @@ class CrewAILiteratureAnnotator:
         # Deterministic pathway-placement suggestion (FI-partner enrichment), computed once per
         # run when no explicit target pathways are given (see annotate_literature)
         self.resolved_placement = None
+        # Lightweight gene background (LLM prior knowledge), generated once per run ONLY in the
+        # cold-start + gated-out case, to orient Phase 2 when it has no placement directive.
+        self.resolved_description = None
 
         # Initialize components
         self.toolkit = ReactomeToolkit(gene_annotator)
@@ -214,13 +218,29 @@ class CrewAILiteratureAnnotator:
             # Deterministic pathway placement from FI-partner enrichment: computed once here
             # (not inside an agent) and injected into the Phase-2 curation task for the curator
             # to VERIFY, not re-derive. Only when the caller gave no explicit target pathways —
-            # if they did, respect that intent and skip.
+            # if they did, respect that intent and skip. The directive is injected ONLY when the
+            # placement is confident (gate); a weak placement (e.g. TANC1) would mislead the
+            # curator and degrade the annotation, so in that case resolved_placement stays None
+            # and no directive is injected.
             if not request.pathways:
-                self.resolved_placement = utils.suggest_pathway_placement(request.gene)
+                placement = utils.suggest_pathway_placement(request.gene)
+                confident = utils.is_confident_placement(placement)
+                self.resolved_placement = placement if confident else None
                 logger.info(
                     f"Suggested pathway placement for {request.gene}: "
-                    f"{self.resolved_placement['status']}"
+                    f"{placement['status']} (confident={confident}; "
+                    f"{'injecting directive' if confident else 'gated out, no directive'})"
                 )
+                # Gate failed -> Phase 2 would otherwise see only the raw Phase-1 extraction.
+                # Generate a lightweight gene background as orientation. Guarded so a failed or
+                # empty LLM call degrades to None instead of aborting the run. Safe to call here
+                # (normal async phase context), unlike get_reranking_target's LiteratureSearchTool
+                # path where a nested LLM call collides with the event loop.
+                if not confident:
+                    try:
+                        _, self.resolved_description = build_query_and_search_terms(request.gene)
+                    except Exception as e:
+                        logger.warning(f"Gene description generation failed for {request.gene}: {e}")
 
             # Phase 1: Literature Extraction and Preprocessing
             extraction_context = await self._phase_1_literature_extraction(request)
@@ -354,7 +374,8 @@ class CrewAILiteratureAnnotator:
             target_pathways=request.pathways,
             schema_path=request.schema_path,
             accession=self.resolved_accession,
-            placement=self.resolved_placement
+            placement=self.resolved_placement,
+            description=self.resolved_description
         )
         curation_task.agent = self.curator_agent
         
