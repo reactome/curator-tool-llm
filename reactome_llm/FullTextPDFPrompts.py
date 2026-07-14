@@ -8,7 +8,7 @@ Import in the notebook or any pipeline script:
 """
  
  
-def build_extraction_prompt(gene: str, text_chunk: str) -> str:
+def build_extraction_prompt(text_chunk: str) -> str:
     """
     Prompt for extracting ALL biochemical reactions involving `gene` from a
     300-token text chunk sliding across the full paper.
