@@ -25,7 +25,7 @@ from GenePathwayAnnotator import GenePathwayAnnotator
 import ReactomeUtils as utils
 import ReactomeNeo4jUtils as neo4j_utils
 from CrewAIEventLogger import emit_tool_event
-from QueryBuilder import build_retrieval_query, get_reranking_target
+from QueryBuilder import build_retrieval_query_pair, get_reranking_target
 from TextEmbedder import create_sentence_transformer, sentence_embed, cosine_similarity
 
 # Lazily-constructed sentence-transformer for Stage-2 re-ranking; built once on first use
@@ -96,24 +96,41 @@ class LiteratureSearchTool(BaseTool):
         """Search PubMed for gene-related literature using the validated retrieve-and-rerank
         pipeline.
 
-        Stage 1: build_retrieval_query picks the query by annotation status (union for genes
-        with Reactome data, partner-enrichment for cold-start). Stage 2: re-rank the fetched
-        pool against pathway-level text (get_reranking_target, scored by MAX cosine over the
-        gene's per-pathway summaries) and keep the top max_papers -- this stops the re-ranker
-        discarding the pathway/mechanism-level papers that dominate curator citations (raised
-        final-recall retention from 36% to 54% on the validation set vs the old gene-specific
-        description). fetch_papers is the Stage-1 pool size re-ranked down to max_papers.
+        Stage 1: build_retrieval_query_pair returns two INDEPENDENT queries by annotation status --
+        a gene-name+synonyms query and a broad pathway/partner query -- and we run each as its own
+        PubMed E-Search and UNION the PMID sets (see _merge_search). This is the RAB6C fix: a single
+        combined OR query lets broad pathway terms dominate relevance ranking and bury the
+        gene-specific papers below the fetch cap; two searches each get their own ranking, so the
+        gene-specific set is guaranteed into the pool. Stage 2: re-rank the merged pool against
+        pathway-level text (get_reranking_target, scored by MAX cosine over the gene's per-pathway
+        summaries) and keep the top max_papers -- this stops the re-ranker discarding the
+        pathway/mechanism-level papers that dominate curator citations (raised final-recall
+        retention from 36% to 54% on the validation set vs the old gene-specific description).
         """
         try:
-            query = build_retrieval_query(gene)
-            if additional_terms:
-                query = f"({query}) OR {additional_terms}"
+            # Clamp to sane ceilings: the agent tends to over-request (e.g. max_papers=50),
+            # ballooning the returned abstracts into a ~79k-char blob that (a) blows past the
+            # intended paper cap and (b) can trip Anthropic's safety classifier -> stop_reason
+            # "refusal" -> empty completion -> pipeline abort (observed on TANC1). Keeping the
+            # top-N reranked papers honors the configured cap and keeps the payload small.
+            max_papers = min(max_papers, 5)
+            fetch_papers = min(fetch_papers, 200)
 
-            # Fetch the Stage-1 pool (maxdate defaults to the frozen cache boundary). lazy_load
-            # yields cache dicts with 'uid' and 'Summary' (the abstract) -- the same path the
-            # validation harness used.
-            retriever = self.gene_annotator._get_pubmed_retriver(top_k_results=fetch_papers)
-            pool = [d for d in retriever.lazy_load(query=query) if d is not None]
+            name_query, context_query = build_retrieval_query_pair(gene)
+            # Fold agent-supplied extra terms into the broad search (mirrors the old combined-query
+            # behavior); if there's no broad search (cold-start gate-fail), fold into the name search.
+            if additional_terms:
+                if context_query:
+                    context_query = f"({context_query}) OR {additional_terms}"
+                else:
+                    name_query = f"({name_query}) OR {additional_terms}"
+
+            # Result-set MERGE. The gene-name search is small for the genes this fix targets, so half
+            # the budget captures its full specific set while the broad search keeps the full budget
+            # (the primary recall driver for have-data genes). Union dedupes overlap.
+            pool = self._merge_search(name_query, context_query,
+                                      name_fetch=max(1, fetch_papers // 2),
+                                      context_fetch=fetch_papers)
 
             ranked = self._rerank(gene, pool, max_papers)
 
@@ -128,7 +145,8 @@ class LiteratureSearchTool(BaseTool):
 
             return json.dumps({
                 "gene": gene,
-                "query": query,
+                "name_query": name_query,
+                "context_query": context_query,
                 "pool_size": len(pool),
                 "papers_found": len(papers),
                 "papers": papers
@@ -136,6 +154,30 @@ class LiteratureSearchTool(BaseTool):
 
         except Exception as e:
             return json.dumps({"error": str(e), "gene": gene})
+
+    def _merge_search(self, name_query: str, context_query: str,
+                      name_fetch: int, context_fetch: int) -> List[dict]:
+        """Run the name and context queries as SEPARATE E-Searches and union the results, deduped
+        by PMID. Each search gets its own independent relevance ranking, so the gene-specific
+        (name) papers are guaranteed into the pool rather than buried below the fetch cap by the
+        broad pathway/partner results (the RAB6C dilution fix). Name-search results are placed
+        first so gene-specific papers win the degenerate no-rerank-target fallback in _rerank.
+        lazy_load yields cache dicts with 'uid' and 'Summary'; maxdate defaults to the frozen
+        cache boundary."""
+        seen, pool = set(), []
+        for query, cap in ((name_query, name_fetch), (context_query, context_fetch)):
+            if not query:
+                continue
+            retriever = self.gene_annotator._get_pubmed_retriver(top_k_results=cap)
+            for d in retriever.lazy_load(query=query):
+                if d is None:
+                    continue
+                uid = d.get("uid")
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                pool.append(d)
+        return pool
 
     def _rerank(self, gene: str, pool: List[dict], max_papers: int) -> List[dict]:
         """Re-rank pool docs by MAX cosine similarity to the gene's pathway-level targets,
@@ -484,63 +526,6 @@ class EvidenceEvaluationTool(BaseTool):
             })
 
 
-class QualityMetricsTool(BaseTool):
-    """Tool for calculating various quality metrics"""
-    
-    name: str = "quality_metrics"
-    description: str = "Calculate comprehensive quality metrics for annotations"
-    
-    gene_annotator: GenePathwayAnnotator = Field(..., description="Gene annotator instance")
-    
-    def _run(self, instances: str, evidence_data: str) -> str:
-        """Calculate quality metrics"""
-        try:
-            # Parse inputs (tolerate markdown/prose wrapping; coerce to dicts so the
-            # .get() breakdown below can't crash on a list — the bug that produced
-            # "'list' object has no attribute 'get'"). Agents often reference the data
-            # in prose instead of pasting JSON; that used to raise ValueError and make
-            # the whole tool return an {"error": ...} blob ("Expecting value: line 1
-            # column 1"). Degrade gracefully instead: treat unparseable input as {} and
-            # flag it in validation_status, so the tool still returns usable metrics.
-            def _parse(x):
-                try:
-                    return as_dict(parse_agent_json(x)), True
-                except ValueError:
-                    return {}, False
-            instances_data, ok_instances = _parse(instances)
-            evidence, ok_evidence = _parse(evidence_data)
-
-            # Calculate metrics
-            metrics = {
-                "completeness": 0.8,  # Placeholder
-                "accuracy": 0.85,     # Placeholder
-                "consistency": 0.9,   # Placeholder
-                "evidence_support": 0.75,  # Placeholder
-                "overall_quality": 0.825
-            }
-            
-            # Add detailed breakdown
-            breakdown = {
-                "total_instances": len(instances_data.get("entities", [])) + 
-                                 len(instances_data.get("reactions", [])) +
-                                 len(instances_data.get("pathways", [])),
-                "evidence_count": len(evidence.get("papers", [])),
-                "validation_status": "preliminary" if (ok_instances and ok_evidence)
-                                     else "preliminary (some inputs not parseable as JSON)"
-            }
-            
-            return json.dumps({
-                "metrics": metrics,
-                "breakdown": breakdown,
-                "timestamp": "2026-04-06"
-            })
-            
-        except Exception as e:
-            return json.dumps({
-                "error": str(e)
-            })
-
-
 class ReactomeToolkit:
     """Toolkit that provides agent-specific tools"""
     
@@ -563,7 +548,6 @@ class ReactomeToolkit:
         self.schema_validation = SchemaValidationTool(gene_annotator=self.gene_annotator)
         self.consistency_check = ConsistencyCheckTool(gene_annotator=self.gene_annotator)
         self.evidence_evaluation = EvidenceEvaluationTool(gene_annotator=self.gene_annotator)
-        self.quality_metrics = QualityMetricsTool(gene_annotator=self.gene_annotator)
         for tool in self.get_all_tools():
             self._instrument_tool(tool)
 
@@ -630,7 +614,6 @@ class ReactomeToolkit:
             self.literature_search,
             self.reactome_query, 
             self.evidence_evaluation,
-            self.quality_metrics,
             self.consistency_check
         ]
         return self._filter_tools(tools, enabled_names)
@@ -640,7 +623,6 @@ class ReactomeToolkit:
         tools = [
             self.schema_validation,
             self.consistency_check,
-            self.quality_metrics,
             self.reactome_query
         ]
         return self._filter_tools(tools, enabled_names)
@@ -654,6 +636,5 @@ class ReactomeToolkit:
             self.protein_interactions,
             self.schema_validation,
             self.consistency_check,
-            self.evidence_evaluation,
-            self.quality_metrics
+            self.evidence_evaluation
         ]

@@ -232,13 +232,16 @@ class CrewAILiteratureAnnotator:
                     f"{'injecting directive' if confident else 'gated out, no directive'})"
                 )
                 # Gate failed -> Phase 2 would otherwise see only the raw Phase-1 extraction.
-                # Generate a lightweight gene background as orientation. Guarded so a failed or
-                # empty LLM call degrades to None instead of aborting the run. Safe to call here
-                # (normal async phase context), unlike get_reranking_target's LiteratureSearchTool
-                # path where a nested LLM call collides with the event loop.
+                # Generate a lightweight gene background as orientation. build_query_and_search_terms
+                # makes a BLOCKING LLM .invoke(); running it directly on the event loop collides with
+                # the loop/LLM client CrewAI's flow uses and poisons the next agent call (empty-response
+                # abort -- the failure get_reranking_target's comment warned about). Run it in a worker
+                # thread so it can't touch the loop. Guarded so a failed/empty call degrades to None.
                 if not confident:
                     try:
-                        _, self.resolved_description = build_query_and_search_terms(request.gene)
+                        _, self.resolved_description = await asyncio.to_thread(
+                            build_query_and_search_terms, request.gene
+                        )
                     except Exception as e:
                         logger.warning(f"Gene description generation failed for {request.gene}: {e}")
 

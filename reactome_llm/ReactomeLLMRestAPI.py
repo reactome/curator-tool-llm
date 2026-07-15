@@ -94,13 +94,11 @@ _CREWAI_DASHBOARD_CONFIG = {
             {'id': 'literature_search', 'label': 'literature_search'},
             {'id': 'reactome_query', 'label': 'reactome_query'},
             {'id': 'evidence_evaluation', 'label': 'evidence_evaluation'},
-            {'id': 'quality_metrics', 'label': 'quality_metrics'},
             {'id': 'consistency_check', 'label': 'consistency_check'},
         ],
         'qa_checker': [
             {'id': 'schema_validation', 'label': 'schema_validation'},
             {'id': 'consistency_check', 'label': 'consistency_check'},
-            {'id': 'quality_metrics', 'label': 'quality_metrics'},
             {'id': 'reactome_query', 'label': 'reactome_query'},
         ],
     }

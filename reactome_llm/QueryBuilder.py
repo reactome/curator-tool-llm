@@ -250,23 +250,46 @@ def build_pathway_query(gene: str, drop_generic: bool = True, max_pathways: int 
     return _pathway_fragment(names) if names else gene
 
 
-def build_union_query(gene: str, drop_generic: bool = True, max_pathways: int = 15) -> str:
-    """Combine all three Stage-1 signals into one OR'd PubMed query.
+def build_union_query(gene: str, drop_generic: bool = True, max_pathways: int = 15,
+                      fi_cutoff: float = 0.8, partner_top_n: int = 10) -> str:
+    """Combine all Stage-1 signals into one OR'd PubMed query.
 
     - gene symbol + UniProt protein synonyms -> _or_join_terms (short names, quoted/deduped)
-    - Reactome pathway names -> parenthesised unquoted groups (proven pathway construction)
+    - top-N FI interaction-partner names      -> _or_join_terms (same quoting/dedup as names)
+    - Reactome pathway names (direct lookup)  -> parenthesised unquoted groups (proven pathway
+      construction)
 
-    The two fragments are OR'd together. Reuses the same generic-pathway filtering and cap
-    as the standalone pathway-name strategy, so the pathway contribution is identical.
+    The fragments are OR'd together. Reuses the same generic-pathway filtering and cap as the
+    standalone pathway-name strategy, so the pathway contribution is identical. Partner names
+    come from select_top_partner_names (fetch_fis top-N by FI score); the partner-name source
+    is what differs from build_partner_enrichment_query (direct pathways here vs. enriched there).
 
-    Note: with a fixed fetch cap, a very broad union (many pathways + noisy short synonyms)
-    can dilute Best Match relevance and is not guaranteed to beat the best single strategy
-    per gene; lower max_pathways if that happens rather than raising the fetch cap.
+    Note: with a fixed fetch cap, a very broad union (many pathways + noisy short synonyms +
+    partner names) can dilute Best Match relevance and is not guaranteed to beat the best single
+    strategy per gene; lower max_pathways / partner_top_n if that happens rather than raising the
+    fetch cap.
     """
     synonyms = get_uniprot_synonyms(neo4jutils.query_accession_for_gene(gene))
     name_fragment = _or_join_terms([gene] + synonyms)
+    partner_fragment = _or_join_terms(select_top_partner_names(gene, fi_cutoff, partner_top_n))
     pathway_fragment = _pathway_fragment(select_pathway_names(gene, drop_generic, max_pathways))
-    return " OR ".join(frag for frag in (name_fragment, pathway_fragment) if frag)
+    return " OR ".join(f for f in (name_fragment, partner_fragment, pathway_fragment) if f)
+
+
+def select_top_partner_names(gene: str, fi_cutoff: float = 0.8, top_n: int = 10) -> list[str]:
+    """Top-N functional-interaction partner gene names for a gene, ranked by FI score.
+
+    Ranks the gene's partners by FI score (fetch_fis) and returns the top-N partner gene
+    symbols. Shared by the query builders (partner names as a search fragment) and the
+    re-rank entity-mention set (build_entity_mention_set), and reused inside
+    select_partner_enriched_pathway_names so partner selection is defined once.
+
+    Returns [] when the gene has no FI partners clearing fi_cutoff.
+    """
+    fi_df = _get_fi_loader().fetch_fis(gene, fi_cutoff=fi_cutoff)
+    if fi_df is None or fi_df.empty:
+        return []
+    return list(fi_df.sort_values("score", ascending=False)["gene"].head(top_n))
 
 
 def select_partner_enriched_pathway_names(gene: str, fi_cutoff: float = 0.8,
@@ -288,10 +311,9 @@ def select_partner_enriched_pathway_names(gene: str, fi_cutoff: float = 0.8,
     # partner-enrichment path (not every QueryBuilder import) pays that cost.
     import ReactomeUtils as utils
 
-    fi_df = _get_fi_loader().fetch_fis(gene, fi_cutoff=fi_cutoff)
-    if fi_df is None or fi_df.empty:
+    top_partners = select_top_partner_names(gene, fi_cutoff=fi_cutoff, top_n=top_n)
+    if not top_partners:
         return []
-    top_partners = list(fi_df.sort_values("score", ascending=False)["gene"].head(top_n))
 
     interaction_dict = {partner: set() for partner in top_partners}  # no PMIDs needed
     map_df = utils.map_interactions_in_pathways(interaction_dict,
@@ -313,18 +335,28 @@ def select_partner_enriched_pathway_names(gene: str, fi_cutoff: float = 0.8,
 def build_partner_enrichment_query(gene: str, fi_cutoff: float = 0.8, top_n: int = 10,
                                    fdr_cutoff: float = 0.05, drop_generic: bool = True,
                                    max_pathways: int = 15) -> str:
-    """Build a PubMed query from FI-partner-enrichment pathway names.
+    """Build a PubMed query for a cold-start gene from FI-partner-enrichment pathway names,
+    OR'd with the gene name, UniProt synonyms, and top-N interaction-partner names.
 
-    Mirrors build_pathway_query but sources pathway names from interaction-partner
-    enrichment instead of the direct Reactome graph lookup, so it works for genes with no
-    existing Reactome annotation. The gene is deliberately NOT AND'd in: an `[gene] AND
-    (pathways)` form was validated and collapsed citation recall (36 -> 4 pool_hits over the
-    10 locked genes) because curator-cited papers often never name the gene (the section-3
-    recall ceiling). Falls back to the bare gene symbol when no enriched pathways are found.
+    Sources pathway names from interaction-partner enrichment instead of the direct Reactome
+    graph lookup, so it works for genes with no existing Reactome annotation. This is the only
+    difference from build_union_query's pathway source; both branches OR in the same gene +
+    synonyms + partner-name ingredients.
+
+    The gene/synonyms/partners are OR'd in (NOT AND'd): an `[gene] AND (pathways)` form was
+    validated and collapsed citation recall (36 -> 4 pool_hits over the 10 locked genes) because
+    curator-cited papers often never name the gene (the section-3 recall ceiling). OR-ing only
+    ADDS gene/partner-mentioning papers to the pool, so it does not reintroduce that failure.
+    Falls back to the bare gene symbol when neither enriched pathways nor name fragments exist.
     """
-    names = select_partner_enriched_pathway_names(gene, fi_cutoff, top_n, fdr_cutoff,
-                                                   drop_generic, max_pathways)
-    return _pathway_fragment(names) if names else gene
+    synonyms = get_uniprot_synonyms(neo4jutils.query_accession_for_gene(gene))
+    partners = select_top_partner_names(gene, fi_cutoff, top_n)
+    name_fragment = _or_join_terms([gene] + synonyms + partners)
+    pathway_fragment = _pathway_fragment(
+        select_partner_enriched_pathway_names(gene, fi_cutoff, top_n, fdr_cutoff,
+                                              drop_generic, max_pathways))
+    joined = " OR ".join(f for f in (name_fragment, pathway_fragment) if f)
+    return joined if joined else gene
 
 
 def build_retrieval_query(gene: str, drop_generic: bool = True, max_pathways: int = 15) -> str:
@@ -336,6 +368,15 @@ def build_retrieval_query(gene: str, drop_generic: bool = True, max_pathways: in
         placement is confident; otherwise fall back to build_synonym_search_query. A weak
         placement (e.g. TANC1: FDR 9.8e-3, single partner) anchors retrieval on the wrong
         pathways and degrades the annotation, so we only trust it when it clears the gate.
+
+    NOTE (RAB6C dilution): for a gate-pass gene whose enriched pathways are broad, well-studied
+    fields (RAB6C's partners are 8 other RABs -> RAB/vesicle-trafficking pathways), this single
+    combined query returns a large but gene-agnostic pool (0% mentioning RAB6C) because PubMed
+    relevance ranks the gene papers below the fetch cap. This function still builds ONE combined
+    query (used by the notebook dispatcher/harnesses); the production retriever instead calls
+    build_retrieval_query_pair + LiteratureSearchTool._merge_search to run the name and pathway
+    searches SEPARATELY and union the result sets, which is what actually fixes the dilution
+    (RAB6C on-target 0 -> 22 in the pool). Keep this dispatch in sync with that of the pair.
     """
     if neo4jutils.query_pathways_for_gene(gene):
         return build_union_query(gene, drop_generic, max_pathways)
@@ -345,6 +386,75 @@ def build_retrieval_query(gene: str, drop_generic: bool = True, max_pathways: in
     if utils.is_confident_placement(utils.suggest_pathway_placement(gene)):
         return build_partner_enrichment_query(gene)
     return build_synonym_search_query(gene)
+
+
+def build_retrieval_query_pair(gene: str, drop_generic: bool = True, max_pathways: int = 15,
+                               fi_cutoff: float = 0.8, partner_top_n: int = 10) -> tuple[str, str]:
+    """Two INDEPENDENT Stage-1 queries for the result-set merge, as (name_query, context_query).
+
+    The retriever (LiteratureSearchTool) runs each as its own PubMed E-Search and UNIONs the PMID
+    sets, rather than OR-ing everything into one query. This is the fix for the RAB6C dilution
+    failure: with a single combined query, PubMed's relevance ranking lets the broad pathway/partner
+    terms dominate and buries the gene-specific papers below the fetch cap (RAB6C's 25 gene papers
+    ranked ~1348/1449). Two searches each get their OWN ranking, so the gene-specific set is
+    guaranteed into the pool. Verified on RAB6C: 0/5 -> 3/5 on-target in the final Stage-2 output.
+
+    - name_query    : gene symbol + UniProt synonyms (the specific signal).
+    - context_query : the broad signal -- pathway names + top-N partner names. Pathway source
+                      mirrors build_retrieval_query's dispatch EXACTLY (keep the two in sync):
+                        has Reactome data      -> direct pathway names + partners
+                        cold-start & gate-pass -> partner-enrichment pathway names + partners
+                        cold-start & gate-fail -> "" (name search only == the synonym-only fallback)
+
+    Partner names live in context_query, NOT name_query: co-locating them with the gene would
+    re-create the same in-query ranking competition the merge exists to avoid. This is distinct
+    from Change 1 (partner names OR'd into the single combined query, in build_union_query /
+    build_partner_enrichment_query), which stays in place for the single-query dispatcher.
+    """
+    synonyms = get_uniprot_synonyms(neo4jutils.query_accession_for_gene(gene))
+    name_query = _or_join_terms([gene] + synonyms)
+    partner_fragment = _or_join_terms(select_top_partner_names(gene, fi_cutoff, partner_top_n))
+
+    def _context(pathway_fragment: str) -> str:
+        return " OR ".join(f for f in (pathway_fragment, partner_fragment) if f)
+
+    if neo4jutils.query_pathways_for_gene(gene):
+        context_query = _context(_pathway_fragment(
+            select_pathway_names(gene, drop_generic, max_pathways)))
+    else:
+        import ReactomeUtils as utils
+        if utils.is_confident_placement(utils.suggest_pathway_placement(gene)):
+            context_query = _context(_pathway_fragment(
+                select_partner_enriched_pathway_names(gene, fi_cutoff=fi_cutoff,
+                                                      top_n=partner_top_n,
+                                                      drop_generic=drop_generic,
+                                                      max_pathways=max_pathways)))
+        else:
+            context_query = ""  # gate-fail: name search only (== the synonym-only fallback)
+
+    return name_query, context_query
+
+
+def build_entity_mention_set(gene: str, fi_cutoff: float = 0.8,
+                             partner_top_n: int = 10) -> list[str]:
+    """Entities whose presence in an abstract earns the Stage-2 re-rank mention bonus.
+
+    Gene symbol + UniProt protein synonyms + top-N FI interaction-partner names -- the same
+    ingredients OR'd into the retrieval query, so retrieval and re-ranking agree on what counts
+    as an on-topic entity. De-duplicated case-insensitively, order preserved.
+
+    LLM-free (REST + Neo4j + Mongo only): callers use it inside re-ranking, which must not make
+    nested LLM calls (see get_reranking_target's event-loop note). The mention bonus is additive,
+    never a filter -- papers mentioning none of these still rank by cosine similarity.
+    """
+    synonyms = get_uniprot_synonyms(neo4jutils.query_accession_for_gene(gene))
+    partners = select_top_partner_names(gene, fi_cutoff, partner_top_n)
+    seen, entities = set(), []
+    for e in [gene] + synonyms + partners:
+        if e and e.lower() not in seen:
+            seen.add(e.lower())
+            entities.append(e)
+    return entities
 
 
 def get_reranking_target(gene: str, drop_generic: bool = True,

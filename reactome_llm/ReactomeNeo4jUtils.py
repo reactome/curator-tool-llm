@@ -1,5 +1,4 @@
 import os
-from tkinter import NO
 import dotenv
 from neo4j import GraphDatabase
 import neo4j
