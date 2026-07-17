@@ -34,7 +34,7 @@ import ReactomeUtils as utils
 from ReactomeLLMErrors import *
 from ModelConfig import get_crewai_model_settings
 from ReactomeModels import ReactomeEntity
-from QueryBuilder import build_query_and_search_terms
+from QueryBuilder import build_query_and_search_terms, build_gene_specific_pathway_descriptions
 import logging_config
 
 # Set up logging
@@ -119,6 +119,9 @@ class CrewAILiteratureAnnotator:
         # Lightweight gene background (LLM prior knowledge), generated once per run ONLY in the
         # cold-start + gated-out case, to orient Phase 2 when it has no placement directive.
         self.resolved_description = None
+        # Per-pathway gene-specific re-rank descriptions, generated once per run ONLY for has-data
+        # genes, to replace the raw pathway summaries as the Stage-2 target (see annotate_literature).
+        self.resolved_pathway_descriptions = None
 
         # Initialize components
         self.toolkit = ReactomeToolkit(gene_annotator)
@@ -208,6 +211,10 @@ class CrewAILiteratureAnnotator:
 
         try:
             self._configure_runtime(request)
+            # Reset per-run so a reused annotator can't carry a prior gene's background into
+            # either the Phase-2 GENE BACKGROUND or the Stage-2 rerank target (see below).
+            self.resolved_description = None
+            self.resolved_pathway_descriptions = None
             # Resolve the gene's UniProt accession once, deterministically (Reactome graph,
             # then UniProt), so every phase uses the same verified identifier instead of each
             # agent recalling its own guess. Resolving here (not in an agent) is the fix for
@@ -244,6 +251,32 @@ class CrewAILiteratureAnnotator:
                         )
                     except Exception as e:
                         logger.warning(f"Gene description generation failed for {request.gene}: {e}")
+
+            # Publish the gate-fail background to the SHARED gene_annotator so LiteratureSearchTool's
+            # Stage-2 rerank can use it as the target (via get_reranking_target's description_override)
+            # instead of the bare gene+synonyms identity string -- validated to rerank markedly better
+            # on cold-start genes. Keyed by gene so a reused annotator can't leak across genes; None
+            # for non-gate-fail genes (they rerank against pathway summaries, ignoring this). This
+            # reuses the ONE precomputed description (also the Phase-2 GENE BACKGROUND) -- no extra LLM
+            # call, and it stays LLM-free inside the async rerank path.
+            self.gene_annotator.rerank_target_descriptions = {request.gene: self.resolved_description}
+
+            # Has-data genes: precompute per-pathway gene-SPECIFIC descriptions and publish them the
+            # same way, so Stage-2 re-ranks against "how {gene} functions within {pathway}" instead of
+            # the raw pathway summary (which is generic and pulls broad reviews). Validated A/B:
+            # SHANK3 curator usefulness 1.0->7.2, BRCA1 2.0->3.6. Runs in a worker thread -- it makes a
+            # BLOCKING LLM .invoke() that would collide with CrewAI's event loop on the main thread
+            # (same reason as the DESC precompute above). Self-gates: returns {} with NO LLM call for
+            # cold-start genes (no released human pathways), so gate-fail/gate-pass genes are unaffected
+            # and fall back to their existing targets. Guarded so a failure degrades to raw summaries.
+            try:
+                self.resolved_pathway_descriptions = await asyncio.to_thread(
+                    build_gene_specific_pathway_descriptions, request.gene)
+            except Exception as e:
+                logger.warning(f"Gene-specific pathway descriptions failed for {request.gene}: {e}")
+                self.resolved_pathway_descriptions = {}
+            self.gene_annotator.rerank_pathway_descriptions = {
+                request.gene: self.resolved_pathway_descriptions}
 
             # Phase 1: Literature Extraction and Preprocessing
             extraction_context = await self._phase_1_literature_extraction(request)

@@ -187,7 +187,16 @@ class LiteratureSearchTool(BaseTool):
         if not embeddable:
             return pool[:max_papers]
 
-        targets = get_reranking_target(gene)
+        # Precomputed re-rank targets, stashed on the shared gene_annotator by
+        # CrewAILiteratureAnnotator (keyed by gene) so this stays LLM-free inside the async flow:
+        #  - description_override : gate-fail cold-start genes -> LLM gene description vs identity string
+        #  - pathway_descriptions : has-data genes -> per-pathway gene-specific descriptions vs raw
+        #    pathway summaries (get_reranking_target falls back to the raw summary per missing pathway)
+        # Both absent (e.g. standalone tool use) -> get_reranking_target's built-in fallbacks.
+        override = getattr(self.gene_annotator, "rerank_target_descriptions", {}).get(gene)
+        pathway_descs = getattr(self.gene_annotator, "rerank_pathway_descriptions", {}).get(gene)
+        targets = get_reranking_target(gene, description_override=override,
+                                       pathway_descriptions=pathway_descs)
         if not targets:
             return pool[:max_papers]
 

@@ -457,8 +457,74 @@ def build_entity_mention_set(gene: str, fi_cutoff: float = 0.8,
     return entities
 
 
+def build_gene_specific_pathway_descriptions(gene: str, drop_generic: bool = True,
+                                             max_pathways: int = 15,
+                                             summary_snippet: int = 400) -> dict:
+    """Gene-SPECIFIC-within-pathway descriptions for the has-data Stage-2 re-rank target.
+
+    For each of the gene's (generic-filtered, capped) released-human pathways, an LLM writes 2-3
+    sentences on how THIS gene functions within THAT pathway -- its role, mechanism, key
+    interactions -- grounded by the pathway name + summary. This replaces the raw pathway summary,
+    which is generic and embeds close to broad review articles (validated A/B: SHANK3 curator
+    usefulness 1.0 -> 7.2, annotatable 0/5 -> 4/5; BRCA1 2.0 -> 3.6).
+
+    ONE batched call. max_tokens is raised and scaled with the pathway count so the JSON doesn't
+    truncate (the default cap truncated BRCA1's 15 descriptions); the parse is truncation-tolerant
+    -- it salvages each complete object individually, so an overflow just yields a SUBSET and the
+    caller (get_reranking_target) falls back to the raw summary for any missing pathway.
+
+    Returns {pathway_name: description} (possibly a subset). Returns {} -- with NO LLM call -- for
+    cold-start genes (no released human pathways).
+
+    Makes a BLOCKING LLM .invoke(): run it ONCE upfront in a worker thread (asyncio.to_thread),
+    NEVER inside the async re-rank path -- same event-loop constraint as build_query_and_search_terms
+    and get_reranking_target.
+    """
+    names = select_pathway_names(gene, drop_generic, max_pathways)
+    pairs = [(n, neo4jutils.query_pathway_summary(n)) for n in names]
+    pairs = [(n, s) for n, s in pairs if s]
+    if not pairs:
+        return {}
+
+    listing = "\n".join(
+        f"[{i}] {name}: {' '.join(summ.split())[:summary_snippet]}"
+        for i, (name, summ) in enumerate(pairs, 1))
+    prompt = (
+        f"For the human gene {gene}, below are Reactome pathways it participates in, each with the "
+        f"pathway's summary. For EACH pathway, write a 2-3 sentence description of how {gene} "
+        f"SPECIFICALLY functions within THAT pathway -- its role, mechanism, and key molecular "
+        f"interactions -- grounded in the pathway context but focused on {gene}, NOT a general "
+        f"description of the pathway itself.\n\n"
+        f"Pathways:\n{listing}\n\n"
+        f"Return ONLY a JSON array, one object per pathway:\n"
+        f'[{{"index": <int matching [n]>, "description": "<2-3 sentences>"}}]')
+
+    model = create_reactome_chat_model()
+    # Scale the output cap with pathway count (>= the validated 4096 for 15), capped at 8192, so
+    # even 30+-pathway genes don't truncate; the tolerant parse below is the final backstop.
+    model.max_tokens = min(8192, max(4096, 256 * len(pairs)))
+    content = model.invoke(prompt).content
+
+    # Truncation-tolerant parse: pull each index+description pair individually (order-independent;
+    # a cut-off trailing object simply doesn't match), rather than requiring a whole valid array.
+    out = {}
+    for mo in re.finditer(r'"index"\s*:\s*(\d+)\s*,\s*"description"\s*:\s*"((?:[^"\\]|\\.)*)"',
+                          content):
+        idx = int(mo.group(1))
+        if 1 <= idx <= len(pairs):
+            try:
+                desc = json.loads(f'"{mo.group(2)}"').strip()
+            except Exception:
+                desc = mo.group(2).strip()
+            if desc:
+                out[pairs[idx - 1][0]] = desc
+    return out
+
+
 def get_reranking_target(gene: str, drop_generic: bool = True,
-                         max_pathways: int = 15) -> list[str]:
+                         max_pathways: int = 15,
+                         description_override: str | None = None,
+                         pathway_descriptions: dict | None = None) -> list[str]:
     """Pathway-level text(s) to re-rank retrieved papers against, replacing the gene-specific
     description that mis-ranked pathway/mechanism-level ground-truth papers (final recall
     collapsed to ~1% vs 2.8% pool recall).
@@ -467,10 +533,20 @@ def get_reranking_target(gene: str, drop_generic: bool = True,
     cosine similarity across them, so a paper relevant to ANY of the gene's pathways ranks
     high (no concatenation, no embedder truncation).
 
-    Has data   -> summation text of each of the gene's (generic-filtered, capped) pathways.
+    Has data   -> per pathway (generic-filtered, capped): the precomputed gene-SPECIFIC pathway
+                  description (pathway_descriptions[name]) when supplied, else the raw pathway
+                  summary as a safety fallback. Gene-specific descriptions rerank specific,
+                  annotatable primary papers above broad reviews (validated A/B).
     Cold-start -> summation text of the primary suggested pathway (suggest_pathway_placement).
-    Fallback   -> [gene-specific description] when no pathway/placement/summary is available,
-                  so re-ranking never breaks.
+    Gate-fail  -> [description_override]: a precomputed LLM biological description of the gene
+                  (resolved_description), when supplied. Validated to rerank markedly better than
+                  the bare identity string on cold-start genes.
+    Fallback   -> [gene symbol + synonyms] identity string when no pathway/placement/summary and
+                  no override is available, so re-ranking never breaks.
+
+    pathway_descriptions is passed IN (built once upfront by CrewAILiteratureAnnotator via
+    build_gene_specific_pathway_descriptions in a worker thread) so this function stays LLM-FREE
+    inside the async re-rank path -- same constraint as description_override.
     """
     names = select_pathway_names(gene, drop_generic, max_pathways)
     if not names:
@@ -482,13 +558,26 @@ def get_reranking_target(gene: str, drop_generic: bool = True,
         if utils.is_confident_placement(placement):
             names = [placement["primary"]["pathway_name"]]
 
-    summaries = [t for t in (neo4jutils.query_pathway_summary(n) for n in names) if t]
+    # Per pathway: prefer the precomputed gene-specific description; fall back to the raw summary
+    # for any pathway missing from the cache (or when no cache was supplied at all).
+    pathway_descriptions = pathway_descriptions or {}
+    summaries = [t for t in
+                 (pathway_descriptions.get(n) or neo4jutils.query_pathway_summary(n) for n in names)
+                 if t]
     if summaries:
         return summaries
 
-    # Last resort: gene symbol + UniProt synonyms as one identity text. Must be LLM-FREE:
-    # get_reranking_target runs inside LiteratureSearchTool within CrewAI's async flow, and a
-    # nested LLM call here (e.g. build_query_and_search_terms) collides with the event loop
-    # ("no running event loop" / empty-response -> pipeline abort). Synonyms are REST + Neo4j.
+    # Cold-start gate-fail: prefer the precomputed LLM biological description when the caller
+    # supplies it. It is passed IN (not generated here) because get_reranking_target must stay
+    # LLM-FREE: it runs inside LiteratureSearchTool within CrewAI's async flow, and a nested LLM
+    # call here (e.g. build_query_and_search_terms) collides with the event loop ("no running
+    # event loop" / empty-response -> pipeline abort). CrewAILiteratureAnnotator generates it once
+    # upfront in a worker thread and stashes it on the shared gene_annotator.
+    if description_override:
+        return [description_override]
+
+    # Last resort (LLM-FREE): gene symbol + UniProt synonyms as one identity text. Used when no
+    # override is available (e.g. the upfront generation failed and degraded to None). Synonyms
+    # are REST + Neo4j, so this stays event-loop-safe.
     synonyms = get_uniprot_synonyms(neo4jutils.query_accession_for_gene(gene))
     return [" ".join([gene] + synonyms)] if synonyms else [gene]

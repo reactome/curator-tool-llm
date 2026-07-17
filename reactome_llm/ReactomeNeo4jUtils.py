@@ -91,11 +91,19 @@ def query_pathways_for_gene(gene: str) -> list[dict]:
     Returns:
         list[dict]: List of dicts with keys 'pathway' and 'pathway_id'
     """
+    # Restrict to RELEASED HUMAN pathways: without this, the match returns (a) unreleased
+    # draft/proposal curations -- e.g. "(NEW)InfectiousDiseaseProposal", "(draft)Viral Infection
+    # Pathways", "...Proposal" (doRelease = false/null) -- and (b) non-human orthologs, since the
+    # geneName match isn't species-scoped (BRCA1 pulled in Gallus gallus R-GGA- pathways). Both
+    # polluted the Stage-1 context query and the Stage-2 re-rank target. doRelease is Reactome's
+    # canonical "included in the release" flag (releaseStatus is null even for released pathways,
+    # so it can't be used).
     query = """
         MATCH (ewas:EntityWithAccessionedSequence)-[:referenceEntity]->(g:ReferenceSequence)
         WHERE g.geneName[0] = $gene_name
         MATCH (p:Pathway)-[:hasEvent*]->(r:ReactionLikeEvent)
               -[:input|catalystActivity|regulatedBy|physicalEntity|hasComponent|hasMember|hasCandidate*]->(ewas)
+        WHERE p.speciesName = 'Homo sapiens' AND p.doRelease = true
         RETURN DISTINCT p.displayName AS pathway, p.dbId AS pathway_id
         ORDER BY p.displayName
     """
