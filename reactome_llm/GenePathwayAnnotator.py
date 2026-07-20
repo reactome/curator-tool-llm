@@ -26,6 +26,7 @@ from ReactomeLLMErrors import NoAbstractFoundError, NoAbstractSupportingInteract
 
 import ReactomePrompts as prompts
 from ModelConfig import create_reactome_chat_model
+import token_profiler
 
 from ReactomePubMed import ReactomePubMedRetriever
 import ReactomeUtils as utils
@@ -510,7 +511,11 @@ class GenePathwayAnnotator:
         # Pass a dummy runnable passthrough to make the chain work.
         dummy = RunnablePassthrough()
         llm_chain = dummy | answer
-        result = llm_chain.invoke(parameters)
+        # Fallback attribution for token profiling: force=False so a caller that already set a
+        # more specific label (e.g. the precompute paths) keeps it; bare invoke_llm calls (the
+        # in-pipeline rerank similarity validation) get tagged here instead of "unattributed".
+        with token_profiler.label("genepathway_invoke_llm", force=False):
+            result = llm_chain.invoke(parameters)
         return result
 
     async def _summarize_abstract_results_for_multiple_pathways(self,

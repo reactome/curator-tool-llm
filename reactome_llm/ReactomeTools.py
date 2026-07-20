@@ -26,7 +26,8 @@ import ReactomeUtils as utils
 import ReactomeNeo4jUtils as neo4j_utils
 from CrewAIEventLogger import emit_tool_event
 from QueryBuilder import build_retrieval_query_pair, get_reranking_target
-from TextEmbedder import create_sentence_transformer, sentence_embed, cosine_similarity
+from TextEmbedder import (create_sentence_transformer, sentence_embed, cosine_similarity,
+                          _get_cross_encoder)
 
 # Lazily-constructed sentence-transformer for Stage-2 re-ranking; built once on first use
 # (loading the model is expensive) and reused across tool calls.
@@ -116,44 +117,80 @@ class LiteratureSearchTool(BaseTool):
             max_papers = min(max_papers, 5)
             fetch_papers = min(fetch_papers, 200)
 
-            name_query, context_query = build_retrieval_query_pair(gene)
-            # Fold agent-supplied extra terms into the broad search (mirrors the old combined-query
-            # behavior); if there's no broad search (cold-start gate-fail), fold into the name search.
-            if additional_terms:
-                if context_query:
-                    context_query = f"({context_query}) OR {additional_terms}"
-                else:
-                    name_query = f"({name_query}) OR {additional_terms}"
+            # If the upfront pipeline already ran the FULL retrieval for this gene (Stage-1 merge +
+            # cross-encoder re-rank + LLM curator-judge) and cached the final selection on the shared
+            # annotator, return it directly. The judge makes a blocking LLM .invoke() that would
+            # poison the next agent call if made here on CrewAI's event loop -- so it runs off-loop in
+            # annotate_literature's precompute (asyncio.to_thread) and only its LLM-free RESULT is
+            # consumed here (same precompute-and-cache contract as the rerank targets). No re-fetch.
+            cached = getattr(self.gene_annotator, "judged_papers", {}).get(gene)
+            if cached is not None:
+                return json.dumps({
+                    "gene": gene,
+                    "name_query": cached.get("name_query", ""),
+                    "context_query": cached.get("context_query", ""),
+                    "pool_size": cached.get("pool_size", 0),
+                    "papers_found": len(cached.get("papers", [])),
+                    "papers": cached.get("papers", []),
+                })
 
-            # Result-set MERGE. The gene-name search is small for the genes this fix targets, so half
-            # the budget captures its full specific set while the broad search keeps the full budget
-            # (the primary recall driver for have-data genes). Union dedupes overlap.
-            pool = self._merge_search(name_query, context_query,
-                                      name_fetch=max(1, fetch_papers // 2),
-                                      context_fetch=fetch_papers)
-
-            ranked = self._rerank(gene, pool, max_papers)
-
-            papers = [{
-                "pmid": d.get("uid", ""),
-                "title": d.get("title", ""),
-                "abstract": d.get("Summary", ""),
-                "authors": d.get("authors", ""),
-                "journal": d.get("journal", ""),
-                "year": d.get("year", "")
-            } for d in ranked]
-
+            # Fallback (standalone tool use / judge disabled, e.g. retrieval_eval): Stage-1 merge +
+            # cross-encoder re-rank, top max_papers, NO LLM judge.
+            cand = self.retrieve_candidates(gene, candidate_pool=max_papers,
+                                            fetch_papers=fetch_papers,
+                                            additional_terms=additional_terms)
             return json.dumps({
                 "gene": gene,
-                "name_query": name_query,
-                "context_query": context_query,
-                "pool_size": len(pool),
-                "papers_found": len(papers),
-                "papers": papers
+                "name_query": cand["name_query"],
+                "context_query": cand["context_query"],
+                "pool_size": cand["pool_size"],
+                "papers_found": len(cand["papers"]),
+                "papers": cand["papers"],
             })
 
         except Exception as e:
             return json.dumps({"error": str(e), "gene": gene})
+
+    @staticmethod
+    def _format_papers(docs: List[dict]) -> List[dict]:
+        """Project raw pool/cache docs (uid/Summary/...) into the tool's public paper shape."""
+        return [{
+            "pmid": d.get("uid", ""),
+            "title": d.get("title", ""),
+            "abstract": d.get("Summary", ""),
+            "authors": d.get("authors", ""),
+            "journal": d.get("journal", ""),
+            "year": d.get("year", ""),
+            "cross_score": d.get("cross_score"),
+        } for d in docs]
+
+    def retrieve_candidates(self, gene: str, candidate_pool: int = 20, fetch_papers: int = 200,
+                            additional_terms: str = "") -> dict:
+        """Stage-1 merge + cross-encoder re-rank -> top-`candidate_pool` formatted paper dicts (with
+        abstracts). LLM-FREE: safe to call live on the async path OR from a worker thread. This is
+        the candidate set the upfront LLM curator-judge selects the final papers from."""
+        name_query, context_query = build_retrieval_query_pair(gene)
+        # Fold agent-supplied extra terms into the broad search (mirrors the old combined-query
+        # behavior); if there's no broad search (cold-start gate-fail), fold into the name search.
+        if additional_terms:
+            if context_query:
+                context_query = f"({context_query}) OR {additional_terms}"
+            else:
+                name_query = f"({name_query}) OR {additional_terms}"
+
+        # Result-set MERGE. The gene-name search is small for the genes this fix targets, so half
+        # the budget captures its full specific set while the broad search keeps the full budget
+        # (the primary recall driver for have-data genes). Union dedupes overlap.
+        pool = self._merge_search(name_query, context_query,
+                                  name_fetch=max(1, fetch_papers // 2),
+                                  context_fetch=fetch_papers)
+        ranked = self._rerank(gene, pool, candidate_pool)
+        return {
+            "name_query": name_query,
+            "context_query": context_query,
+            "pool_size": len(pool),
+            "papers": self._format_papers(ranked),
+        }
 
     def _merge_search(self, name_query: str, context_query: str,
                       name_fetch: int, context_fetch: int) -> List[dict]:
@@ -179,13 +216,17 @@ class LiteratureSearchTool(BaseTool):
                 pool.append(d)
         return pool
 
-    def _rerank(self, gene: str, pool: List[dict], max_papers: int) -> List[dict]:
-        """Re-rank pool docs by MAX cosine similarity to the gene's pathway-level targets,
-        returning the top max_papers. Falls back to pool order (first max_papers) if there are
-        no embeddable abstracts or no re-ranking targets."""
+    def _rerank(self, gene: str, pool: List[dict], top_k: int) -> List[dict]:
+        """Re-rank pool docs by MAX cross-encoder score against the gene's re-ranking targets,
+        returning the top `top_k`. Falls back to pool order (first top_k) if there are no embeddable
+        abstracts or no re-ranking targets.
+
+        Replaces the former bi-encoder (sentence_embed + cosine) scoring: the cross-encoder scores
+        each (target, abstract) pair jointly for higher-fidelity relevance. Cheap enough to run on
+        the whole pool on CPU."""
         embeddable = [d for d in pool if d.get("Summary")]
         if not embeddable:
-            return pool[:max_papers]
+            return pool[:top_k]
 
         # Precomputed re-rank targets, stashed on the shared gene_annotator by
         # CrewAILiteratureAnnotator (keyed by gene) so this stays LLM-free inside the async flow:
@@ -198,17 +239,19 @@ class LiteratureSearchTool(BaseTool):
         targets = get_reranking_target(gene, description_override=override,
                                        pathway_descriptions=pathway_descs)
         if not targets:
-            return pool[:max_papers]
+            return pool[:top_k]
 
-        model = _get_rerank_model()
-        target_vecs = [sentence_embed(t, model) for t in targets]
-        scored = []
-        for d in embeddable:
-            dv = sentence_embed(d["Summary"], model)
-            score = max(cosine_similarity(dv, tv) for tv in target_vecs)
-            scored.append((score, d))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        return [d for _, d in scored[:max_papers]]
+        # Score every (target, abstract) pair in ONE batched predict call, then take the MAX score
+        # per abstract across targets -- preserves the old MAX-over-pathway-targets semantics (the
+        # per-pathway target is what lifted SHANK3 usefulness) while staying a single model pass.
+        cross_encoder = _get_cross_encoder()
+        pairs = [(t, d["Summary"]) for d in embeddable for t in targets]
+        scores = cross_encoder.predict(pairs)
+        n_t = len(targets)
+        for i, d in enumerate(embeddable):
+            d["cross_score"] = max(float(s) for s in scores[i * n_t:(i + 1) * n_t])
+        embeddable.sort(key=lambda d: d["cross_score"], reverse=True)
+        return embeddable[:top_k]
 
 
 class FullTextAnalysisTool(BaseTool):

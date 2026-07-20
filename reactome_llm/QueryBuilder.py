@@ -292,6 +292,47 @@ def select_top_partner_names(gene: str, fi_cutoff: float = 0.8, top_n: int = 10)
     return list(fi_df.sort_values("score", ascending=False)["gene"].head(top_n))
 
 
+def build_judge_context(gene: str, description: str | None = None,
+                        max_pathways: int = 15, partner_top_n: int = 10) -> str:
+    """Assemble a RICH biological context string for the curator-judge (CuratorRubric.judge_select)
+    so it can correctly score gene-ABSENT-but-relevant papers -- ones whose mechanism sits in
+    {gene}'s pathway/partner context without ever naming {gene} (the majority of real curator-cited
+    evidence). Combines a prose role description with the gene's EXPLICIT Reactome pathway names and
+    top functional-interaction partner symbols (Neo4j + FI lookups, no LLM), giving the judge the
+    concrete pathway/partner vocabulary it needs to recognize those papers.
+
+    `description`: prose lead (e.g. a precomputed gene background or the gene-specific pathway
+    descriptions). If falsy, one is generated via build_query_and_search_terms. Pathway/partner lines
+    are appended when available and silently skipped otherwise (e.g. cold-start genes with no
+    released pathways)."""
+    parts = []
+    prose = description
+    if not prose:
+        try:
+            _, prose = build_query_and_search_terms(gene)
+        except Exception:
+            prose = None
+    if prose:
+        parts.append(prose.strip())
+    try:
+        pathways = [p["pathway"]
+                    for p in (neo4jutils.query_pathways_for_gene(gene) or [])][:max_pathways]
+        if pathways:
+            parts.append(f"{gene}'s Reactome pathways: " + "; ".join(pathways) + ".")
+    except Exception:
+        pass
+    try:
+        partners = select_top_partner_names(gene, top_n=partner_top_n)
+        if partners:
+            parts.append(
+                f"{gene}'s top functional-interaction partners (a paper about the mechanism of these "
+                f"partners within this pathway context is relevant even if {gene} is never named): "
+                + ", ".join(partners) + ".")
+    except Exception:
+        pass
+    return "\n\n".join(parts)
+
+
 def select_partner_enriched_pathway_names(gene: str, fi_cutoff: float = 0.8,
                                           top_n: int = 10, fdr_cutoff: float = 0.05,
                                           drop_generic: bool = True,

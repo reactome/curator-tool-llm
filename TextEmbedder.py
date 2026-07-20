@@ -30,6 +30,46 @@ MINIMUM_SCORE = 1.0e-22
 SENTENCE_TRANSFORMER_MODEL = 'all-MiniLM-L6-v2'
 MAX_SENTENCE_LENGTH = 512
 
+# Cross-encoder for Stage-2 re-ranking. Unlike the bi-encoder (sentence_embed + cosine_similarity),
+# which embeds query and abstract independently, the cross-encoder scores the (query, abstract) pair
+# jointly -> higher-fidelity relevance. Cheap enough to run on the full pool on CPU (~7.4s / 300
+# abstracts), so it replaces the bi-encoder as the re-ranker while the bi-encoder helpers stay for
+# other callers.
+CROSS_ENCODER_MODEL_NAME = "ncbi/MedCPT-Cross-Encoder"
+_CROSS_ENCODER: object = None
+
+
+def _get_cross_encoder(model_name: str = CROSS_ENCODER_MODEL_NAME):
+    """Lazily construct and cache the cross-encoder (loading it is expensive; reuse across calls)."""
+    global _CROSS_ENCODER
+    if _CROSS_ENCODER is None:
+        import torch
+        import transformers
+        from sentence_transformers import CrossEncoder
+        prev_verbosity = transformers.logging.get_verbosity()
+        transformers.logging.set_verbosity_error()
+        try:
+            _CROSS_ENCODER = CrossEncoder(model_name)
+        finally:
+            transformers.logging.set_verbosity(prev_verbosity)
+        # MedCPT emits raw relevance LOGITS (e.g. +15 relevant, -15 irrelevant). sentence-transformers
+        # defaults a 1-label CrossEncoder to a Sigmoid, which saturates every relevant pair to ~1.0 and
+        # destroys the ranking. Force identity so predict() returns the discriminating raw logits.
+        _CROSS_ENCODER.activation_fn = torch.nn.Identity()
+    return _CROSS_ENCODER
+
+
+def cross_encoder_rerank(query_text: str, abstracts: list) -> list:
+    """Score each abstract dict against `query_text` with the cross-encoder and return them sorted
+    by descending relevance. Each dict must carry its abstract text under 'Summary' (the pool-doc
+    key used throughout retrieval); the score is written back as 'cross_score'."""
+    cross_encoder = _get_cross_encoder()
+    pairs = [(query_text, a['Summary']) for a in abstracts]
+    scores = cross_encoder.predict(pairs)
+    for a, s in zip(abstracts, scores):
+        a['cross_score'] = float(s)
+    return sorted(abstracts, key=lambda a: a['cross_score'], reverse=True)
+
 
 def sentence_embed(text: str,
                    embedding_approach: SentenceTransformer = None):

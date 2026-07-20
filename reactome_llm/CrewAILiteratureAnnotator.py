@@ -28,13 +28,16 @@ from zmq import log
 from ReactomeAgents import ReactomeAgents
 from CrewAIEventLogger import emit_agent_event, emit_job_event
 from ReactomeTasks import ReactomeTasks  
-from ReactomeTools import ReactomeToolkit
+from ReactomeTools import ReactomeToolkit, LiteratureSearchTool
 from GenePathwayAnnotator import GenePathwayAnnotator
 import ReactomeUtils as utils
 from ReactomeLLMErrors import *
 from ModelConfig import get_crewai_model_settings
 from ReactomeModels import ReactomeEntity
-from QueryBuilder import build_query_and_search_terms, build_gene_specific_pathway_descriptions
+from QueryBuilder import (build_query_and_search_terms, build_gene_specific_pathway_descriptions,
+                          build_judge_context)
+from CuratorRubric import judge_select
+import token_profiler
 import logging_config
 
 # Set up logging
@@ -210,11 +213,18 @@ class CrewAILiteratureAnnotator:
         logger.info(f"Starting multi-agent annotation for gene: {request.gene}")
 
         try:
+            # Clear the token-usage registry per run so a reused annotator can't bleed one gene's
+            # counts into the next (no-op unless TOKEN_PROFILE is set).
+            token_profiler.reset()
             self._configure_runtime(request)
             # Reset per-run so a reused annotator can't carry a prior gene's background into
             # either the Phase-2 GENE BACKGROUND or the Stage-2 rerank target (see below).
             self.resolved_description = None
             self.resolved_pathway_descriptions = None
+            # Final judged paper selection, published for the Stage-1 tool to consume (see the
+            # upfront retrieve+judge below). Reset per-run so a reused annotator can't return a
+            # prior gene's papers if this run skips or fails retrieval.
+            self.gene_annotator.judged_papers = {}
             # Resolve the gene's UniProt accession once, deterministically (Reactome graph,
             # then UniProt), so every phase uses the same verified identifier instead of each
             # agent recalling its own guess. Resolving here (not in an agent) is the fix for
@@ -246,9 +256,10 @@ class CrewAILiteratureAnnotator:
                 # thread so it can't touch the loop. Guarded so a failed/empty call degrades to None.
                 if not confident:
                     try:
-                        _, self.resolved_description = await asyncio.to_thread(
-                            build_query_and_search_terms, request.gene
-                        )
+                        with token_profiler.label("desc_gate_fail_background"):
+                            _, self.resolved_description = await asyncio.to_thread(
+                                build_query_and_search_terms, request.gene
+                            )
                     except Exception as e:
                         logger.warning(f"Gene description generation failed for {request.gene}: {e}")
 
@@ -270,13 +281,46 @@ class CrewAILiteratureAnnotator:
             # cold-start genes (no released human pathways), so gate-fail/gate-pass genes are unaffected
             # and fall back to their existing targets. Guarded so a failure degrades to raw summaries.
             try:
-                self.resolved_pathway_descriptions = await asyncio.to_thread(
-                    build_gene_specific_pathway_descriptions, request.gene)
+                with token_profiler.label("desc_per_pathway"):
+                    self.resolved_pathway_descriptions = await asyncio.to_thread(
+                        build_gene_specific_pathway_descriptions, request.gene)
             except Exception as e:
                 logger.warning(f"Gene-specific pathway descriptions failed for {request.gene}: {e}")
                 self.resolved_pathway_descriptions = {}
             self.gene_annotator.rerank_pathway_descriptions = {
                 request.gene: self.resolved_pathway_descriptions}
+
+            # Upfront retrieval + LLM curator-judge. This is the piece that CAN'T follow the
+            # precompute-and-cache pattern used for the rerank targets above: those depend only on
+            # gene-level info, but the judge must read the already-fetched, cross-encoder-ranked
+            # pool. So we run the WHOLE retrieval (Stage-1 merge + cross-encoder re-rank + judge)
+            # here, off the event loop via asyncio.to_thread -- the judge makes a blocking LLM
+            # .invoke() that would poison the next agent call if run on CrewAI's loop (same reason
+            # the DESC/pathway precomputes use to_thread). Its LLM-free RESULT (the final papers,
+            # with abstracts) is cached on the shared annotator; Phase-1's live literature_search
+            # call returns it directly, so abstracts still reach the extractor the normal way and
+            # the pool is fetched only once. On failure/empty, the cache stays {} and the tool
+            # falls back to live merge + cross-encoder (no judge).
+            if request.enable_literature_search:
+                try:
+                    with token_profiler.label("literature_retrieve_judge"):
+                        cached = await asyncio.to_thread(
+                            self._retrieve_and_judge, request.gene, request.max_papers)
+                    if cached and cached["papers"]:
+                        self.gene_annotator.judged_papers = {request.gene: cached}
+                        logger.info(
+                            f"Literature judge selected {len(cached['papers'])} papers for "
+                            f"{request.gene} from {cached['candidate_pool']} candidates "
+                            f"(pool {cached['pool_size']}; dropped "
+                            f"{cached['dropped_below_threshold']} below the rubric floor)")
+                    else:
+                        logger.warning(
+                            f"Upfront retrieve+judge produced no papers for {request.gene}; "
+                            f"Phase-1 tool will fall back to live cross-encoder retrieval")
+                except Exception as e:
+                    logger.warning(
+                        f"Upfront retrieve+judge failed for {request.gene}: {e}; "
+                        f"Phase-1 tool will fall back to live cross-encoder retrieval")
 
             # Phase 1: Literature Extraction and Preprocessing
             extraction_context = await self._phase_1_literature_extraction(request)
@@ -332,12 +376,58 @@ class CrewAILiteratureAnnotator:
             )
             
             logger.info(f"Multi-agent annotation completed for gene: {request.gene}")
+            # Write the token-usage CSV + ranked summary (no-op unless TOKEN_PROFILE is set).
+            token_profiler.emit_report(request.gene)
             return final_result
             
         except Exception as e:
             logger.error(f"Multi-agent annotation failed for {request.gene}: {str(e)}")
             raise CrewAIAnnotationError(f"CrewAI annotation failed: {str(e)}")
     
+    # Size of the cross-encoder candidate pool the LLM curator-judge chooses the final papers from,
+    # and the rubric floor below which a candidate is dropped (1-2 = "not usable for a specific
+    # annotation"; 3+ = at least weak background). See CuratorRubric.judge_select.
+    _JUDGE_CANDIDATE_POOL = 20
+    _JUDGE_MIN_SCORE = 3
+
+    def _retrieve_and_judge(self, gene: str, max_papers: int) -> Optional[Dict[str, Any]]:
+        """Stage-1 merge + cross-encoder re-rank -> candidate pool, then the LLM curator-judge picks
+        the final papers (score-threshold + top-N). SYNCHRONOUS and self-contained so it can run in
+        a worker thread (asyncio.to_thread) -- the judge's blocking LLM .invoke() must stay off
+        CrewAI's event loop. Returns the cache dict for gene_annotator.judged_papers, or None if
+        retrieval yields no candidates.
+
+        Reads the rerank targets already published on the shared annotator, so the cross-encoder
+        re-ranks against the same gene-specific pathway/description text the live tool would use."""
+        tool = LiteratureSearchTool(gene_annotator=self.gene_annotator)
+        cand = tool.retrieve_candidates(gene, candidate_pool=self._JUDGE_CANDIDATE_POOL)
+        candidates = cand["papers"]
+        if not candidates:
+            return None
+
+        # Rich rubric context so the judge scores gene-absent pathway/partner papers correctly.
+        # Reuse an already-precomputed prose lead (no extra LLM call): the gate-fail gene background,
+        # else the gene-specific pathway descriptions; build_judge_context then appends the gene's
+        # explicit Reactome pathway + FI-partner names (Neo4j/FI, LLM-free).
+        if self.resolved_description:
+            prose = self.resolved_description
+        elif self.resolved_pathway_descriptions:
+            prose = " ".join(str(v) for v in self.resolved_pathway_descriptions.values())
+        else:
+            prose = None
+        judge_description = build_judge_context(gene, description=prose)
+
+        judged = judge_select(gene, judge_description, candidates,
+                              max_papers=max_papers, min_score=self._JUDGE_MIN_SCORE)
+        return {
+            "name_query": cand.get("name_query", ""),
+            "context_query": cand.get("context_query", ""),
+            "pool_size": cand.get("pool_size", 0),
+            "candidate_pool": len(candidates),
+            "papers": judged["selected"],
+            "dropped_below_threshold": judged["dropped_below_threshold"],
+        }
+
     async def _phase_1_literature_extraction(self, request: AnnotationRequest) -> Dict[str, Any]:
         """Phase 1: Extract and structure information from literature"""
         phase_id = "phase_1_literature_extraction"
@@ -367,11 +457,12 @@ class CrewAILiteratureAnnotator:
         self.crew.tasks = [extraction_task]
         
         # Execute extraction
-        extraction_result = await self.crew.kickoff_async({
-            "gene": request.gene,
-            "papers": request.papers,
-            "max_papers": request.max_papers
-        })
+        with token_profiler.profile_kickoff("phase_1_literature_extraction", self.crew):
+            extraction_result = await self.crew.kickoff_async({
+                "gene": request.gene,
+                "papers": request.papers,
+                "max_papers": request.max_papers
+            })
         emit_agent_event("LiteratureExtractor", "end", phase="phase_1_literature_extraction", gene=request.gene)
 
         extraction = self._structured(extraction_result, "LiteratureExtraction")
@@ -418,10 +509,11 @@ class CrewAILiteratureAnnotator:
         self.crew.tasks = [curation_task]
         
         # Execute curation
-        curation_result = await self.crew.kickoff_async({
-            "gene": request.gene,
-            "target_pathways": str(request.pathways or [])
-        })
+        with token_profiler.profile_kickoff("phase_2_data_model_creation", self.crew):
+            curation_result = await self.crew.kickoff_async({
+                "gene": request.gene,
+                "target_pathways": str(request.pathways or [])
+            })
         emit_agent_event("ReactomeCurator", "end", phase="phase_2_data_model_creation", gene=request.gene)
 
         curation = self._structured(curation_result, "ReactomeDataModel")
@@ -517,10 +609,11 @@ class CrewAILiteratureAnnotator:
         self.crew.tasks = [review_task]
         
         # Execute review
-        review_result = await self.crew.kickoff_async({
-            "gene": request.gene,
-            "quality_threshold": request.quality_threshold
-        })
+        with token_profiler.profile_kickoff("phase_3_expert_review", self.crew):
+            review_result = await self.crew.kickoff_async({
+                "gene": request.gene,
+                "quality_threshold": request.quality_threshold
+            })
         emit_agent_event("Reviewer", "end", phase="phase_3_expert_review", gene=request.gene)
 
         review = self._structured(review_result, "ExpertReview")
@@ -566,10 +659,11 @@ class CrewAILiteratureAnnotator:
         self.crew.tasks = [qa_task]
         
         # Execute QA
-        qa_result = await self.crew.kickoff_async({
-            "gene": request.gene,
-            "quality_threshold": request.quality_threshold
-        })
+        with token_profiler.profile_kickoff("phase_4_quality_assurance", self.crew):
+            qa_result = await self.crew.kickoff_async({
+                "gene": request.gene,
+                "quality_threshold": request.quality_threshold
+            })
         emit_agent_event("QualityChecker", "end", phase="phase_4_quality_assurance", gene=request.gene)
 
         qa = self._structured(qa_result, "QAReport")
@@ -631,11 +725,13 @@ class CrewAILiteratureAnnotator:
                 memory=False,
             )
             emit_agent_event(role_name, "start", phase="phase_5_final_vote", gene=request.gene)
-            vote_result = await vote_crew.kickoff_async({
-                "gene": request.gene,
-                "agent_role": role_name,
-                "quality_threshold": str(request.quality_threshold)
-            })
+            # Fresh per-vote crew -> its usage_metrics is this kickoff's cost outright (no delta).
+            with token_profiler.profile_kickoff(f"phase_5_vote:{role_name}", vote_crew, phase="phase_5"):
+                vote_result = await vote_crew.kickoff_async({
+                    "gene": request.gene,
+                    "agent_role": role_name,
+                    "quality_threshold": str(request.quality_threshold)
+                })
             emit_agent_event(role_name, "end", phase="phase_5_final_vote", gene=request.gene)
             return role_name, self._structured(vote_result, "AgentVote").model_dump()
 
@@ -669,10 +765,11 @@ class CrewAILiteratureAnnotator:
             memory=False,
         )
         emit_agent_event("ConsensusChair", "start", phase="phase_5_consensus_synthesis", gene=request.gene)
-        consensus_result = await consensus_crew.kickoff_async({
-            "gene": request.gene,
-            "quality_threshold": str(request.quality_threshold)
-        })
+        with token_profiler.profile_kickoff("phase_5_consensus_synthesis", consensus_crew, phase="phase_5"):
+            consensus_result = await consensus_crew.kickoff_async({
+                "gene": request.gene,
+                "quality_threshold": str(request.quality_threshold)
+            })
         emit_agent_event("ConsensusChair", "end", phase="phase_5_consensus_synthesis", gene=request.gene)
         emit_agent_event("ConsensusMeeting", "end", phase=phase_id, gene=request.gene)
 
