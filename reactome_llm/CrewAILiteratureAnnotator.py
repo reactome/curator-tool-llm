@@ -35,7 +35,7 @@ from ReactomeLLMErrors import *
 from ModelConfig import get_crewai_model_settings
 from ReactomeModels import ReactomeEntity
 from QueryBuilder import (build_query_and_search_terms, build_gene_specific_pathway_descriptions,
-                          build_judge_context)
+                          build_gene_specific_enriched_pathway_description, build_judge_context)
 from CuratorRubric import judge_select
 import token_profiler
 import logging_config
@@ -284,6 +284,15 @@ class CrewAILiteratureAnnotator:
                 with token_profiler.label("desc_per_pathway"):
                     self.resolved_pathway_descriptions = await asyncio.to_thread(
                         build_gene_specific_pathway_descriptions, request.gene)
+                    # Cold-start GATE-PASS genes have no direct pathways, so the has-data builder
+                    # above returns {} for them. Give them a gene-SPECIFIC description of their
+                    # PRIMARY ENRICHED pathway (predicted/partner-grounded) instead of falling back
+                    # to the raw pathway summary -- validated A/B: CTTNBP2 4.8->9.0, annotatable
+                    # 2/5->5/5. Same cache, same worker-thread pattern; self-gates to {} (NO LLM
+                    # call) for has-data and gate-fail genes, so they are unaffected.
+                    if not self.resolved_pathway_descriptions:
+                        self.resolved_pathway_descriptions = await asyncio.to_thread(
+                            build_gene_specific_enriched_pathway_description, request.gene)
             except Exception as e:
                 logger.warning(f"Gene-specific pathway descriptions failed for {request.gene}: {e}")
                 self.resolved_pathway_descriptions = {}
@@ -387,7 +396,7 @@ class CrewAILiteratureAnnotator:
     # Size of the cross-encoder candidate pool the LLM curator-judge chooses the final papers from,
     # and the rubric floor below which a candidate is dropped (1-2 = "not usable for a specific
     # annotation"; 3+ = at least weak background). See CuratorRubric.judge_select.
-    _JUDGE_CANDIDATE_POOL = 20
+    _JUDGE_CANDIDATE_POOL = 50
     _JUDGE_MIN_SCORE = 3
 
     def _retrieve_and_judge(self, gene: str, max_papers: int) -> Optional[Dict[str, Any]]:

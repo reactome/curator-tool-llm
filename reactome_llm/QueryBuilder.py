@@ -562,6 +562,67 @@ def build_gene_specific_pathway_descriptions(gene: str, drop_generic: bool = Tru
     return out
 
 
+def build_gene_specific_enriched_pathway_description(gene: str,
+                                                     summary_snippet: int = 400) -> dict:
+    """Gene-SPECIFIC description of a COLD-START gate-pass gene's PREDICTED role in its primary
+    partner-enriched pathway -- the cold-start analogue of build_gene_specific_pathway_descriptions
+    for the Stage-2 re-rank target.
+
+    build_gene_specific_pathway_descriptions serves has-data genes (directly-known pathways) and
+    returns {} for cold-start genes. This one serves cold-start GATE-PASS genes: those with a
+    CONFIDENT suggest_pathway_placement but no released human pathway of their own. It asks an LLM
+    for 2-3 sentences on how {gene} is PREDICTED to function within its primary enriched pathway,
+    grounded in the interaction partners that placed it there. The framing is partner-grounded /
+    PREDICTED -- the gene does NOT directly participate, so the prompt does not assert an
+    established role. This replaces the raw pathway summary (generic, pulls broad reviews); validated
+    A/B on gate-pass genes: CTTNBP2 curator usefulness 4.8 -> 9.0 (annotatable 2/5 -> 5/5),
+    RAB6C 5.8 -> 6.2, GDF6 unchanged (already at ceiling).
+
+    Returns {primary_pathway_name: description}, keyed EXACTLY as get_reranking_target's cold-start
+    branch names the pathway (placement["primary"]["pathway_name"]), so it is picked up there via the
+    same prefer-description-else-raw-summary handling used for has-data pathways. Returns {} -- with
+    NO LLM call -- for any gene that is NOT cold-start gate-pass (has direct pathways, or placement
+    not confident), so has-data / gate-fail genes are unaffected.
+
+    Kept PRIMARY-only for now, matching the validated A/B scope (secondary close-tie pathways from
+    suggest_pathway_placement are not used).
+
+    Makes a BLOCKING LLM .invoke(): run ONCE upfront in a worker thread (asyncio.to_thread), NEVER
+    inside the async re-rank path -- same event-loop constraint as build_gene_specific_pathway_descriptions.
+    """
+    import ReactomeUtils as utils  # lazy: pulls in scanpy/faiss at module load
+    # Cold-start only: use the SAME has-data test as get_reranking_target's branch (select_pathway_names
+    # non-empty). Has-data genes re-rank against their DIRECT pathways, so an enriched-placement
+    # description would never be read there.
+    if select_pathway_names(gene):
+        return {}
+    placement = utils.suggest_pathway_placement(gene)
+    if not utils.is_confident_placement(placement):
+        return {}
+
+    primary = placement["primary"]
+    name = primary["pathway_name"]
+    summary = neo4jutils.query_pathway_summary(name) or ""
+    partners = primary.get("mapped_genes") or [p["gene"] for p in placement.get("partners_used", [])]
+    partner_str = ", ".join(partners) if partners else "(none identified)"
+
+    prompt = (
+        f"The human gene {gene} has NO direct Reactome pathway annotation. Based on its "
+        f"functional-interaction partners that participate in the Reactome pathway '{name}' "
+        f"({partner_str}), {gene} is computationally PREDICTED to function in this pathway.\n\n"
+        f"Pathway summary: {' '.join(summary.split())[:summary_snippet]}\n\n"
+        f"Write a 2-3 sentence description of how {gene} is PREDICTED to function within THIS "
+        f"pathway -- its likely role, mechanism, and key molecular interactions with the partners "
+        f"above -- grounded in the pathway context but focused on {gene}, NOT a general description "
+        f"of the pathway itself. Frame it as a prediction based on interaction partners; do NOT "
+        f"assert established or documented roles for {gene}. Return ONLY the description text.")
+
+    model = create_reactome_chat_model()
+    model.max_tokens = 512
+    desc = (model.invoke(prompt).content or "").strip()
+    return {name: desc} if desc else {}
+
+
 def get_reranking_target(gene: str, drop_generic: bool = True,
                          max_pathways: int = 15,
                          description_override: str | None = None,
@@ -578,7 +639,11 @@ def get_reranking_target(gene: str, drop_generic: bool = True,
                   description (pathway_descriptions[name]) when supplied, else the raw pathway
                   summary as a safety fallback. Gene-specific descriptions rerank specific,
                   annotatable primary papers above broad reviews (validated A/B).
-    Cold-start -> summation text of the primary suggested pathway (suggest_pathway_placement).
+    Cold-start -> the primary suggested pathway (suggest_pathway_placement): its precomputed
+                  gene-SPECIFIC enriched-pathway description (pathway_descriptions[primary], from
+                  build_gene_specific_enriched_pathway_description) when supplied for a gate-pass
+                  gene, else the raw pathway summary as a safety fallback -- same
+                  prefer-description-else-summary handling as the has-data branch.
     Gate-fail  -> [description_override]: a precomputed LLM biological description of the gene
                   (resolved_description), when supplied. Validated to rerank markedly better than
                   the bare identity string on cold-start genes.

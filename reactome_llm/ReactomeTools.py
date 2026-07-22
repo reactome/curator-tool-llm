@@ -164,7 +164,7 @@ class LiteratureSearchTool(BaseTool):
             "cross_score": d.get("cross_score"),
         } for d in docs]
 
-    def retrieve_candidates(self, gene: str, candidate_pool: int = 20, fetch_papers: int = 200,
+    def retrieve_candidates(self, gene: str, candidate_pool: int = 50, fetch_papers: int = 200,
                             additional_terms: str = "") -> dict:
         """Stage-1 merge + cross-encoder re-rank -> top-`candidate_pool` formatted paper dicts (with
         abstracts). LLM-FREE: safe to call live on the async path OR from a worker thread. This is
