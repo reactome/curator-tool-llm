@@ -434,6 +434,7 @@ class CrewAILiteratureAnnotator:
             "pool_size": cand.get("pool_size", 0),
             "candidate_pool": len(candidates),
             "papers": judged["selected"],
+            "scored": judged["scored"],   # full curator-rubric scoring, surfaced for reporting/eval
             "dropped_below_threshold": judged["dropped_below_threshold"],
         }
 
@@ -460,28 +461,52 @@ class CrewAILiteratureAnnotator:
             enable_literature_search=request.enable_literature_search,
             accession=self.resolved_accession
         )
-        extraction_task.agent = self.extractor_agent
-        
+        # Full-text disabled -> also drop the fulltext_analysis tool so the extractor can't waste
+        # ReAct turns calling it (with no local PDFs every call just returns "skipped"). Mirrors the
+        # reduced-toolset pattern used in Phases 3/4.
+        if not request.enable_full_text:
+            ext_tools = [t for t in self.toolkit.get_extractor_tools(self.enabled_tools_map.get("extractor"))
+                         if t.name != "fulltext_analysis"]
+            extraction_task.agent = self.agents.create_literature_extractor(ext_tools)
+        else:
+            extraction_task.agent = self.extractor_agent
+
         # Update crew with this task
         self.crew.tasks = [extraction_task]
         
-        # Execute extraction
-        with token_profiler.profile_kickoff("phase_1_literature_extraction", self.crew):
-            extraction_result = await self.crew.kickoff_async({
-                "gene": request.gene,
-                "papers": request.papers,
-                "max_papers": request.max_papers
-            })
+        # Execute extraction. A sparse / uncharacterized gene (e.g. cold-start gate-fail) can leave
+        # the extractor with no usable evidence; it then exhausts its ReAct iterations and CrewAI's
+        # forced final answer comes back empty ("Invalid response from LLM call - None or empty").
+        # Degrade to an empty-but-valid extraction and let downstream phases handle a gene with no
+        # literature, instead of hard-crashing the whole annotation.
+        try:
+            with token_profiler.profile_kickoff("phase_1_literature_extraction", self.crew):
+                extraction_result = await self.crew.kickoff_async({
+                    "gene": request.gene,
+                    "papers": request.papers,
+                    "max_papers": request.max_papers
+                })
+            extraction = self._structured(extraction_result, "LiteratureExtraction")
+            raw = extraction_result.raw
+        except Exception as e:
+            from ReactomeModels import LiteratureExtraction
+            logger.warning(
+                f"Phase 1 extraction returned no usable result for {request.gene} "
+                f"({type(e).__name__}: {e}); degrading to an empty extraction. This is expected for "
+                f"sparse/uncharacterized genes with little literature — downstream phases continue.")
+            extraction = LiteratureExtraction(
+                gene=request.gene, interactions=[], pathways=[], functions=[],
+                summary="No usable literature evidence was extracted for this gene.")
+            raw = ""
         emit_agent_event("LiteratureExtractor", "end", phase="phase_1_literature_extraction", gene=request.gene)
 
-        extraction = self._structured(extraction_result, "LiteratureExtraction")
         # papers_processed = unique PMIDs cited across all extracted evidence — read straight
         # off the validated model instead of regex-scraping the raw text.
         evidence_items = extraction.interactions + extraction.pathways + extraction.functions
         pmids = {item.pmid.strip() for item in evidence_items if item.pmid and item.pmid.strip()}
 
         return {
-            "raw_result": extraction_result.raw,
+            "raw_result": raw,
             "structured_information": extraction.model_dump(),
             "papers_processed": len(pmids),
             "gene": request.gene
@@ -605,16 +630,32 @@ class CrewAILiteratureAnnotator:
         logger.info(f"Phase 3: Expert review for {request.gene}")
         emit_agent_event("Reviewer", "start", phase=phase_id, gene=request.gene)
         
-        # Create review task
+        # Pre-run the deterministic consistency check (pure function over the curator instances)
+        # instead of leaving it as a reviewer tool. As a tool it forced the reviewer to re-serialize
+        # the full instance JSON to call it -- and in practice that re-emission was malformed, so the
+        # call errored ("'str' object has no attribute 'get'") and the reviewer got nothing. Pre-run
+        # + inject gives a correct result and drops the wasted re-emission (mirrors the Phase-4 fix).
+        instances_json = json.dumps(curation_context["reactome_instances"], default=str)
+        consistency_check_result = self.toolkit.consistency_check._run(
+            instances=instances_json, gene=request.gene)
+        logger.info(
+            f"Phase 3 pre-ran consistency_check for {request.gene}: {consistency_check_result[:200]}")
+
         review_task = self.tasks.create_expert_review_task(
             gene=request.gene,
             reactome_instances=curation_context["reactome_instances"],
             original_papers=extraction_context["structured_information"],
             quality_threshold=request.quality_threshold,
-            accession=self.resolved_accession
+            accession=self.resolved_accession,
+            consistency_check_result=consistency_check_result,
         )
-        review_task.agent = self.reviewer_agent
-        
+        # Reduced toolset: drop the pre-run consistency_check so the reviewer can't re-invoke it (and
+        # thus can't re-emit the instance JSON); keep the reviewer's other enabled tools.
+        _prerun = {"consistency_check"}
+        reduced_reviewer_tools = [t for t in self.toolkit.get_reviewer_tools(self.enabled_tools_map.get("reviewer"))
+                                  if t.name not in _prerun]
+        review_task.agent = self.agents.create_reviewer(reduced_reviewer_tools)
+
         self.crew.tasks = [review_task]
         
         # Execute review
@@ -654,17 +695,39 @@ class CrewAILiteratureAnnotator:
         logger.info(f"Phase 4: Quality assurance for {request.gene}")
         emit_agent_event("QualityChecker", "start", phase=phase_id, gene=request.gene)
         
-        # Create QA task
+        # Pre-run the deterministic QA checks (schema_validation + consistency_check) in-process
+        # instead of exposing them as agent tools. Both are pure functions over the curator
+        # instances, which Phase 4 already holds; leaving them as tools forced the QA agent to
+        # re-serialize the entire instance JSON back through the LLM to call them -- the ~166s
+        # output-heavy call that dominated Phase-4 wall-clock. We inject their results into the task
+        # and give the agent a reduced toolset so it just reasons over them.
+        instances_json = json.dumps(curation_context["reactome_instances"], default=str)
+        schema_validation_result = self.toolkit.schema_validation._run(
+            instances=instances_json, schema_path=request.schema_path or "")
+        consistency_check_result = self.toolkit.consistency_check._run(
+            instances=instances_json, gene=request.gene)
+        logger.info(
+            f"Phase 4 pre-ran deterministic checks for {request.gene}: "
+            f"schema_validation={schema_validation_result[:200]} | "
+            f"consistency_check={consistency_check_result[:200]}")
+
         qa_task = self.tasks.create_quality_assurance_task(
             gene=request.gene,
             reactome_instances=curation_context["reactome_instances"],
             validation_report=review_context["validation_report"],
             schema_path=request.schema_path,
             quality_threshold=request.quality_threshold,
-            accession=self.resolved_accession
+            accession=self.resolved_accession,
+            schema_validation_result=schema_validation_result,
+            consistency_check_result=consistency_check_result,
         )
-        qa_task.agent = self.qa_agent
-        
+        # Reduced toolset: drop the two pre-run tools so the agent can't re-invoke them (and thus
+        # can't re-emit the instance JSON); keep any other enabled QA tools (e.g. reactome_query).
+        _prerun = {"schema_validation", "consistency_check"}
+        reduced_qa_tools = [t for t in self.toolkit.get_qa_tools(self.enabled_tools_map.get("qa_checker"))
+                            if t.name not in _prerun]
+        qa_task.agent = self.agents.create_quality_checker(reduced_qa_tools)
+
         self.crew.tasks = [qa_task]
         
         # Execute QA

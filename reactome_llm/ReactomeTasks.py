@@ -394,10 +394,11 @@ class ReactomeTasks:
 
     def create_expert_review_task(self,
                                 gene: str,
-                                reactome_instances: List[Dict[str, Any]], 
+                                reactome_instances: List[Dict[str, Any]],
                                 original_papers: List[Dict[str, Any]],
                                 quality_threshold: float = 0.7,
-                                accession: Optional[str] = None) -> Task:
+                                accession: Optional[str] = None,
+                                consistency_check_result: Optional[str] = None) -> Task:
         """
         Create a task for the Domain Expert Reviewer agent.
         
@@ -420,6 +421,22 @@ class ReactomeTasks:
         )
         instances_json = json.dumps(reactome_instances, indent=2, default=str) if reactome_instances else "No instances were provided."
         papers_json = json.dumps(original_papers, indent=2, default=str) if original_papers else "No literature evidence was provided."
+        # Deterministic overlap check is pre-run in Phase 3 and injected here, so the reviewer never
+        # re-serializes the full instance JSON back through the LLM to call consistency_check as a
+        # tool (that re-emission was both wasted output and, in practice, malformed -> the tool call
+        # errored). Empty when not supplied -> falls back to the reviewer's own assessment.
+        prerun_consistency_block = ""
+        if consistency_check_result is not None:
+            prerun_consistency_block = f"""
+        **PRE-COMPUTED CONSISTENCY CHECK** (deterministic overlap check already run on the exact
+        instances above vs. existing Reactome data — treat as ground truth; do NOT re-run it and do
+        NOT reproduce the instance JSON yourself):
+        ```json
+        {consistency_check_result}
+        ```
+        Use this result when assessing Integration Quality (redundancies / conflicts with existing
+        pathways) below.
+"""
         description = f"""
         {accession_directive}
         Perform expert domain validation of generated Reactome instances for gene {gene}.
@@ -436,6 +453,7 @@ class ReactomeTasks:
         Review the instances above. They ARE present — evaluate their biological accuracy and
         quality against the literature evidence and your domain knowledge. Do not report that
         instances are missing.
+        {prerun_consistency_block}
 
         **Review Scope:**
         You will evaluate the biological accuracy and quality of generated Reactome
@@ -534,7 +552,9 @@ class ReactomeTasks:
                                     validation_report: Dict[str, Any],
                                     schema_path: Optional[str] = None,
                                     quality_threshold: float = 0.7,
-                                    accession: Optional[str] = None) -> Task:
+                                    accession: Optional[str] = None,
+                                    schema_validation_result: Optional[str] = None,
+                                    consistency_check_result: Optional[str] = None) -> Task:
         """
         Create a task for the Quality Checker agent.
         
@@ -557,6 +577,54 @@ class ReactomeTasks:
             if accession else ""
         )
         instances_json = json.dumps(reactome_instances, indent=2, default=str) if reactome_instances else "No instances were provided."
+        # The deterministic checks (schema_validation, consistency_check) are pre-run in Phase 4 and
+        # injected here, so the agent never has to re-serialize the full instance JSON back through
+        # the LLM to invoke them as tools -- that re-serialization was the ~166s output-heavy call
+        # that dominated Phase-4 wall-clock. When results aren't supplied the block is empty and the
+        # task falls back to the original agent-tool wording below.
+        prerun_block = ""
+        if schema_validation_result is not None or consistency_check_result is not None:
+            prerun_block = f"""
+        **PRE-COMPUTED AUTOMATED CHECK RESULTS** (already run deterministically on the exact
+        instances above — treat these as ground truth; do NOT try to re-run them and do NOT
+        reproduce the instance JSON yourself):
+        - `schema_validation` result:
+        ```json
+        {schema_validation_result if schema_validation_result is not None else 'not run'}
+        ```
+        - `consistency_check` result:
+        ```json
+        {consistency_check_result if consistency_check_result is not None else 'not run'}
+        ```
+        Base your Schema Compliance, Referential Integrity, Data Consistency, and Integration
+        findings on these results together with your own inspection of the instances above.
+"""
+        # Switch the tool-referencing wording depending on whether the deterministic checks were
+        # pre-run (Phase-4 fix path) or the agent still has them as tools (legacy fallback).
+        if prerun_block:
+            automated_tests_intro = ("The following automated checks have ALREADY been run for you "
+                                     "(see PRE-COMPUTED RESULTS above) — incorporate their findings; "
+                                     "do NOT re-run them:")
+            schema_input_block = (
+                "**Schema Input:**\n"
+                f"        - schema_validation has already been run against schema_path: "
+                f"{schema_path if schema_path else 'not provided'} (see PRE-COMPUTED RESULTS above).\n"
+                "        - If no schema path was provided, that result reflects structural validation "
+                "only; report that full schema validation was not run.")
+            closing_tools_line = ("The automated schema and consistency checks have already been run for "
+                                  "you (see PRE-COMPUTED RESULTS above); synthesize their findings into "
+                                  "your QA report rather than re-running them.")
+        else:
+            automated_tests_intro = "Run the following automated checks:"
+            schema_input_block = (
+                "**Schema Input:**\n"
+                "        - If an official JSON schema file is available, use the `schema_validation` tool with:\n"
+                "            - `instances`: the generated instance JSON\n"
+                f"            - `schema_path`: {schema_path if schema_path else 'not provided'}\n"
+                "        - If no schema path is provided, fall back to structural validation and report "
+                "that full schema validation was not run.")
+            closing_tools_line = ("Use available tools to run automated tests, check database consistency, "
+                                  "and validate against production standards.")
         description = f"""
         {accession_directive}
         Perform comprehensive quality assurance and consistency checking for
@@ -568,6 +636,7 @@ class ReactomeTasks:
         ```
         QA the instances above. They ARE present — assess schema compliance, referential
         integrity, consistency, and integration for them. Do not report that instances are missing.
+        {prerun_block}
 
         **QA Scope:**
         1. Technical compliance with Reactome schema and standards
@@ -602,18 +671,14 @@ class ReactomeTasks:
            - Ensure proper indexing compatibility
            
         **Automated QA Tests:**
-        Run the following automated checks:
+        {automated_tests_intro}
         - Schema validation against official XSD/JSON schemas
         - Duplicate detection and conflict resolution
         - Cross-reference validation
         - Performance impact assessment
         - Ontology consistency checking
 
-                **Schema Input:**
-                - If an official JSON schema file is available, use the `schema_validation` tool with:
-                    - `instances`: the generated instance JSON
-                    - `schema_path`: {schema_path if schema_path else 'not provided'}
-                - If no schema path is provided, fall back to structural validation and report that full schema validation was not run.
+        {schema_input_block}
         
         **Expert Review Integration:**
         Review the domain expert's assessment (overall score: {validation_report.get('overall_score', 'N/A')}):
@@ -652,8 +717,7 @@ class ReactomeTasks:
         - Conditional: QA score >= 0.6, only low/medium issues, expert approved with conditions  
         - Reject: QA score < 0.6, high-severity issues, or expert rejection
         
-        Use available tools to run automated tests, check database consistency,
-        and validate against production standards.
+        {closing_tools_line}
         """
         
         expected_output = f"""

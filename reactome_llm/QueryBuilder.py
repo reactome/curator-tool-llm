@@ -430,7 +430,8 @@ def build_retrieval_query(gene: str, drop_generic: bool = True, max_pathways: in
 
 
 def build_retrieval_query_pair(gene: str, drop_generic: bool = True, max_pathways: int = 15,
-                               fi_cutoff: float = 0.8, partner_top_n: int = 10) -> tuple[str, str]:
+                               fi_cutoff: float = 0.8, partner_top_n: int = 10,
+                               include_partners: bool = True) -> tuple[str, str]:
     """Two INDEPENDENT Stage-1 queries for the result-set merge, as (name_query, context_query).
 
     The retriever (LiteratureSearchTool) runs each as its own PubMed E-Search and UNIONs the PMID
@@ -454,7 +455,10 @@ def build_retrieval_query_pair(gene: str, drop_generic: bool = True, max_pathway
     """
     synonyms = get_uniprot_synonyms(neo4jutils.query_accession_for_gene(gene))
     name_query = _or_join_terms([gene] + synonyms)
-    partner_fragment = _or_join_terms(select_top_partner_names(gene, fi_cutoff, partner_top_n))
+    # include_partners=False drops top-N FI partner names from context_query entirely, so the broad
+    # search is gene + direct pathways only (mentor-directed has-data simplification / A/B knob).
+    partner_fragment = (_or_join_terms(select_top_partner_names(gene, fi_cutoff, partner_top_n))
+                        if include_partners else "")
 
     def _context(pathway_fragment: str) -> str:
         return " OR ".join(f for f in (pathway_fragment, partner_fragment) if f)
@@ -500,7 +504,8 @@ def build_entity_mention_set(gene: str, fi_cutoff: float = 0.8,
 
 def build_gene_specific_pathway_descriptions(gene: str, drop_generic: bool = True,
                                              max_pathways: int = 15,
-                                             summary_snippet: int = 400) -> dict:
+                                             summary_snippet: int = 400,
+                                             reference_interactions: bool = True) -> dict:
     """Gene-SPECIFIC-within-pathway descriptions for the has-data Stage-2 re-rank target.
 
     For each of the gene's (generic-filtered, capped) released-human pathways, an LLM writes 2-3
@@ -530,12 +535,19 @@ def build_gene_specific_pathway_descriptions(gene: str, drop_generic: bool = Tru
     listing = "\n".join(
         f"[{i}] {name}: {' '.join(summ.split())[:summary_snippet]}"
         for i, (name, summ) in enumerate(pairs, 1))
+    # reference_interactions=False = mentor-directed simplification: describe the gene's role in the
+    # pathway only, with no interaction/partner content (A/B knob vs. the shipped default).
+    focus_clause = ("its role, mechanism, and key molecular interactions --"
+                    if reference_interactions else
+                    "its role and mechanism within the pathway --")
+    no_partner_clause = ("" if reference_interactions
+                         else " Do NOT reference specific interaction partners.")
     prompt = (
         f"For the human gene {gene}, below are Reactome pathways it participates in, each with the "
         f"pathway's summary. For EACH pathway, write a 2-3 sentence description of how {gene} "
-        f"SPECIFICALLY functions within THAT pathway -- its role, mechanism, and key molecular "
-        f"interactions -- grounded in the pathway context but focused on {gene}, NOT a general "
-        f"description of the pathway itself.\n\n"
+        f"SPECIFICALLY functions within THAT pathway -- {focus_clause} grounded in the pathway "
+        f"context but focused on {gene}, NOT a general description of the pathway "
+        f"itself.{no_partner_clause}\n\n"
         f"Pathways:\n{listing}\n\n"
         f"Return ONLY a JSON array, one object per pathway:\n"
         f'[{{"index": <int matching [n]>, "description": "<2-3 sentences>"}}]')

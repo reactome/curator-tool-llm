@@ -392,6 +392,12 @@ def pathway_binomial_enrichment_df(map_df,
             mapped_genes_all.append(mapped_genes)
             pmids_all.append(row['pmids'])
 
+    # No pathway overlapped the interaction set (common for sparse/uncharacterized genes) -> nothing
+    # to FDR-correct. Return an empty frame instead of letting multipletests divide by zero on an
+    # empty list (the "float division by zero" that broke FAM120C's protein_interactions call).
+    if not p_values:
+        return pd.DataFrame(columns=["pathway_id", "pathway_name", "overlap_count",
+                                     "mapped_genes", "pmids_all", "pVal", "FDR"])
     # Apply FDR correction using Benjamini-Hochberg method
     q_values = smm.multipletests(p_values, method='fdr_bh')[1]
 
@@ -461,6 +467,10 @@ def pathway_binomial_enrichment(gene_list, pathway_file: str = REACTOME_PATHWAY_
             overlap_counts.append(overlap_count)
             p_values.append(p_value)
 
+    # Same empty-overlap guard as pathway_binomial_enrichment_df: avoid the multipletests
+    # divide-by-zero when no pathway overlaps the gene set.
+    if not p_values:
+        return pd.DataFrame(columns=["pathway_id", "pathway_name", "overlap_count", "pVal", "FDR"])
     # Apply FDR correction using Benjamini-Hochberg method
     q_values = smm.multipletests(p_values, method='fdr_bh')[1]
 
