@@ -3,25 +3,34 @@
 Results-section only, condition-aware + evidence + normalized reactions, 2-prev + 1-next
 memory (LangGraph), Sonnet 4.6, no chunk overlap.
 
+Sources may be local PDFs or PubMed IDs — PMIDs are resolved to PMCIDs and
+fetched as JATS XML, which tags the Results section explicitly instead of
+requiring the heuristic/LLM detection a flat PDF needs.
+
 Usage:
-  python run_extraction.py                      # every *.pdf in data/papers/
-  python run_extraction.py PINK1.pdf            # one paper
-  python run_extraction.py PINK1.pdf ZNFX1.pdf  # several
+  python run_extraction.py                            # every *.pdf in data/papers/
+  python run_extraction.py PINK1.pdf                  # one local paper
+  python run_extraction.py PINK1.pdf ZNFX1.pdf        # several
+  python run_extraction.py 38234567                   # one PMID via PubMed Central
+  python run_extraction.py --gene PINK1 38234567 29168502
+  python run_extraction.py --pmid-file pmids.txt --gene PINK1
 
 Writes results/<stem>_2prev1next_extraction.json per paper (incremental, per chunk).
 """
-import os, sys, json, time, glob, importlib.util
+import os, sys, json, time, glob, argparse, importlib.util
 PROJECT_ROOT = os.path.expanduser('~/curator-tool-llm')
 sys.path.insert(0, os.path.join(PROJECT_ROOT, 'reactome_llm'))
 from dotenv import load_dotenv
 load_dotenv(os.path.join(PROJECT_ROOT, '.env'), override=True)
 
-import fitz, anthropic
+import anthropic, requests
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph, START, END
 from typing import TypedDict, List, Dict
-from FullTextPDFSections import extract_results_section
+# PDF loading (fitz + extract_results_section) now lives in load_source(), so the
+# same call handles a local PDF or a PMID.
+import PubMedFetcher as fetcher
 
 PAPERS_DIR = os.path.join(PROJECT_ROOT, 'data', 'papers')
 RESULTS_DIR = os.path.join(PROJECT_ROOT, 'results')
@@ -105,34 +114,48 @@ builder.add_edge(START, 'process_chunk')
 builder.add_conditional_edges('process_chunk', should_continue, {'continue': 'process_chunk', 'done': END})
 graph = builder.compile(checkpointer=InMemorySaver())
 
-def extract_paper(paper):
-    stem = os.path.splitext(paper)[0].lower()
+def extract_paper(paper, gene=None):
+    # gene is only a filename label — a PMID stem carries no gene on its own.
+    stem = fetcher.output_stem(paper, gene=gene)
     out = os.path.join(RESULTS_DIR, f'{stem}_2prev1next_extraction.json')
-    doc = fitz.open(os.path.join(PAPERS_DIR, paper))
-    full_text = ''.join(p.get_text() for p in doc); doc.close()
-    results_text, how = extract_results_section(full_text, client=client, model=MODEL_NAME)
+    source_id, results_text, how = fetcher.load_source(paper, client=client, model=MODEL_NAME)
     chunks = splitter.split_text(results_text)
-    print(f"[setup] {paper}: full={len(full_text.split()):,}w -> Results={len(results_text.split()):,}w "
+    print(f"[setup] {source_id}: Results={len(results_text.split()):,}w "
           f"(via {how}) -> {len(chunks)} chunks", flush=True)
 
     config = {'configurable': {'thread_id': f'{stem}-2prev1next'}, 'recursion_limit': len(chunks) + 5}
-    init = {'source': paper, 'out': out, 'chunks': chunks, 'current_chunk_index': 0,
+    init = {'source': source_id, 'out': out, 'chunks': chunks, 'current_chunk_index': 0,
             'reactions_found': [], 'recent_notes': []}
     t0 = time.time()
     final = graph.invoke(init, config=config)
-    print(f"[done] {paper}: {final['current_chunk_index']} chunks, {len(final['reactions_found'])} reaction(s), "
+    print(f"[done] {source_id}: {final['current_chunk_index']} chunks, {len(final['reactions_found'])} reaction(s), "
           f"{time.time()-t0:.0f}s -> {out}", flush=True)
 
 if __name__ == '__main__':
-    args = sys.argv[1:]
-    papers = args if args else [os.path.basename(p) for p in sorted(glob.glob(os.path.join(PAPERS_DIR, '*.pdf')))]
+    ap = argparse.ArgumentParser(description='Extract reactions from PDFs or PubMed IDs.')
+    ap.add_argument('sources', nargs='*',
+                    help='PDF filenames in data/papers/, PMIDs, or PMCIDs '
+                         '(default: every *.pdf in data/papers/)')
+    ap.add_argument('--gene', help='gene label for output filenames (PMIDs carry no gene)')
+    ap.add_argument('--pmid-file', help='file with one PMID per line; blank lines and # comments ignored')
+    a = ap.parse_args()
+
+    papers = list(a.sources)
+    if a.pmid_file:
+        with open(a.pmid_file) as f:
+            papers += [ln.split('#')[0].strip() for ln in f if ln.split('#')[0].strip()]
+    if not papers:
+        papers = [os.path.basename(p) for p in sorted(glob.glob(os.path.join(PAPERS_DIR, '*.pdf')))]
+
     print(f"[run] extracting {len(papers)} paper(s): {papers}", flush=True)
     skipped = []
     for paper in papers:
         print(f"\n########## {paper} ##########", flush=True)
         try:
-            extract_paper(paper)
-        except ValueError as e:
-            print(f"[skip] {paper}: {e}", flush=True)
+            extract_paper(paper, gene=a.gene)
+        except (ValueError, requests.RequestException) as e:
+            # No PMCID, no <body> (paywalled), no Results section, or a network
+            # failure — skip this paper and keep going through the batch.
+            print(f"[skip] {paper}: {type(e).__name__}: {e}", flush=True)
             skipped.append(paper)
     print(f"\n[all done]" + (f" — skipped {len(skipped)}: {skipped}" if skipped else ""), flush=True)

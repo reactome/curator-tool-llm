@@ -140,6 +140,16 @@ treatment, dose, mutant, and method — that is where all such specific detail l
 excerpt per place the reaction is supported in this chunk; if the reaction recurs in other
 chunks, its excerpts are pooled together later.
 
+EVERY CLAIM MUST BE CITABLE — no field may assert more than its excerpts state:
+  - Each excerpt must independently support THIS reaction: it must name the same
+    participants AND state the same molecular action. A sentence that merely mentions one
+    participant, or states a different action, is NOT evidence for this reaction.
+  - Do NOT attach the same excerpt to several reactions as shared background. Quote a
+    sentence for two reactions only if it genuinely asserts both.
+  - HEDGED or UNRESOLVED statements are NOT evidence: "is suggested to be", "may",
+    "might", "could", "has remained elusive", "is unclear", "remains unknown". If the only
+    sentence you can quote for a reaction is hedged, do NOT emit the reaction.
+
 Return ONLY a JSON object, no markdown:
 {{
   "reactions": [
