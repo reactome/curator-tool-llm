@@ -146,11 +146,31 @@ class ReactomePubMedRetriever(PubMedRetriever):
         return self._parse_article(uid, text_dict)
 
 
-# Just a simple test
-# retriever = ReactomePubMedRetriever()
-# pmid = 37941124
-# time1 = time.time()
-# for i in range(1):
-#     print(retriever.get_abstract_from_mongodb(pmid))
-# time2 = time.time()
-# print('Time: {}'.format(time2 - time1))
+    def sample_random_abstracts(self, k: int, exclude_pmids: list = None) -> list[dict]:
+        """Random sample of k {pmid, abstract} dicts straight from MongoDB via $sample."""
+        if self.db is None:
+            client = MongoClient(pubmed_mongo_uri)
+            db = client[pubmed_mongo_db]
+            self.db = db
+        collection = self.db[pubmed_mongo_collection]
+
+        exclude_set = set(str(p) for p in (exclude_pmids or []))
+        results = collection.aggregate([{"$sample": {"size": k}}])
+
+        distractors = []
+        for r in results:
+            if str(r["pmid"]) in exclude_set:
+                continue
+            distractors.append({"uid": str(r["pmid"]), "Summary": r["abstract"]})
+        return distractors
+
+    
+    def build_test_pool(self, correct_pmid: str, n: int) -> list[dict]:
+        """Build a test pool of n_total papers: 1 correct + (n_total - 1) random noise."""
+        correct_abstract = self.get_abstract_from_mongodb(correct_pmid)
+        
+        n_distractors = n - 1
+        distractors = self.sample_random_abstracts(k=n_distractors, exclude_pmid=correct_pmid)
+        
+        pool = [correct_abstract] + distractors
+        return pool

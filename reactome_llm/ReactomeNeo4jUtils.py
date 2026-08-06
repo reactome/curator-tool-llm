@@ -302,3 +302,63 @@ def get_random_annotated_genes(n: int = 10, min_pathways: int = 3) -> list[str]:
     if result_df is None or result_df.empty:
         return []
     return result_df['gene'].to_list()
+
+
+def get_reaction_and_all_pmids_for_gene(gene: str) -> tuple[str | None, list[str]]:
+    """Get one reaction the given gene participates in, along with ALL PMIDs cited for that reaction.
+
+    Args:
+        gene (str): Gene symbol (e.g. 'SHANK3')
+
+    Returns:
+        tuple[str | None, list[str]]: (reaction_name, list_of_pmids), or (None, []) if not found.
+    """
+    # Step 1: find one reaction the gene participates in
+    reaction_query = """
+        MATCH (ewas:EntityWithAccessionedSequence)-[:referenceEntity]->(g:ReferenceSequence)
+        WHERE g.geneName[0] = $gene_name
+        MATCH (r:ReactionLikeEvent)
+              -[:input|catalystActivity|regulatedBy|physicalEntity|hasComponent|hasMember|hasCandidate*]->(ewas)
+        RETURN DISTINCT r.displayName AS reaction
+        LIMIT 1
+    """
+    with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        result = driver.execute_query(reaction_query, db=DB, gene_name=gene,
+                                      result_transformer_=neo4j.Result.to_df)
+    if result.empty:
+        return None, []
+    reaction_name = result.iloc[0]["reaction"]
+
+    # Step 2: get ALL PMIDs cited for that specific reaction
+    pmid_query = """
+        MATCH (r:ReactionLikeEvent {displayName: $reaction})-[:literatureReference]->(lit:LiteratureReference)
+        RETURN DISTINCT lit.pubMedIdentifier AS pmid
+    """
+    with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        pmid_result = driver.execute_query(pmid_query, db=DB, reaction=reaction_name,
+                                           result_transformer_=neo4j.Result.to_df)
+    pmids = pmid_result["pmid"].to_list() if not pmid_result.empty else []
+    return reaction_name, pmids
+
+
+def query_reaction_summary(reaction: str) -> str | None:
+    """Query the reaction summary from the database.
+
+    Args:
+        reaction (str): Reaction display name.
+
+    Returns:
+        str | None: The reaction's summation text, or None if not found.
+    """
+    query = """
+        MATCH (r:ReactionLikeEvent {displayName: $reaction})
+        OPTIONAL MATCH (r)-[:summation]->(summation:Summation)
+        RETURN summation.text AS text
+    """
+    text = None
+    with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        with driver.session(database=DB) as session:
+            result = session.run(query, reaction=reaction).single()
+            if result is not None:
+                text = result['text']
+    return text
