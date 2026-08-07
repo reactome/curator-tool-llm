@@ -39,7 +39,16 @@ def build_extraction_prompt(current_chunk, prev_contexts=None, next_context=None
       - condition        : general biological condition/state (coarse; groups reactions)
       - summation        : Summation instance {text, literatureReference}
       - relationships    : "EntityA - relationship_type -> EntityB" lines
-      - evidence         : list of verbatim source-text excerpts the reaction was drawn from (provenance)
+      - evidence         : list of verbatim source-text excerpts the reaction was drawn from
+                           (provenance). Single citation pool for the WHOLE reaction — every
+                           subsection filled in (regulatedBy, catalystActivity, compartment,
+                           condition, input/output) must have a supporting excerpt here. May
+                           include text quoted from an adjacent chunk when the supporting
+                           passage spans a chunk boundary, and the same excerpt may be cited
+                           by more than one reaction.
+      - context_used     : list of the contexts consulted for this reaction — to resolve a
+                           reference OR to quote a boundary-spanning excerpt (["none"] if the
+                           current chunk sufficed)
 
     NOTE: confidence is Claude's SELF-ASSESSED rating (subjective, 0-1).
     Objective accuracy is measured separately via cosine similarity vs Neo4j.
@@ -117,9 +126,15 @@ FOCUS — this is the most important instruction:
     Stop as soon as the reference is resolved; do not read further context than you need.
   - Use context only to complete/resolve a reaction stated in the current chunk — never to
     add a reaction that belongs to a neighbouring chunk.
-  - For each reaction, record in its "context_used" field which context (if any) you had to
-    consult to complete it: "none" if the CURRENT CHUNK alone sufficed, else "previous_chunk"
-    (CONTEXT A), "two_chunks_back" (CONTEXT B), or "next_chunk" (CONTEXT C).
+  - For each reaction, record in its "context_used" field EVERY context you actually consulted
+    for it — a LIST, since resolving one reaction can take more than one direction. Use
+    "previous_chunk" (CONTEXT A), "two_chunks_back" (CONTEXT B), "next_chunk" (CONTEXT C), or
+    the single entry "none" if the CURRENT CHUNK alone sufficed. This field must be accurate
+    in BOTH of the cases where you look outside the current chunk:
+      * you looked BACKWARD or FORWARD to resolve an entity, antecedent, or outcome, AND
+      * you quoted an evidence excerpt from that context (boundary-spanning support above).
+    If any excerpt in "evidence" was quoted from CONTEXT C, "context_used" must contain
+    "next_chunk". Never report "none" while citing text you took from a context section.
 
 For each reaction, express it using the Reactome ReactionlikeEvent data model fields, and
 also as relationship lines in this exact format:
@@ -133,19 +148,60 @@ GENERAL condition in the "condition" field — a coarse, reusable category that 
 the same context would share (so downstream steps can group reactions by it), with no
 experiment-specific detail. If no condition is stated or implied, set "condition" to null.
 
-The "evidence" field is your CITATION — a LIST of the VERBATIM source-text excerpt(s) from the
-CURRENT CHUNK that you drew this reaction from (quote the actual sentence(s), copied exactly).
-These excerpts are the proof of provenance and will naturally contain the experimental system,
-treatment, dose, mutant, and method — that is where all such specific detail lives. Add one
-excerpt per place the reaction is supported in this chunk; if the reaction recurs in other
-chunks, its excerpts are pooled together later.
+The "evidence" field is your CITATION — a LIST of the VERBATIM source-text excerpt(s) you drew
+this reaction from (quote the actual sentence(s), copied exactly). These excerpts are the proof
+of provenance and will naturally contain the experimental system, treatment, dose, mutant, and
+method — that is where all such specific detail lives. Add one excerpt per place the reaction is
+supported; if the reaction recurs in other chunks, its excerpts are pooled together later.
 
-EVERY CLAIM MUST BE CITABLE — no field may assert more than its excerpts state:
-  - Each excerpt must independently support THIS reaction: it must name the same
-    participants AND state the same molecular action. A sentence that merely mentions one
-    participant, or states a different action, is NOT evidence for this reaction.
-  - Do NOT attach the same excerpt to several reactions as shared background. Quote a
-    sentence for two reactions only if it genuinely asserts both.
+EVIDENCE THAT BLEEDS ACROSS THE CHUNK BOUNDARY — chunks cut the paper mid-sentence and
+mid-paragraph, so the passage supporting a reaction is often split across two chunks. You can
+always see the whole passage from the EARLIER side of a cut, because CONTEXT C gives you the
+next chunk's raw text. So a split passage is handled from the earlier chunk, never patched
+together from the later one:
+  - NEVER DROP AN EXCERPT BECAUSE IT IS CUT OFF. A sentence that runs past the end of the
+    CURRENT CHUNK is not unusable evidence — it is evidence you must finish reading. LOOK
+    FORWARD into CONTEXT C, find where the sentence continues, and cite the completed
+    passage. Then record "next_chunk" in "context_used". Silently omitting a cut excerpt
+    loses the citation for that reaction, which is worse than any imperfection in the quote.
+  - A reaction whose supporting passage RUNS ON into the next chunk belongs to THIS chunk.
+    Extract it here and cite the WHOLE passage: the text in the CURRENT CHUNK together with
+    its continuation from CONTEXT C, joined into the complete sentence(s) they form.
+  - If the CURRENT CHUNK instead OPENS mid-sentence, the missing words are BEHIND you and
+    CONTEXT C cannot supply them. Prefer the record already made from the previous chunk: if
+    that reaction is listed in CONTEXT A, it is captured, so do not re-extract it. If it is
+    NOT in CONTEXT A, extract it here and quote the partial sentence the current chunk does
+    contain — an incomplete quote is still a citation; omitting it leaves the reaction uncited.
+  - Reproduce the author's WORDING exactly — do not paraphrase, summarize, or add words. You
+    MAY tidy mechanical text artefacts so the excerpt reads as the running prose it is:
+    rejoin a word split across a line ("mitochon- dria" -> "mitochondria"), close up a line
+    break inside a sentence, and join a sentence split at the chunk boundary.
+  - This is for EVIDENCE ONLY. Quoting the next chunk never licenses extracting a reaction
+    that is wholly described there — the reaction must still be stated, at least in part, in
+    the CURRENT CHUNK.
+  - Whenever an excerpt comes from a context section, you MUST record that context in
+    "context_used" (see below).
+
+EVERY SUBSECTION MUST BE CITED IN "evidence" — the one "evidence" list is the citation pool for
+the WHOLE reaction, not just for its name and participants. It must contain a verbatim excerpt
+supporting EVERY subsection you fill in:
+  - regulatedBy — the regulation is nearly always shown by a DIFFERENT sentence than the
+    reaction itself (the knockout, mutant, inhibitor, or requirement experiment). Quote THAT
+    sentence, for each regulator you list.
+  - catalystActivity — quote the sentence establishing that this enzyme carries out the event.
+  - compartment — quote the sentence stating where it happens.
+  - condition — quote the sentence stating the condition or treatment under which it occurs.
+  - input / output — quote the sentence naming the participants and products.
+  A subsection you cannot quote for must be left null or empty rather than asserted uncited.
+  Do not add facts to "summation" that no excerpt in the list supports.
+
+Excerpt rules:
+  - Every excerpt must support the reaction itself OR one of its subsections above. A sentence
+    that merely mentions one participant while asserting nothing about this reaction or any of
+    its subsections is NOT evidence.
+  - The SAME excerpt MAY be cited by several reactions when it genuinely supports each of
+    them — a sentence describing two molecular events is real evidence for both, so quote it
+    on both. Do not withhold an excerpt because another reaction already uses it.
   - HEDGED or UNRESOLVED statements are NOT evidence: "is suggested to be", "may",
     "might", "could", "has remained elusive", "is unclear", "remains unknown". If the only
     sentence you can quote for a reaction is hedged, do NOT emit the reaction.
@@ -175,8 +231,8 @@ Return ONLY a JSON object, no markdown:
         "literatureReference": ["<PMID or citation string if mentioned, else empty list>"]
       }},
       "relationships": ["EntityA - relationship_type -> EntityB"],
-      "evidence": ["<verbatim source-text excerpt supporting this reaction>", "<every additional excerpt where this reaction is stated — include all of them>"],
-      "context_used": "<none | previous_chunk | two_chunks_back | next_chunk — which context you consulted, if any>",
+      "evidence": ["<verbatim excerpt supporting this reaction>", "<every additional excerpt where this reaction is stated — include all of them>", "<an excerpt for EACH subsection you filled in: regulator, catalyst, compartment, condition>", "<the continuing text from CONTEXT C if the passage ran past the chunk boundary>"],
+      "context_used": ["<none | previous_chunk | two_chunks_back | next_chunk — list EVERY context you consulted, whether to resolve the reaction or to quote an excerpt>"],
       "confidence": <float 0-1, confidence this reaction is correct and well-supported>
     }}
   ]

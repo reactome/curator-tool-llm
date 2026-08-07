@@ -18,6 +18,31 @@ import anthropic
 client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
 MODEL_NAME = 'claude-sonnet-5'
 
+# Token accounting over every judge/consolidate call, so a run can be costed. The
+# judge fans out over ThreadPoolExecutor, so the counters are lock-guarded.
+USAGE = {'calls': 0, 'in': 0, 'out': 0, 'cache_read': 0, 'cache_write': 0}
+_usage_lock = __import__('threading').Lock()
+
+
+def track_usage(msg):
+    u = getattr(msg, 'usage', None)
+    if not u:
+        return
+    with _usage_lock:
+        USAGE['calls'] += 1
+        USAGE['in'] += getattr(u, 'input_tokens', 0) or 0
+        USAGE['out'] += getattr(u, 'output_tokens', 0) or 0
+        USAGE['cache_read'] += getattr(u, 'cache_read_input_tokens', 0) or 0
+        USAGE['cache_write'] += getattr(u, 'cache_creation_input_tokens', 0) or 0
+
+
+def usage_line():
+    cache = ''
+    if USAGE['cache_read'] or USAGE['cache_write']:
+        cache = f", cache r{USAGE['cache_read']:,}/w{USAGE['cache_write']:,}"
+    return (f"{USAGE['calls']} call(s), tokens in {USAGE['in']:,} / out "
+            f"{USAGE['out']:,}{cache}")
+
 
 def resolve_paths(target, out=None):
     """Accept either an extraction-file path or a gene prefix and return (IN, OUT)."""
@@ -100,9 +125,11 @@ molecular transformation of the same participants — EVEN IF they differ in:
 They are DIFFERENT reactions — do NOT merge them — if ANY of the following differs:
   - the participants (input) or the products (output)
   - the catalyst
-  - the regulators: a different regulator, or a different regulationType on the same regulator
+  - a different regulationType on the SAME regulator (one says positiveRegulation by X, the
+    other negativeRegulation by X) — that is a genuine contradiction, not extra detail
   - the biological condition under which the reaction occurs
-  - the compartment
+  - the compartment, when the two are genuinely different locations (cytosol vs
+    mitochondrion) — but NOT when one merely contains the other
   - the molecular action (e.g. phosphorylation vs ubiquitination)
 They are also DIFFERENT if they merely share one participant.
 
@@ -110,6 +137,16 @@ A field that is "none" in one record and filled in the other is MISSING DATA, no
 difference — ignore it when comparing. Likewise these are the SAME, not different:
   - a domain or subunit vs its parent protein as catalyst (e.g. "ZNFX1 RZ domain" = "ZNFX1")
   - one record listing an accessory cofactor (E1/E2 enzyme, ATP, ubiquitin) the other omits
+  - a compartment vs a sub-compartment of it ("mitochondrial outer membrane" = "mitochondrion")
+  - DIFFERENT SETS OF REGULATORS. Regulation hangs OFF a reaction; it is not part of the
+    reaction's identity. Two experiments on the same event naturally test different
+    regulators — one knocks out X, another uses a phospho-null mutant of Y — so their
+    regulator lists are additive and get unioned when the records merge. A regulator in one
+    record and absent from the other, or two records naming entirely different regulators,
+    is NOT a difference. (A conflicting regulationType on the same regulator still is; see
+    above.)
+  - GO molecular-function wording for the same catalytic act ("ubiquitin-protein ligase
+    activity" = "ubiquitin-protein transferase activity")
 Judge the CORE transformation: which entity acts on which, and what change it undergoes.
 
 When in doubt, do NOT merge. Two records left separate can still be merged by a curator
@@ -131,6 +168,7 @@ Return ONLY JSON: {{"same": <true|false>, "reason": "<short phrase>"}}"""
                                          messages=[{'role': 'user', 'content': prompt}])
             # Skip thinking/other blocks; take the first text block. With extended
             # thinking on, content[0] is a ThinkingBlock (no .text) and would crash.
+            track_usage(msg)
             txt = next((b.text for b in msg.content if getattr(b, 'type', None) == 'text'), '')
             txt = txt.strip().replace('```json','').replace('```','').strip()
             if not txt:
@@ -184,6 +222,20 @@ def merge_two(e1, e2):
             if any(k) and k not in seen:
                 seen.add(k); out.append(r)
         return out
+    def pick_compartment(c1, c2):
+        """Keep the MORE SPECIFIC compartment. The judge now treats a compartment and a
+        sub-compartment of it as the same location, so a merge must not throw the finer
+        one away: "mitochondrial outer membrane" beats "mitochondrion"."""
+        if not c1 or not c2:
+            return c1 or c2
+        k1, k2 = _key(c1), _key(c2)
+        if k1 == k2:
+            return c1
+        if k1 in k2:
+            return c2
+        if k2 in k1:
+            return c1
+        return c1 if len(c1) >= len(c2) else c2
     ca1, ca2 = a1.get('catalystActivity',{}) or {}, a2.get('catalystActivity',{}) or {}
     merged_ca = ca1 if sum(1 for v in ca1.values() if v) >= sum(1 for v in ca2.values() if v) else ca2
     # keep every distinct summation text for now; consolidate_sections() folds them
@@ -201,7 +253,7 @@ def merge_two(e1, e2):
         'output': union(a1.get('output',[]), a2.get('output',[])),
         'catalystActivity': merged_ca,
         'regulatedBy': union_regs(a1.get('regulatedBy'), a2.get('regulatedBy')),
-        'compartment': a1.get('compartment') or a2.get('compartment'),
+        'compartment': pick_compartment(a1.get('compartment'), a2.get('compartment')),
         'condition': a1.get('condition') or a2.get('condition'),
         'summation': summ,
         'relationships': union(a1.get('relationships',[]), a2.get('relationships',[])),
@@ -209,7 +261,12 @@ def merge_two(e1, e2):
         'evidence': union(a1.get('evidence',[]), a2.get('evidence',[])),
         'confidence': round(((a1.get('confidence') or 0)+(a2.get('confidence') or 0))/2, 3),
         'merged_names': sorted(set(names1 + names2)),   # full cluster membership
+        # which neighbouring chunks the variants had to consult — "none" only survives
+        # if no variant looked outside its own chunk
+        'context_used': union(_as_list(a1.get('context_used')), _as_list(a2.get('context_used'))),
     }
+    if len(merged['context_used']) > 1:
+        merged['context_used'] = [c for c in merged['context_used'] if c != 'none']
     return {'source': e1['source'], 'annotation_result': merged}
 
 # _key() only collapses cosmetic duplicates. Wording-level duplicates survive it
@@ -218,6 +275,31 @@ def merge_two(e1, e2):
 # cluster reduces every subsection to a single non-repeating section. Field shapes are
 # unchanged — summation stays a list, just with one consolidated entry.
 consolidate_failures = []
+
+def normalize_summation(a):
+    """Coerce summation to ONE section shaped like extraction emits it — a dict — so no
+    consumer has to branch on dict-vs-list (labeled_docx_comments.py reads .get('text')
+    straight off it). merge_two() accumulates the cluster's distinct texts in a list and
+    consolidate_sections() normally reduces them to one; this is the single choke point
+    before writing, so it also covers a consolidation that failed or never ran, joining
+    whatever texts remain instead of leaving a list on disk. Nothing is dropped."""
+    s = a.get('summation')
+    if not s or isinstance(s, dict):
+        return a                          # already the target shape
+    texts, refs = [], []
+    for x in _as_list(s):
+        if isinstance(x, dict):
+            t = (x.get('text') or '').strip()
+            if t and t not in texts:
+                texts.append(t)
+            for r in x.get('literatureReference') or []:
+                if r not in refs:
+                    refs.append(r)
+        elif isinstance(x, str) and x.strip() and x.strip() not in texts:
+            texts.append(x.strip())
+    a['summation'] = {'text': ' '.join(texts), 'literatureReference': refs}
+    return a
+
 
 def consolidate_sections(a):
     """Collapse wording-level duplicates within one merged reaction's subsections.
@@ -262,6 +344,7 @@ Return ONLY JSON with exactly these keys:
         try:
             msg = client.messages.create(model=MODEL_NAME, max_tokens=8000,
                                          messages=[{'role': 'user', 'content': prompt}])
+            track_usage(msg)
             txt = next((b.text for b in msg.content if getattr(b, 'type', None) == 'text'), '')
             txt = txt.strip().replace('```json', '').replace('```', '').strip()
             if not txt:
@@ -315,7 +398,8 @@ def judge(pair):
     same = reactions_are_duplicate(unique[i]['annotation_result'], unique[j]['annotation_result'])
     done[0] += 1
     if done[0] % 100 == 0:
-        print(f"  judged ~{done[0]}/{len(pairs)} pairs | {time.time()-t0:.0f}s", flush=True)
+        print(f"  judged ~{done[0]}/{len(pairs)} pairs | {time.time()-t0:.0f}s "
+              f"| {usage_line()}", flush=True)
     return (i, j, same)
 
 with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
@@ -378,10 +462,15 @@ if to_fix:
         for (name, detail), count in Counter(consolidate_failures).most_common():
             print(f"         {count}x {name}: {detail}", flush=True)
 
+# 4) one summation section per reaction, uniformly shaped, whatever happened above
+for e in merged_results:
+    normalize_summation(e['annotation_result'])
+
 with open(OUT, 'w') as f:
     json.dump(merged_results, f, indent=2)
 
 print(f"[done] {n} -> {len(merged_results)} reactions | {len(pairs)} pairs judged | {time.time()-t0:.0f}s", flush=True)
+print(f"[usage] {usage_line()}", flush=True)
 print("[done] merged reactions:", flush=True)
 for i, e in enumerate(merged_results, 1):
     a = e['annotation_result']
