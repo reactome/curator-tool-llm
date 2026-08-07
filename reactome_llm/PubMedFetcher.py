@@ -80,6 +80,64 @@ def resolve_pmcids(pmids):
     return out
 
 
+# Why a PMID can fail this check, as reasons downstream code can branch on.
+MISS_NOT_A_PMID = 'not-a-pmid'      # malformed input, never sent to NCBI
+MISS_NO_PMCID = 'no-pmcid'          # real PMID, but PMC has no full text for it
+
+
+def triage_pmids(pmids, verbose=True):
+    """Split a batch of PMIDs into those PMC can serve full text for, and misses.
+
+    Built for the handoff from the literature-retrieval agent: it hands over a
+    small set of PMIDs, and only the ones with a PMCID can enter the full-text
+    pipeline, since that pipeline reads JATS XML fetched by PMCID.
+
+    Returns:
+      {'hits':   {pmid: pmcid},        # ready for load_source()
+       'misses': {pmid: reason},       # MISS_NOT_A_PMID | MISS_NO_PMCID
+       'order':  [pmid, ...]}          # input order, deduped
+
+    One ID Converter request covers the whole batch, so this is cheaper than
+    letting load_source() resolve each PMID separately.
+
+    A miss means only that PMC has no full text — the article may still be
+    perfectly good, just paywalled or deposited late. Those are the papers the
+    planned PDF-upload route is for, so keep the reason with the PMID rather than
+    dropping it. Note a PMCID here is necessary but not sufficient: PMC sometimes
+    serves metadata with no <body>, which load_source() only discovers on fetch.
+    """
+    order, seen = [], set()
+    for p in pmids:
+        p = str(p).strip()
+        if p and p not in seen:
+            seen.add(p); order.append(p)
+
+    hits, misses, to_resolve = {}, {}, []
+    for p in order:
+        if is_pmcid(p):
+            hits[p] = p.upper()          # already a PMCID — nothing to resolve
+        elif is_pmid(p):
+            to_resolve.append(p)
+        else:
+            misses[p] = MISS_NOT_A_PMID
+
+    if to_resolve:
+        for pmid, pmcid in resolve_pmcids(to_resolve).items():
+            if pmcid:
+                hits[pmid] = pmcid
+            else:
+                misses[pmid] = MISS_NO_PMCID
+
+    if verbose:
+        print(f"[triage] {len(hits)}/{len(order)} PMID(s) have PMC full text", flush=True)
+        for p in order:
+            if p in hits:
+                print(f"    hit   {p} -> {hits[p]}", flush=True)
+            else:
+                print(f"    MISS  {p} ({misses[p]})", flush=True)
+    return {'hits': hits, 'misses': misses, 'order': order}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PMCID -> JATS XML
 # ─────────────────────────────────────────────────────────────────────────────
@@ -222,26 +280,78 @@ def is_pmcid(spec):
     return bool(re.fullmatch(r'PMC\d+', str(spec).strip(), re.I))
 
 
-def load_source(spec, client=None, model=None):
+def unwrap_pdf_text(text):
+    """Undo a PDF's hard line wrapping.
+
+    fitz reports one newline per rendered LINE, so words arrive split across lines
+    ("mitochon-\\ndria") and sentences are broken mid-way. Left alone, those breaks
+    reach the chunker (which splits on '\\n'), and the model — told to quote evidence
+    VERBATIM — copies them into every excerpt.
+
+    Line-end hyphens are ambiguous: typographic wraps must be closed up, but real
+    compound hyphens must survive. A hyphen between two lowercase letters is treated
+    as a wrap ("translo-\\ncate" -> "translocate"); anything involving a capital or a
+    digit keeps its hyphen ("PINK1-\\ndependent" -> "PINK1-dependent"), which protects
+    entity names and chemical names. The residual cost is a genuine lowercase compound
+    that happens to wrap at its hyphen ("phospho-\\nubiquitin" -> "phosphoubiquitin").
+
+    Blank lines are preserved so paragraph structure still guides the chunker.
+    """
+    text = re.sub(r'([a-z])-\n([a-z])', r'\1\2', text)   # typographic wrap: close up
+    text = re.sub(r'-\n', '-', text)                     # real compound: keep hyphen
+    text = re.sub(r'(?<!\n)\n(?!\n)', ' ', text)         # unwrap, keep paragraph breaks
+    return re.sub(r'[ \t]{2,}', ' ', text)
+
+
+def flatten_jats_text(text):
+    """Join JATS paragraphs into continuous prose, for the XML path only.
+
+    _text_of() emits '\\n\\n' after every block element and sections are joined the
+    same way, so the Results section arrives with hard paragraph boundaries.
+    RecursiveCharacterTextSplitter uses the FIRST separator that matches — '\\n\\n' —
+    and can only merge adjacent pieces while they stay under the size limit. Two
+    800-char paragraphs sum past it and never combine, so chunks track the author's
+    paragraph lengths, and a short paragraph or lone sentence becomes a tiny chunk
+    (PMC4003245 produced 3-token and 35-token chunks this way).
+
+    Flattening the newlines makes the splitter fall through to '. ' instead, packing
+    sentences up to the full ~300-token budget. Paragraph structure is not otherwise
+    meaningful to the extraction, which reads a chunk as prose.
+    """
+    text = re.sub(r'\s*\n\s*', ' ', text)
+    return re.sub(r'[ \t]{2,}', ' ', text).strip()
+
+
+def load_source(spec, client=None, model=None, pmcid=None, unwrap_pdf=False):
     """Load one paper from a PMID, a PMCID, or a local PDF filename.
 
     Returns (source_id, results_text, how). Raises ValueError when the paper has
     no reachable full text or no Results section, which callers treat as a skip.
+
+    pmcid: a PMCID already resolved for this PMID (e.g. by triage_pmids), which
+    skips the redundant ID Converter lookup. Ignored for a local PDF.
+
+    unwrap_pdf: opt in to undoing a PDF's hard line wrapping (see unwrap_pdf_text).
+    OFF by default so the PDF path stays byte-identical to earlier runs and remains
+    comparable with results already produced from it. The XML path needs no
+    equivalent — JATS has no line wrapping — but it IS flattened, see
+    flatten_jats_text.
     """
     spec = str(spec).strip()
 
     if is_pmid(spec) or is_pmcid(spec):
         if is_pmid(spec):
-            pmcid = resolve_pmcids([spec]).get(spec)
+            pmcid = pmcid or resolve_pmcids([spec]).get(spec)
             if not pmcid:
                 raise ValueError(f'PMID {spec} has no PMCID — not in PubMed Central')
             source_id = f'PMID:{spec}'
         else:
-            pmcid = spec.upper()
+            pmcid = (pmcid or spec).upper()
             source_id = pmcid
         xml = fetch_jats(pmcid)
         text, how = results_from_jats(xml, client=client, model=model)
-        return source_id, text, how
+        # flatten AFTER section detection, which uses the element/line structure
+        return source_id, flatten_jats_text(text), how
 
     # Local PDF — unchanged from the original pipeline.
     import fitz
@@ -254,7 +364,9 @@ def load_source(spec, client=None, model=None):
     sys.path.insert(0, os.path.join(PROJECT_ROOT, 'reactome_llm'))
     from FullTextPDFSections import extract_results_section
     text, how = extract_results_section(full_text, client=client, model=model)
-    return os.path.basename(path), text, how
+    # PDF path is gated OFF by default: unchanged from earlier runs unless asked.
+    # Unwrap after section detection, which relies on the original line structure.
+    return os.path.basename(path), (unwrap_pdf_text(text) if unwrap_pdf else text), how
 
 
 def output_stem(spec, gene=None):
