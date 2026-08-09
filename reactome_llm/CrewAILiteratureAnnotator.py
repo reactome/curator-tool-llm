@@ -57,6 +57,10 @@ class AnnotationRequest:
     quality_threshold: float = 0.7
     enable_full_text: bool = True
     enable_literature_search: bool = False
+    # {pmid: filepath} of the curator's local full-text PDFs, built once by FullTextResolver
+    # and passed through so the resolver can prefer local files over downloading. None/empty
+    # means "no local folder" -> resolution falls straight through to PMC download.
+    fulltext_index: Optional[Dict[str, str]] = None
     enabled_phases: Optional[List[str]] = None
     enabled_agents: Optional[List[str]] = None
     enabled_tools: Optional[Dict[str, List[str]]] = None
@@ -225,6 +229,13 @@ class CrewAILiteratureAnnotator:
             # upfront retrieve+judge below). Reset per-run so a reused annotator can't return a
             # prior gene's papers if this run skips or fails retrieval.
             self.gene_annotator.judged_papers = {}
+            # Full-text resolution manifest {pmid: {source, path}} and the merged evidence the
+            # partner's extractor produced from it. Reset per-run so a reused annotator can't
+            # leak one gene's full-text into the next; the manifest is also published on the
+            # shared gene_annotator for reporting/inspection.
+            self.fulltext_manifest = {}
+            self._fulltext_evidence = None
+            self.gene_annotator.fulltext_manifest = {}
             # Resolve the gene's UniProt accession once, deterministically (Reactome graph,
             # then UniProt), so every phase uses the same verified identifier instead of each
             # agent recalling its own guess. Resolving here (not in an agent) is the fix for
@@ -331,6 +342,15 @@ class CrewAILiteratureAnnotator:
                         f"Upfront retrieve+judge failed for {request.gene}: {e}; "
                         f"Phase-1 tool will fall back to live cross-encoder retrieval")
 
+            # Full-text resolution (deterministic pre-Phase-1 step, mirroring retrieve+judge).
+            # Take the judge's selected PMIDs, resolve each to a local file (curator PDF or a
+            # downloaded/cached PMC XML) or mark it a miss, then -- if the partner's extractor
+            # module is present -- run extraction over the resolved files and stash the merged
+            # evidence for Phase 1 to fold in. Runs in a worker thread: both the resolver's NCBI
+            # calls and the extractor's LLM .invoke() block, and must stay off CrewAI's loop.
+            if request.enable_full_text:
+                await asyncio.to_thread(self._resolve_and_extract_fulltext, request)
+
             # Phase 1: Literature Extraction and Preprocessing
             extraction_context = await self._phase_1_literature_extraction(request)
 
@@ -393,6 +413,64 @@ class CrewAILiteratureAnnotator:
             logger.error(f"Multi-agent annotation failed for {request.gene}: {str(e)}")
             raise CrewAIAnnotationError(f"CrewAI annotation failed: {str(e)}")
     
+    def _resolve_and_extract_fulltext(self, request: AnnotationRequest) -> None:
+        """Resolve the judge's selected PMIDs to full-text files, then extract from them.
+
+        SYNCHRONOUS (runs via asyncio.to_thread). Two steps:
+          1. FullTextResolver.resolve_fulltext -> manifest {pmid: {source, path|miss}}. Prefers
+             the curator's local PDFs (request.fulltext_index); otherwise downloads/reuses a
+             cached PMC XML. Published on the shared gene_annotator for reporting.
+          2. If the partner's extractor module is importable, run it over every non-miss file and
+             merge the results into a single {interactions, pathways, functions} dict cached on
+             self._fulltext_evidence for Phase 1 to fold in. If the module is absent, this is a
+             no-op beyond building the manifest -- Phase 1 proceeds on abstracts alone.
+        """
+        import FullTextResolver
+
+        gene = request.gene
+        selected = (self.gene_annotator.judged_papers.get(gene) or {}).get("papers", [])
+        pmids = [str(p.get("pmid")) for p in selected if p.get("pmid")]
+        if not pmids:
+            return
+
+        try:
+            manifest = FullTextResolver.resolve_fulltext(
+                pmids, request.fulltext_index or {}, gene=gene)
+        except Exception as e:
+            logger.warning(f"Full-text resolution failed for {gene}: {e}")
+            return
+        self.fulltext_manifest = manifest
+        self.gene_annotator.fulltext_manifest = {gene: manifest}
+
+        # Deterministic extraction via the partner's module, if it has been integrated.
+        try:
+            from fulltext_extractor import extract_fulltext
+        except Exception:
+            logger.info(
+                "Partner full-text extractor (fulltext_extractor.extract_fulltext) not present; "
+                "manifest built but no deterministic extraction run.")
+            return
+
+        model = self.gene_annotator.get_default_llm()
+        merged = {"interactions": [], "pathways": [], "functions": []}
+        n_ok = 0
+        for pmid, entry in manifest.items():
+            if entry.get("source") == "miss":
+                continue
+            try:
+                out = extract_fulltext(entry["path"], entry["source"], gene, model=model) or {}
+                for key in merged:
+                    merged[key].extend(out.get(key, []))
+                n_ok += 1
+            except Exception as e:
+                logger.warning(f"Full-text extraction failed for PMID {pmid} ({entry}): {e}")
+        if any(merged.values()):
+            self._fulltext_evidence = merged
+        logger.info(
+            f"Full-text extraction for {gene}: {n_ok} paper(s) parsed -> "
+            f"{len(merged['interactions'])} interactions, {len(merged['pathways'])} pathways, "
+            f"{len(merged['functions'])} functions.")
+
     # Size of the cross-encoder candidate pool the LLM curator-judge chooses the final papers from,
     # and the rubric floor below which a candidate is dropped (1-2 = "not usable for a specific
     # annotation"; 3+ = at least weak background). See CuratorRubric.judge_select.
@@ -459,7 +537,8 @@ class CrewAILiteratureAnnotator:
             max_papers=request.max_papers,
             enable_full_text=request.enable_full_text,
             enable_literature_search=request.enable_literature_search,
-            accession=self.resolved_accession
+            accession=self.resolved_accession,
+            prefetched_fulltext=getattr(self, "_fulltext_evidence", None),
         )
         # Full-text disabled -> also drop the fulltext_analysis tool so the extractor can't waste
         # ReAct turns calling it (with no local PDFs every call just returns "skipped"). Mirrors the

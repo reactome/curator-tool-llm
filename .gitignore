@@ -13,3 +13,8 @@ __pycache__/
 results/
 mongo_ingest.out
 *.out
+
+# Full-text resolver: local user config, index cache, and downloaded PMC XML cache
+data/user_config.json
+data/.indexdoc_cache.json
+data/fulltext_cache/

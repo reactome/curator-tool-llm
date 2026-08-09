@@ -43,7 +43,8 @@ class ReactomeTasks:
                                         max_papers: int = 8,
                                         enable_full_text: bool = False,
                                         enable_literature_search: bool = False,
-                                        accession: Optional[str] = None) -> Task:
+                                        accession: Optional[str] = None,
+                                        prefetched_fulltext: Optional[Dict[str, Any]] = None) -> Task:
         """
         Create a task for the Literature Extractor agent.
         
@@ -69,6 +70,21 @@ class ReactomeTasks:
             f"{accession}. Whenever you record a UniProt identifier for {tool_gene}, use this exact value; "
             f"do not infer, recall, or guess a different accession.\n"
             if accession else ""
+        )
+
+        # When full text has already been parsed for this gene by the external extractor, its
+        # structured evidence is injected here as authoritative input. The agent must fold it into
+        # its output and NOT call `fulltext_analysis` (that path is being retired). Empty/absent ->
+        # no directive, so behaviour is unchanged for runs without a full-text extractor.
+        has_prefetched = bool(prefetched_fulltext and any(prefetched_fulltext.values()))
+        prefetched_directive = (
+            "\n        **PRE-EXTRACTED FULL-TEXT EVIDENCE (authoritative — use directly):** Full-text "
+            f"analysis for {tool_gene} has ALREADY been performed by an external extractor. Do NOT call "
+            "`fulltext_analysis`. Treat the JSON below as verified full-text evidence and MERGE it with any "
+            "abstract-derived evidence into your structured output, de-duplicating by (partner/pathway/function "
+            "+ pmid). Preserve each item's `pmid` and `evidence_strength_score`.\n        ```json\n"
+            f"{json.dumps(prefetched_fulltext, indent=2, default=str)}\n        ```\n"
+            if has_prefetched else ""
         )
 
         if enable_literature_search and query_gene:
@@ -137,6 +153,7 @@ class ReactomeTasks:
         - Experimental evidence and confidence levels
         
         {accession_directive}
+        {prefetched_directive}
         **Output Requirements:**
         Provide a structured JSON output with the following format:
         ```json
