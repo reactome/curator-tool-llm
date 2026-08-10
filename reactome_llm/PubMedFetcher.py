@@ -370,7 +370,7 @@ def load_source(spec, client=None, model=None, pmcid=None, unwrap_pdf=False):
 
 
 def output_stem(spec, gene=None):
-    """Filename stem for results/<stem>_2prev1next_extraction.json.
+    """Filename stem for results/<stem>_extraction.json.
 
     Gene-prefixed when known, so downstream scoring can recover the gene from
     the filename the way it does for PDFs (PINK1.pdf -> PINK1).
@@ -381,4 +381,7 @@ def output_stem(spec, gene=None):
     else:
         base = os.path.splitext(os.path.basename(spec))[0]
     base = base.lower()
-    return f'{gene.lower()}_{base}' if gene else base
+    g = (gene or '').strip().lower()
+    if not g or base == g or base.startswith(f'{g}_'):
+        return base
+    return f'{g}_{base}'

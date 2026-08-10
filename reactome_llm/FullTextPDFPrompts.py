@@ -34,7 +34,10 @@ def build_extraction_prompt(current_chunk, prev_contexts=None, next_context=None
       - input            : PhysicalEntity list — reactants/substrates consumed
       - output           : PhysicalEntity list — products produced
       - catalystActivity : enzyme + GO molecular function
-      - regulatedBy      : positiveRegulation / negativeRegulation / requirement
+      - regulatedBy      : positiveRegulation / negativeRegulation / requirement, each entry
+                           carrying an optional `note` — a FLAG FOR A CURATOR naming the
+                           experimental condition that direction was observed under, set only
+                           when the regulator's effect is condition-dependent
       - compartment      : cellular location
       - condition        : general biological condition/state (coarse; groups reactions)
       - summation        : Summation instance {text, literatureReference}
@@ -109,6 +112,33 @@ When a mutant, knockout, inhibitor, or negative result establishes that a factor
 (or regulates) a real reaction, record it as a `regulatedBy` entry ON that reaction — NOT as its
 own separate reaction.
 
+CATALYST vs REGULATOR — assign an entity as the "catalyst" ONLY when the evidence shows it
+DIRECTLY PERFORMS the reaction: it is the enzyme carrying out the chemistry on the substrate.
+An entity that FACILITATES, PROMOTES, ENHANCES, ENABLES, or IS REQUIRED FOR a reaction is a
+REGULATOR, not automatically a catalyst — put it in "regulatedBy" and leave "catalyst" null.
+  - "X was identified to facilitate Y" makes X a positiveRegulation regulator OF Y, not the
+    catalyst of Y, and not a reaction of its own.
+  - Never infer a catalyst from association, correlation, or a screen hit. If no entity in the
+    evidence is explicitly shown performing the reaction, "catalyst" is null.
+  - Many events have no catalyst at all — transport, translocation, binding, dissociation, and
+    conformational change are usually uncatalyzed. Null is the correct answer there, not a
+    slot to fill with whichever protein is nearby.
+
+CONDITION-DEPENDENT REGULATION — the "note" field on a regulatedBy entry is a FLAG FOR A HUMAN
+CURATOR. The same regulator can act in OPPOSITE directions depending on the experimental
+condition: a factor that activates a reaction in depolarized mitochondria may be inhibitory or
+dispensable in the basal state. That is real biology, not a contradiction — but a curator must
+see it, because once records from different experiments are pooled the two directions look like
+conflicting data.
+  - Set "note" when the paper shows, or the excerpt you are citing makes clear, that THIS
+    regulatory direction holds only under a particular condition. Name that condition in the
+    note, in the paper's own terms (e.g. "positive only after CCCP-induced depolarization").
+  - Leave "note" null when the regulation is unconditional, or when the paper gives you no
+    basis for calling it condition-dependent. Do NOT speculate about a condition, and do NOT
+    use the note for anything other than this flag.
+  - The note does not replace the "condition" field: "condition" is the coarse reusable
+    category for the WHOLE reaction, the note is specific to ONE regulator's direction.
+
 FOCUS — this is the most important instruction:
   - Extract reactions ONLY from the CURRENT CHUNK section (the last section below).
   - Do NOT extract, repeat, or re-describe any reaction that appears only in a CONTEXT
@@ -159,8 +189,7 @@ mid-paragraph, so the passage supporting a reaction is often split across two ch
 always see the whole passage from the EARLIER side of a cut, because CONTEXT C gives you the
 next chunk's raw text. So a split passage is handled from the earlier chunk, never patched
 together from the later one:
-  - NEVER DROP AN EXCERPT BECAUSE IT IS CUT OFF. A sentence that runs past the end of the
-    CURRENT CHUNK is not unusable evidence — it is evidence you must finish reading. LOOK
+  - NEVER DROP AN EXCERPT BECAUSE IT IS CUT OFF. LOOK
     FORWARD into CONTEXT C, find where the sentence continues, and cite the completed
     passage. Then record "next_chunk" in "context_used". Silently omitting a cut excerpt
     loses the citation for that reaction, which is worse than any imperfection in the quote.
@@ -215,13 +244,14 @@ Return ONLY a JSON object, no markdown:
       "input": ["<PhysicalEntity consumed — reactant or substrate>"],
       "output": ["<PhysicalEntity produced — product>"],
       "catalystActivity": {{
-        "catalyst": "<enzyme or catalyst, or null>",
+        "catalyst": "<the enzyme that DIRECTLY performs this reaction, or null — an entity that merely facilitates, promotes, enables or is required for it is a regulator, not a catalyst>",
         "molecularFunction": "<GO molecular function term if known, or null>"
       }},
       "regulatedBy": [
         {{
           "regulationType": "<positiveRegulation | negativeRegulation | requirement>",
-          "regulator": "<gene, protein, or small molecule>"
+          "regulator": "<gene, protein, or small molecule>",
+          "note": "<null, OR a curator flag when this regulator's effect is condition-dependent — name the experimental condition THIS direction was observed under>"
         }}
       ],
       "compartment": "<cellular compartment, or null>",

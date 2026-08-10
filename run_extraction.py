@@ -16,7 +16,7 @@ Usage:
   python run_extraction.py --pmid-file pmids.txt --gene PINK1
   python run_extraction.py PINK1.pdf --tag v2           # separate file, keeps the old one
 
-Writes results/<stem>_2prev1next[_<tag>]_extraction.json per paper (incremental, per
+Writes results/<stem>[_<tag>]_extraction.json per paper (incremental, per
 chunk). Refuses to overwrite an existing extraction unless --overwrite is given.
 """
 import os, sys, json, time, glob, argparse, importlib.util
@@ -38,7 +38,7 @@ PAPERS_DIR = os.path.join(PROJECT_ROOT, 'data', 'papers')
 RESULTS_DIR = os.path.join(PROJECT_ROOT, 'results')
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
-client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
+client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'), timeout=120.0)
 MODEL_NAME = 'claude-sonnet-5'
 PREV_WINDOW = 2   # previous chunks' reaction-notes kept as backward context
 
@@ -145,7 +145,7 @@ def extract_paper(paper, gene=None, tag=None, overwrite=False, pmcid=None):
     # gene is only a filename label — a PMID stem carries no gene on its own.
     stem = fetcher.output_stem(paper, gene=gene)
     # --tag keeps a re-run in its own file so two extractions can be compared
-    label = f'{stem}_2prev1next' + (f'_{tag}' if tag else '')
+    label = f'{stem}' + (f'_{tag}' if tag else '')
     out = os.path.join(RESULTS_DIR, f'{label}_extraction.json')
     if os.path.exists(out) and not overwrite:
         raise FileExistsError(f'{out} exists — pass --tag <name> to write a separate '
@@ -173,7 +173,7 @@ if __name__ == '__main__':
     ap.add_argument('--gene', help='gene label for output filenames (PMIDs carry no gene)')
     ap.add_argument('--pmid-file', help='file with one PMID per line; blank lines and # comments ignored')
     ap.add_argument('--tag', help='suffix for the output filename, e.g. --tag v2 -> '
-                                 'results/<stem>_2prev1next_v2_extraction.json (keeps a re-run '
+                                 'results/<stem>_v2_extraction.json (keeps a re-run '
                                  'separate from an earlier extraction)')
     ap.add_argument('--overwrite', action='store_true',
                     help='allow replacing an existing extraction file (refused by default)')

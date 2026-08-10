@@ -1,7 +1,7 @@
 #!/bin/bash
 # Full-pipeline test: PMCID -> PubMedFetcher (JATS) -> extraction -> merge.
 #
-# Writes results/<stem>_2prev1next_fulltest_<MMDD_HHMMSS>_{extraction,merged}.json — the
+# Writes results/<stem>_fulltest_<MMDD_HHMMSS>_{extraction,merged}.json — the
 # run-stamped tag keeps this run from touching any existing result file, so earlier runs
 # stay around to compare against, and run_extraction.py never has to refuse an overwrite.
 #
@@ -21,7 +21,7 @@ TAG="${TAG:-fulltest_$(date '+%m%d_%H%M%S')}"
 # wrong and the count below misses the file stage 1 just wrote.
 STEM="$(echo "$ID" | tr '[:upper:]' '[:lower:]')"
 [[ "$ID" =~ ^[0-9]{4,9}$ ]] && STEM="pmid${STEM}"
-EXTRACTION="results/${STEM}_2prev1next_${TAG}_extraction.json"
+EXTRACTION="results/${STEM}_${TAG}_extraction.json"
 # Stamped like the result files, so a run's log survives the next run — it carries the
 # per-stage token totals, which is what makes two runs comparable.
 LOG="results/${TAG}_pipeline.log"

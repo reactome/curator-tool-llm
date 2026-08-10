@@ -4,8 +4,8 @@ identical reactions (union-find, exhaustive pairwise). Saves merged set.
 
 Usage:
     python run_merge.py                                     # defaults to PINK1
-    python run_merge.py znfx1                               # gene prefix -> results/znfx1_2prev1next_extraction.json
-    python run_merge.py results/znfx1_2prev1next_extraction.json   # explicit input path
+    python run_merge.py znfx1                               # gene prefix -> results/znfx1_extraction.json
+    python run_merge.py results/znfx1_extraction.json   # explicit input path
     python run_merge.py znfx1 --out results/znfx1_custom_merged.json
 """
 import os, sys, json, re, time, argparse
@@ -51,8 +51,8 @@ def resolve_paths(target, out=None):
     if target.endswith('.json') or os.path.isfile(cand):
         in_path = cand
     else:
-        # treat as a gene prefix, e.g. "znfx1" -> results/znfx1_2prev1next_extraction.json
-        in_path = os.path.join(results_dir, f'{target.lower()}_2prev1next_extraction.json')
+        # treat as a gene prefix, e.g. "znfx1" -> results/znfx1_extraction.json
+        in_path = os.path.join(results_dir, f'{target.lower()}_extraction.json')
     if out:
         out_path = out if os.path.isabs(out) else os.path.join(PROJECT_ROOT, out)
     elif '_extraction' in in_path:
@@ -100,7 +100,12 @@ for i, e in enumerate(unique, 1):
 def _reaction_brief(a):
     ca = a.get('catalystActivity') or {}
     regs = a.get('regulatedBy') or []
-    reg_str = ', '.join(f"{r.get('regulationType')} by {r.get('regulator')}" for r in regs) if regs else 'none'
+    # the note carries any condition-dependence flag already recorded, so the judge can use it
+    # instead of re-deriving why one regulator appears in two directions
+    reg_str = ', '.join(
+        f"{r.get('regulationType')} by {r.get('regulator')}"
+        + (f" [note: {r.get('note')}]" if r.get('note') else '')
+        for r in regs) if regs else 'none'
     return (f"name: {a.get('name','')}\n"
             f"type: {a.get('reactionType','')}\n"
             f"input: {', '.join(a.get('input',[]) or []) or 'none'}\n"
@@ -115,7 +120,17 @@ def _reaction_brief(a):
 # final count may under-merge. Reported at the end rather than lost in the log.
 failures = []
 
+def _conf(x):
+    """Judge confidence clamped to 0-1, or None when the model returned none/garbage."""
+    try:
+        return round(min(1.0, max(0.0, float(x))), 3)
+    except (TypeError, ValueError):
+        return None
+
+
 def reactions_are_duplicate(a1, a2):
+    """Return (is_duplicate, confidence). confidence is None when the judge gave no usable
+    number — including every failed verdict, which must not look like a confident 'no'."""
     prompt = f"""You are a Reactome biocurator deduplicating extracted reactions.
 Two records are DUPLICATES if they describe the SAME underlying biochemical event — the same
 molecular transformation of the same participants — EVEN IF they differ in:
@@ -126,8 +141,14 @@ They are DIFFERENT reactions — do NOT merge them — if ANY of the following d
   - the participants (input) or the products (output)
   - the catalyst
   - a different regulationType on the SAME regulator (one says positiveRegulation by X, the
-    other negativeRegulation by X) — that is a genuine contradiction, not extra detail
-  - the biological condition under which the reaction occurs
+    other negativeRegulation by X) — that is a genuine contradiction, not extra detail.
+    When the difference is due to conditional circumstances, such as a different experimental
+    condition, add a "note" on that regulation flagging it for the curator.
+  - the biological condition under which the reaction occurs — EXCEPT when the two records are
+    the SAME core transformation (same participants, same catalyst, same molecular action) and
+    the condition is the ONLY thing separating them. That is one reaction tested under two
+    conditions, not two reactions: merge it, keep BOTH regulatory directions, and flag each
+    with a "note" naming the condition it holds under.
   - the compartment, when the two are genuinely different locations (cytosol vs
     mitochondrion) — but NOT when one merely contains the other
   - the molecular action (e.g. phosphorylation vs ubiquitination)
@@ -159,8 +180,9 @@ Reaction B:
 {_reaction_brief(a2)}
 
 Answer with the "same" key FIRST so the verdict survives truncation.
-Keep "reason" under 15 words.
-Return ONLY JSON: {{"same": <true|false>, "reason": "<short phrase>"}}"""
+Keep "reason" under 15 words. "confidence" is how sure you are OF THIS VERDICT, 0-1: high when
+the two records plainly describe one event, low when you had to weigh a judgement call.
+Return ONLY JSON: {{"same": <true|false>, "confidence": <0-1>, "reason": "<short phrase>"}}"""
     for attempt in (1, 2):
         try:
             # no temperature: claude-sonnet-5 rejects it ("`temperature` is deprecated for this model")
@@ -174,12 +196,14 @@ Return ONLY JSON: {{"same": <true|false>, "reason": "<short phrase>"}}"""
             if not txt:
                 raise ValueError('no text block in response')
             try:
-                return bool(json.loads(txt).get('same', False))
+                got = json.loads(txt)
+                return bool(got.get('same', False)), _conf(got.get('confidence'))
             except json.JSONDecodeError:
                 # truncated or malformed JSON — the verdict is still readable
                 m = re.search(r'"same"\s*:\s*(true|false)', txt, re.I)
                 if m:
-                    return m.group(1).lower() == 'true'
+                    c = re.search(r'"confidence"\s*:\s*([0-9.]+)', txt)
+                    return m.group(1).lower() == 'true', _conf(c and c.group(1))
                 raise
         except Exception as ex:
             if attempt == 1:
@@ -191,7 +215,7 @@ Return ONLY JSON: {{"same": <true|false>, "reason": "<short phrase>"}}"""
                 print(f"    dup-judge FAILED after retry ({type(ex).__name__}: {ex}) -> NOT duplicate", flush=True)
             elif len(failures) == 4:
                 print("    (further dup-judge failures suppressed; totals reported at the end)", flush=True)
-            return False
+            return False, None
 
 def _key(x):
     """Dedup key: case-, punctuation- and whitespace-insensitive, so cosmetic
@@ -213,14 +237,22 @@ def merge_two(e1, e2):
         return out
     def union_regs(l1, l2):
         """One entry per distinct (regulationType, regulator): the same requirement
-        restated by every variant in the cluster is ONE regulation, not N."""
-        seen, out = set(), []
+        restated by every variant in the cluster is ONE regulation, not N. A duplicate
+        entry is dropped but its curator "note" is not — the flag survives on the entry
+        that is kept, so a condition-dependence flag cannot be lost to dedup."""
+        seen, out = {}, []
         for r in (l1 or []) + (l2 or []):
             if not isinstance(r, dict):
                 continue
             k = (_key(r.get('regulationType')), _key(r.get('regulator')))
-            if any(k) and k not in seen:
-                seen.add(k); out.append(r)
+            if not any(k):
+                continue
+            if k not in seen:
+                seen[k] = len(out); out.append(dict(r))   # copy: never mutate the input record
+                continue
+            kept, note = out[seen[k]], (r.get('note') or '').strip()
+            if note and _key(note) != _key(kept.get('note')):
+                kept['note'] = f"{kept['note']} {note}".strip() if kept.get('note') else note
         return out
     def pick_compartment(c1, c2):
         """Keep the MORE SPECIFIC compartment. The judge now treats a compartment and a
@@ -304,9 +336,11 @@ def normalize_summation(a):
 def consolidate_sections(a):
     """Collapse wording-level duplicates within one merged reaction's subsections.
     Returns a new annotation dict; returns `a` unchanged on any failure."""
+    # condition is read-only context (never returned): it tells the model the coarse category
+    # this cluster was observed under, which it needs to write a condition-dependence note
     payload = {k: a.get(k) for k in
                ('name', 'input', 'output', 'catalystActivity', 'regulatedBy',
-                'relationships', 'summation', 'evidence')}
+                'relationships', 'summation', 'evidence', 'condition')}
     prompt = f"""You are a Reactome biocurator cleaning up ONE reaction record that was
 assembled by merging several extractions of the same reaction. Because each extraction
 described the reaction in its own words, the subsections now repeat themselves.
@@ -318,6 +352,11 @@ Reduce each subsection to a single non-repeating section:
 - regulatedBy: one entry per distinct (regulationType, regulator). Collapse synonymous
   regulators ("UbS65A" = "UbS65A (phospho-null ubiquitin)"), keeping the more informative
   name. A different regulationType on the same regulator is a DIFFERENT entry — keep both.
+  When the same regulator appears in two directions and the evidence excerpts show the split
+  is due to conditional circumstances, such as a different experimental condition, set "note"
+  on each entry flagging that condition for the curator. Take the condition from the evidence
+  or the condition field — never invent one. Leave "note" null otherwise, and preserve any
+  note already present.
 - relationships: one line per distinct relation. Drop a line that is a less specific
   restatement of another ("PINK1 - positiveRegulation -> Parkin translocation" is subsumed
   by "PINK1 - positiveRegulation -> Parkin translocation to mitochondria"). Contradictory
@@ -338,7 +377,7 @@ Reaction record:
 {json.dumps(payload, indent=2)}
 
 Return ONLY JSON with exactly these keys:
-{{"input": [...], "output": [...], "regulatedBy": [{{"regulationType": "...", "regulator": "..."}}],
+{{"input": [...], "output": [...], "regulatedBy": [{{"regulationType": "...", "regulator": "...", "note": "<null, or a curator flag naming the condition this direction holds under>"}}],
   "relationships": [...], "evidence": [...], "summation": {{"text": "<single combined summary>"}}}}"""
     for attempt in (1, 2):
         try:
@@ -395,21 +434,22 @@ t0 = time.time(); done = [0]
 
 def judge(pair):
     i, j = pair
-    same = reactions_are_duplicate(unique[i]['annotation_result'], unique[j]['annotation_result'])
+    same, conf = reactions_are_duplicate(unique[i]['annotation_result'],
+                                         unique[j]['annotation_result'])
     done[0] += 1
     if done[0] % 100 == 0:
         print(f"  judged ~{done[0]}/{len(pairs)} pairs | {time.time()-t0:.0f}s "
               f"| {usage_line()}", flush=True)
-    return (i, j, same)
+    return (i, j, same, conf)
 
 with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
     verdicts = list(pool.map(judge, pairs))
 
 # apply the "same" verdicts to union-find AFTER all judgments (order-independent)
-for i, j, same in verdicts:
+for i, j, same, conf in verdicts:
     if same:
         print(
-            f"\nMERGED:\n"
+            f"\nMERGED (confidence {conf if conf is not None else '?'}):\n"
             f"  A: {unique[i]['annotation_result']['name']}\n"
             f"  B: {unique[j]['annotation_result']['name']}",
             flush=True
@@ -430,11 +470,30 @@ if failures:
 clusters = {}
 for i in range(n):
     clusters.setdefault(find(i), []).append(i)
+
+# merge_confidence answers "was this reaction correctly merged?", which is a different
+# question from the per-reaction "confidence" extraction self-assigns (that one is left
+# alone — cosine_similarity_score.py reads it as llm_confidence). A cluster is only as
+# sound as the shakiest verdict holding it together, so take the MINIMUM: a mean would let
+# three confident joins hide one bad one.
+cluster_confs = {}
+for i, j, same, conf in verdicts:
+    if same and conf is not None:
+        cluster_confs.setdefault(find(i), []).append(conf)
+
 merged_results = []
-for idxs in clusters.values():
+for root, idxs in clusters.items():
     cur = unique[idxs[0]]
     for k in idxs[1:]:
         cur = merge_two(cur, unique[k])
+    cs = cluster_confs.get(root)
+    # None rather than 1.0 for a reaction that never merged: there is no merge to be
+    # confident about, and that must stay distinguishable from "merged, but shakily"
+    cur['annotation_result']['merge_confidence'] = min(cs) if cs else None
+    # Unweighted mean of every variant's confidence.
+    vals = [unique[k]['annotation_result'].get('confidence') for k in idxs]
+    vals = [v for v in vals if isinstance(v, (int, float))]
+    cur['annotation_result']['confidence'] = round(sum(vals) / len(vals), 3) if vals else None
     merged_results.append(cur)
 
 # 3) consolidate subsections of every reaction that actually merged something —
