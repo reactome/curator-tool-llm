@@ -643,8 +643,8 @@ def get_reranking_target(gene: str, drop_generic: bool = True,
     description that mis-ranked pathway/mechanism-level ground-truth papers (final recall
     collapsed to ~1% vs 2.8% pool recall).
 
-    Returns a LIST of texts (one per pathway); the re-ranker scores each paper by its MAX
-    cosine similarity across them, so a paper relevant to ANY of the gene's pathways ranks
+    Returns a LIST of texts (one per pathway); the cross-encoder scores each paper by its MAX
+    relevance score across them, so a paper relevant to ANY of the gene's pathways ranks
     high (no concatenation, no embedder truncation).
 
     Has data   -> per pathway (generic-filtered, capped): the precomputed gene-SPECIFIC pathway

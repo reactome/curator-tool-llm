@@ -103,8 +103,8 @@ class LiteratureSearchTool(BaseTool):
         combined OR query lets broad pathway terms dominate relevance ranking and bury the
         gene-specific papers below the fetch cap; two searches each get their own ranking, so the
         gene-specific set is guaranteed into the pool. Stage 2: re-rank the merged pool against
-        pathway-level text (get_reranking_target, scored by MAX cosine over the gene's per-pathway
-        summaries) and keep the top max_papers -- this stops the re-ranker discarding the
+        pathway-level text (get_reranking_target, scored by MAX cross-encoder relevance over the
+        gene's per-pathway summaries) and keep the top max_papers -- this stops the re-ranker discarding the
         pathway/mechanism-level papers that dominate curator citations (raised final-recall
         retention from 36% to 54% on the validation set vs the old gene-specific description).
         """
