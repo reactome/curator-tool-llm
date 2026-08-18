@@ -180,13 +180,39 @@ opinion. Another AI read this paper's Results section in chunks and pulled react
 records out of it, then merged the ones it thought were duplicates. You are seeing the \
 same source text it saw and the records it produced.
 
-Give your honest subjective read. You are not filling in a scorecard and not rewriting \
-their work — you are saying whether you would trust this output, and where you would look \
-twice. Be direct about what is wrong and equally direct about what is fine; a review that \
-hedges on everything is useless.
+You are saying whether you would trust this output and where you would look twice. Be \
+direct about what is wrong and equally direct about what is fine.
 
 Judge against the source text only. Something the paper does not say is not supported, \
-however plausible it is from what you know about the biology.
+however plausible it is from what you know about the biology. Equally, do not fault a \
+record for something the paper does not say either — if the source is vague about a \
+compartment or a stoichiometry, a record that is vague in the same way is correct, not \
+incomplete.
+
+Be objective, not exacting. Every criticism must point at a specific record by number and \
+quote the text that contradicts it or the text it left out. If you cannot point at the \
+text, it is a preference, not a defect — either drop it or label it as a preference. Do \
+not invent a house style and grade against it: naming, wording, and level of detail are \
+only problems when they change what the record means.
+
+Calibrate to what this output is for. It is a STARTING POINT a curator will edit, not a \
+finished Reactome record. Judge it the way you would judge a competent junior curator's \
+first pass:
+- a real defect changes the biology: a participant the paper never names, a catalyst that \
+is really a regulator, a direction reversed, two distinct events fused, one event split in \
+two, a claim with no support in the source.
+- not a defect: imprecise-but-correct naming, a summation you would have phrased \
+differently, a missing detail the paper does not supply, a judgment call you would have \
+made the other way but that the text can support.
+
+Score on this scale, and use the middle of it — most competent output lands at 6-8:
+- 9-10: you would hand it to a curator as-is; nothing you found changes the biology.
+- 7-8: sound. Real biology, correctly merged, with small fixes a curator makes in minutes.
+- 5-6: usable but needs work — one or two records are wrong or a real event was missed.
+- 3-4: several records misrepresent the paper, or the merge is substantially wrong.
+- 0-2: faster to start over.
+Reserve scores below 5 for output with defects of the first kind above. A tidy, accurate \
+extraction does not lose points for being less thorough than you would have been.
 
 {CONVENTIONS}"""
 
@@ -207,20 +233,30 @@ Start with a single line, exactly:
 
 SCORE: <0-10>
 
-That is your overall confidence in this output as a starting point for curation, where 10 \
-means you would hand it to a curator as-is and 0 means it would be faster to start over. \
-Then, in markdown, for someone who will read it in two minutes:
+That is your overall confidence in this output as a starting point for curation, on the \
+scale you were given. Then, in markdown, for someone who will read it in two minutes.
+
+Show your work: every point you make gets one concrete example, named by record number \
+or chunk number and quoted. A general statement with no example attached is not useful to \
+a curator and should be cut. Give positive examples as well as negative ones — where the \
+output got something right, say which record and why it is right. A section with nothing \
+wrong in it should say so and show the best example, not manufacture a complaint.
 
 **Overall** — would you trust this? Two or three sentences.
 
 **Extraction** — did it catch the real biology in this paper? Call out anything it \
-invented or overstated, and anything real it walked past. Name the chunk.
+invented or overstated, and anything real it walked past, naming the chunk and quoting \
+the sentence. Then give one example of a record it got right, and say what makes it right \
+— the source sentence it rests on.
 
 **Merging** — did it fuse records that are genuinely the same event, and leave apart the \
-ones that differ? Flag anything wrongly merged or wrongly kept separate.
+ones that differ? Flag anything wrongly merged or wrongly kept separate, naming the \
+records. Also name one merge (or one deliberate non-merge) it called correctly.
 
-**Look twice at these** — the specific records you would check by hand first, and why. \
-Skip this heading entirely if there aren't any; do not pad it."""
+**Look twice at these** — the specific records you would check by hand first, and why, \
+each with the quote that raised the question. Only records where the biology may actually \
+be wrong — not records you would word differently. Skip this heading entirely if there \
+aren't any; do not pad it."""
 
 print(f"[review] asking {args.model} ({len(review_user):,} chars of context)...", flush=True)
 t0 = time.time()
