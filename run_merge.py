@@ -1,14 +1,30 @@
 """Exhaustive semantic merger for extracted reactions from any PDF.
-Dedups to unique signatures, prints them, then LLM-judge merges semantically
-identical reactions (union-find, exhaustive pairwise). Saves merged set.
+
+Four stages, so that no single judgement can silently destroy a reaction:
+
+  1) pairwise candidate generation — dedup to unique signatures, then LLM-judge every
+     same-source pair. Produces same/different edges, saved alongside the output.
+  2) conflict-aware clustering — a cluster may contain NO pair judged different, i.e.
+     every cluster is a clique in the "same" graph. Transitive closure over the same
+     edges would merge A with C on the strength of A~B and B~C even when A-vs-C was
+     judged different; on ZNFX1 that collapsed three distinct mechanistic steps into
+     one 11-variant reaction.
+  3) cluster-level validation — the pairwise judge only ever sees two records, so it cannot
+     see that a cluster spans successive steps of one mechanism, or that a regulatory
+     statement got folded into the reaction it regulates. Each cluster at or above
+     --validate-min-size is shown to the judge WHOLE and asked the Reactome-specific
+     question: is this one reaction? The stage may only SPLIT a cluster, never join.
+  4) subsection consolidation — fold a surviving cluster's repeated wording into one
+     non-repeating record per reaction.
 
 Usage:
     python run_merge.py                                     # defaults to PINK1
     python run_merge.py znfx1                               # gene prefix -> results/znfx1_extraction.json
     python run_merge.py results/znfx1_extraction.json   # explicit input path
     python run_merge.py znfx1 --out results/znfx1_custom_merged.json
+    python run_merge.py znfx1 --no-validate                 # skip stage 3
 """
-import os, sys, json, re, time, argparse
+import os, sys, json, re, time, argparse, itertools
 from concurrent.futures import ThreadPoolExecutor
 PROJECT_ROOT = os.path.expanduser('~/curator-tool-llm')
 from dotenv import load_dotenv
@@ -67,6 +83,16 @@ parser = argparse.ArgumentParser(description='Semantically merge extracted react
 parser.add_argument('target', nargs='?', default='pink1',
                     help='gene prefix (e.g. znfx1) or path to an *_extraction.json file (default: pink1)')
 parser.add_argument('--out', help='output path (default: input with _extraction -> _merged)')
+parser.add_argument('--validate-min-size', type=int, default=3,
+                    help='run stage-3 cluster validation on clusters of at least this many '
+                         'variants; a 2-variant cluster rests on one direct verdict and has no '
+                         'transitivity to check (default: 3)')
+parser.add_argument('--no-validate', action='store_true',
+                    help='skip stage-3 cluster-level validation')
+parser.add_argument('--revote-below', type=float, default=0.9,
+                    help='re-judge any pair whose verdict came back below this confidence two '
+                         'more times and take the majority of the three; without it one '
+                         'unstable verdict vetoes a whole group (default: 0.9, 0 disables)')
 args = parser.parse_args()
 
 IN, OUT = resolve_paths(args.target, args.out)
@@ -139,7 +165,10 @@ molecular transformation of the same participants — EVEN IF they differ in:
   - reactionType label (e.g. one tagged "blackBoxEvent", the other "transition")
 They are DIFFERENT reactions — do NOT merge them — if ANY of the following differs:
   - the participants (input) or the products (output)
-  - the catalyst
+  - the catalyst, A catalyst is the entity whose activity
+    performs the input-to-output conversion; an entity that acts upstream, or that modulates
+    whether or how fast the event happens, is REGULATION, not a catalyst — so a record naming
+    X as catalyst and one naming X only as a regulator do not agree on the catalyst either.
   - a different regulationType on the SAME regulator (one says positiveRegulation by X, the
     other negativeRegulation by X) — that is a genuine contradiction, not extra detail.
     When the difference is due to conditional circumstances, such as a different experimental
@@ -154,8 +183,7 @@ They are DIFFERENT reactions — do NOT merge them — if ANY of the following d
   - the molecular action (e.g. phosphorylation vs ubiquitination)
 They are also DIFFERENT if they merely share one participant.
 
-A field that is "none" in one record and filled in the other is MISSING DATA, not a
-difference — ignore it when comparing. Likewise these are the SAME, not different:
+Likewise these are the SAME, not different:
   - a domain or subunit vs its parent protein as catalyst (e.g. "ZNFX1 RZ domain" = "ZNFX1")
   - one record listing an accessory cofactor (E1/E2 enzyme, ATP, ubiquitin) the other omits
   - a compartment vs a sub-compartment of it ("mitochondrial outer membrane" = "mitochondrion")
@@ -171,7 +199,7 @@ difference — ignore it when comparing. Likewise these are the SAME, not differ
 Judge the CORE transformation: which entity acts on which, and what change it undergoes.
 
 When in doubt, do NOT merge. Two records left separate can still be merged by a curator
-later; two distinct reactions merged together destroy one of them irrecoverably.
+later; a merge that should not have happened is harder to undo.
 
 Reaction A:
 {_reaction_brief(a1)}
@@ -186,7 +214,11 @@ Return ONLY JSON: {{"same": <true|false>, "confidence": <0-1>, "reason": "<short
     for attempt in (1, 2):
         try:
             # no temperature: claude-sonnet-5 rejects it ("`temperature` is deprecated for this model")
-            msg = client.messages.create(model=MODEL_NAME, max_tokens=1000,
+            # max_tokens covers THINKING plus the answer, and thinking is bounded by it rather
+            # than by a budget of its own, so too low a ceiling gets spent entirely on thinking
+            # and the reply comes back with no text block at all. 1000 was enough for all 990
+            # ZNFX1 pairs, but a hard pair would silently return "not duplicate", so leave room.
+            msg = client.messages.create(model=MODEL_NAME, max_tokens=4000,
                                          messages=[{'role': 'user', 'content': prompt}])
             # Skip thinking/other blocks; take the first text block. With extended
             # thinking on, content[0] is a ThinkingBlock (no .text) and would crash.
@@ -194,7 +226,7 @@ Return ONLY JSON: {{"same": <true|false>, "confidence": <0-1>, "reason": "<short
             txt = next((b.text for b in msg.content if getattr(b, 'type', None) == 'text'), '')
             txt = txt.strip().replace('```json','').replace('```','').strip()
             if not txt:
-                raise ValueError('no text block in response')
+                raise ValueError(f'no text block in response (stop_reason={msg.stop_reason})')
             try:
                 got = json.loads(txt)
                 return bool(got.get('same', False)), _conf(got.get('confidence'))
@@ -270,6 +302,13 @@ def merge_two(e1, e2):
         return c1 if len(c1) >= len(c2) else c2
     ca1, ca2 = a1.get('catalystActivity',{}) or {}, a2.get('catalystActivity',{}) or {}
     merged_ca = ca1 if sum(1 for v in ca1.values() if v) >= sum(1 for v in ca2.values() if v) else ca2
+    # When only one record recorded a catalyst, keeping it silently asserts it for both. Name the
+    # variant it came from instead. Copy: the source record is reused by the rest of the fold.
+    other = ca2 if merged_ca is ca1 else ca1
+    if _key(merged_ca.get('catalyst')) and not _key(other.get('catalyst')):
+        src = (a1 if merged_ca is ca1 else a2).get('name', '')
+        merged_ca = dict(merged_ca)
+        merged_ca.setdefault('note', f'catalyst recorded only by the merged variant "{src}"')
     # keep every distinct summation text for now; consolidate_sections() folds them
     # into the one summation section the reaction is supposed to have
     seen_t, summ = set(), []
@@ -381,13 +420,15 @@ Return ONLY JSON with exactly these keys:
   "relationships": [...], "evidence": [...], "summation": {{"text": "<single combined summary>"}}}}"""
     for attempt in (1, 2):
         try:
-            msg = client.messages.create(model=MODEL_NAME, max_tokens=8000,
+            # 8000 was not enough: on ZNFX1's 7-variant cluster thinking consumed the whole
+            # ceiling and the reply carried no answer, leaving that reaction unconsolidated
+            msg = client.messages.create(model=MODEL_NAME, max_tokens=16000,
                                          messages=[{'role': 'user', 'content': prompt}])
             track_usage(msg)
             txt = next((b.text for b in msg.content if getattr(b, 'type', None) == 'text'), '')
             txt = txt.strip().replace('```json', '').replace('```', '').strip()
             if not txt:
-                raise ValueError('no text block in response')
+                raise ValueError(f'no text block in response (stop_reason={msg.stop_reason})')
             got = json.loads(txt)
             out = dict(a)
             # a list that came back LONGER than it went in means the model invented
@@ -415,22 +456,130 @@ Return ONLY JSON with exactly these keys:
             return a
 
 
-# 2) exhaustive union-find over unique set — judge ALL pairs CONCURRENTLY
+# Stage 3. The pairwise judge is structurally blind to anything that only shows up across
+# three or more records: successive steps of one mechanism each look like "the same event,
+# more detail" to their neighbour, and a regulatory statement looks like the reaction it
+# regulates. Showing the whole cluster at once is what makes those visible. The question is
+# deliberately about Reactome reaction IDENTITY, not semantic similarity — the records in a
+# cluster are always topically similar, that is why they got clustered.
+validate_failures = []
+
+
+def validate_cluster(idxs):
+    """Ask whether `idxs` is ONE Reactome reaction; return a list of index groups.
+
+    Returns [idxs] unchanged when the cluster holds together, or two or more groups when it
+    spans several reactions. Returns [idxs] on any failure or unusable response: this stage
+    is a refinement, so a bad call must leave the cluster as the previous stage built it.
+    Every input index appears in exactly one returned group — never dropped, never repeated.
+    """
+    listing = '\n\n'.join(f"[{k}]\n{_reaction_brief(unique[i]['annotation_result'])}"
+                          for k, i in enumerate(idxs, 1))
+    prompt = f"""You are a Reactome biocurator. The {len(idxs)} records below were grouped
+together as descriptions of ONE reaction, because each was judged a duplicate of another in
+the group. Judging them two at a time cannot reveal a group that has drifted across more than
+one reaction, so check the whole group at once.
+
+Decide: do ALL of these records describe the SAME biological transformation, such that they
+should be represented as a SINGLE Reactome reaction? If not, divide them into groups where
+each group is exactly one reaction.
+
+A Reactome reaction is ONE transformation: defined inputs converted to defined outputs, with
+at most one catalyst activity. Judge reaction IDENTITY, not topical similarity — these records
+all concern the same protein and the same paper, so similarity tells you nothing here.
+
+DIVIDE the group when it mixes:
+  - successive steps of one mechanism. Each step is its own reaction: charging an E2, transfer
+    of ubiquitin from E2 to the E3 catalytic cysteine (a thioester intermediate), and transfer
+    from that intermediate to the substrate are THREE reactions, not one described three ways.
+  - a different product of the same chemistry — mono-ubiquitination vs polyubiquitination, or a
+    distinct chain linkage — but ONLY when both records name the product and they conflict.
+    "ubiquitinated X" with no chain specified is less detail, not a different product.
+  - a regulatory statement whose own inputs and outputs are a DIFFERENT event. Judge by input
+    and output, not by the name: "X activates R" recorded with R's participants is R.
+  - a binding or complex-formation event together with the catalytic event that follows it.
+  - a different substrate, or a different catalyst.
+
+KEEP records together when they are the same transformation:
+  - described in different words, or at a different level of detail
+  - with an accessory cofactor named in one and omitted in another (E1, E2, ATP, ubiquitin)
+  - with a domain or subunit named as catalyst in one and the parent protein in the other
+  - measured by a different assay, or under a different experimental condition
+  - with different sets of regulators tested. Merging unions them into the ONE reaction's
+    regulatedBy, each noting the condition it holds under, so four records of one
+    transformation testing four regulators are ONE reaction with four regulations.
+
+Every pair here was already judged the same reaction directly, so do NOT divide because you are
+unsure — name which reason above applies, or return one group.
+
+Records:
+
+{listing}
+
+Every record number 1-{len(idxs)} must appear in exactly ONE group. Do not invent, drop or
+renumber records. Set "valid_single_cluster" to true only when there is exactly one group.
+Keep "reason" under 30 words.
+Return ONLY JSON: {{"valid_single_cluster": <true|false>, "groups": [[1, 2], [3]], "reason": "<short phrase>"}}"""
+    for attempt in (1, 2):
+        try:
+            # Partitioning N records is combinatorial, so this is the most thinking-hungry call
+            # in the pipeline: 11 ZNFX1 records took 3854 thinking tokens against a 230-character
+            # answer. A ceiling of 2000 was spent entirely on thinking and returned no answer,
+            # which silently meant "do not split" on the very clusters most in need of splitting.
+            msg = client.messages.create(model=MODEL_NAME, max_tokens=16000,
+                                         messages=[{'role': 'user', 'content': prompt}])
+            track_usage(msg)
+            txt = next((b.text for b in msg.content if getattr(b, 'type', None) == 'text'), '')
+            txt = txt.strip().replace('```json', '').replace('```', '').strip()
+            if not txt:
+                raise ValueError(f'no text block in response (stop_reason={msg.stop_reason})')
+            got = json.loads(txt)
+            raw = got.get('groups')
+            if got.get('valid_single_cluster') and not raw:
+                return [list(idxs)]
+            if not isinstance(raw, list):
+                raise ValueError('no usable "groups" list')
+            # Rebuild the partition ourselves rather than trusting it: a number out of range
+            # or repeated would otherwise duplicate or lose a reaction.
+            taken, groups = set(), []
+            for g in raw:
+                grp = []
+                for k in (g if isinstance(g, list) else [g]):
+                    try:
+                        k = int(k)
+                    except (TypeError, ValueError):
+                        continue
+                    if 1 <= k <= len(idxs) and k not in taken:
+                        taken.add(k); grp.append(idxs[k - 1])
+                if grp:
+                    groups.append(sorted(grp))
+            # A record the model forgot becomes its own group. Splitting is the recoverable
+            # direction of error; dropping it from the output is not.
+            missing = [idxs[k - 1] for k in range(1, len(idxs) + 1) if k not in taken]
+            if missing:
+                print(f"    [validate] response omitted {len(missing)} record(s); "
+                      f"kept as singleton(s)", flush=True)
+                groups.extend([[i] for i in missing])
+            if not groups:
+                raise ValueError('response partitioned nothing')
+            return groups
+        except Exception as ex:
+            if attempt == 1:
+                continue
+            validate_failures.append((type(ex).__name__, str(ex)[:150]))
+            print(f"    [validate] FAILED for cluster of {len(idxs)} "
+                  f"({type(ex).__name__}: {ex}) -> left as one cluster", flush=True)
+            return [list(idxs)]
+
+
+# 1b) pairwise candidate generation — judge every same-source pair CONCURRENTLY
 MAX_WORKERS = 12          # parallel judge calls (independent, so safe to run concurrently)
 n = len(unique)
-parent = list(range(n))
-def find(x):
-    while parent[x] != x:
-        parent[x] = parent[parent[x]]; x = parent[x]
-    return x
-def unite(a, b):
-    ra, rb = find(a), find(b)
-    if ra != rb: parent[rb] = ra
 
 pairs = [(i, j) for i in range(n) for j in range(i + 1, n)
          if unique[i]['source'] == unique[j]['source']]
 print(f"[merge] exhaustive judge over {n} reactions ({len(pairs)} pairs), {MAX_WORKERS} concurrent...", flush=True)
-t0 = time.time(); done = [0]
+t0 = time.time(); done = [0]; total = [len(pairs)]   # total grows when shaky pairs are re-voted
 
 def judge(pair):
     i, j = pair
@@ -438,24 +587,58 @@ def judge(pair):
                                          unique[j]['annotation_result'])
     done[0] += 1
     if done[0] % 100 == 0:
-        print(f"  judged ~{done[0]}/{len(pairs)} pairs | {time.time()-t0:.0f}s "
+        print(f"  judged ~{done[0]}/{total[0]} pairs | {time.time()-t0:.0f}s "
               f"| {usage_line()}", flush=True)
     return (i, j, same, conf)
 
 with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
     verdicts = list(pool.map(judge, pairs))
 
-# apply the "same" verdicts to union-find AFTER all judgments (order-independent)
-for i, j, same, conf in verdicts:
-    if same:
-        print(
-            f"\nMERGED (confidence {conf if conf is not None else '?'}):\n"
-            f"  A: {unique[i]['annotation_result']['name']}\n"
-            f"  B: {unique[j]['annotation_result']['name']}",
-            flush=True
-        )
-        unite(i, j)
-print(f"[merge] judged {len(pairs)} pairs in {time.time()-t0:.0f}s", flush=True)
+# Verdicts keyed by (lower, higher) index, because clustering now QUERIES arbitrary pairs
+# repeatedly — "may these two groups join, i.e. is every pair across them same?" — instead of
+# consuming the list once. A pair that is absent was never judged (a different source, or a
+# call that failed) and every rule below reads absent as NOT same.
+# Nothing is printed per same-edge any more: under the conflict-free rule a same-edge does not
+# imply those two reactions end up together, since a conflict elsewhere in the group can veto
+# it. What actually merged is printed per cluster, once clustering has settled.
+SAME = {(i, j): bool(same) for i, j, same, conf in verdicts}
+CONF = {(i, j): conf for i, j, same, conf in verdicts}
+n_same = sum(1 for v in SAME.values() if v)
+print(f"[merge] judged {len(pairs)} pairs in {time.time()-t0:.0f}s "
+      f"| {n_same} same, {len(SAME) - n_same} different", flush=True)
+
+# 1c) re-vote the shaky verdicts. One verdict per pair decides a merge, and the conflict-free
+# rule needs EVERY pair across two groups to say "same" — so a single unstable verdict vetoes a
+# merge that every other pair supports. The three "Parkin ubiquitinates Mfn1" records judged
+# same on all three pairs when re-judged, yet came out as a 2-cluster plus a singleton during
+# the run: claude-sonnet-5 takes no temperature parameter, so a borderline pair really does
+# flip between identical calls. Confident verdicts do not flip, so only the low-confidence ones
+# are re-judged, and the cost scales with how many pairs were actually borderline rather than
+# tripling the whole run. A pair whose call FAILED has conf None and is left alone — it is
+# already reported below, and a systemic failure would otherwise re-judge everything for nothing.
+shaky = [p for p in SAME if CONF.get(p) is not None and CONF[p] < args.revote_below]
+if shaky:
+    print(f"[revote] {len(shaky)} verdict(s) under confidence {args.revote_below}; "
+          f"2 more votes each, majority wins, {MAX_WORKERS} concurrent...", flush=True)
+    t1 = time.time(); total[0] += 2 * len(shaky)
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        extra = list(pool.map(judge, shaky * 2))
+    votes = {p: [SAME[p]] for p in shaky}
+    for i, j, same, conf in extra:
+        votes[(i, j)].append(bool(same))
+    flipped = 0
+    for p, vs in votes.items():
+        win = sum(vs) * 2 > len(vs)
+        if win != SAME[p]:
+            flipped += 1
+            print(f"    {SAME[p]} -> {win} (votes {vs}): "
+                  f"{unique[p[0]]['annotation_result'].get('name','')[:44]!r} vs "
+                  f"{unique[p[1]]['annotation_result'].get('name','')[:44]!r}", flush=True)
+        SAME[p] = win     # CONF keeps the first vote's number: a pair that flipped INTO "same"
+                          # stays marked low-confidence, which is the honest label for it
+    n_same = sum(1 for v in SAME.values() if v)
+    print(f"[revote] done in {time.time()-t1:.0f}s | {flipped} verdict(s) flipped "
+          f"| {n_same} same, {len(SAME) - n_same} different", flush=True)
 
 if failures:
     from collections import Counter
@@ -467,26 +650,96 @@ if failures:
         print("[warn] that is a systemic failure, not noise — fix it and re-run; "
               "the output below is not trustworthy", flush=True)
 
-clusters = {}
-for i in range(n):
-    clusters.setdefault(find(i), []).append(i)
+
+# 2) conflict-aware clustering
+def conflict_free_clusters():
+    """Cluster the verdicts so that every cluster is a clique in the "same" graph: no pair
+    inside a cluster was judged different.
+
+    Transitive closure over the same edges would put A and C together on the strength of A~B
+    and B~C even when A-vs-C was judged different — on ZNFX1 that chained three distinct
+    mechanistic steps into one 11-variant reaction.
+
+    Agglomerative: repeatedly join the two groups that are FULLY connected to each other,
+    taking the join whose weakest connecting verdict is strongest, so the result does not
+    depend on the order pairs happen to be listed in. Joining stops when no two groups are
+    fully connected, which leaves conflicting variants in separate clusters.
+    """
+    groups = [[i] for i in range(n)]
+    while True:
+        best = None
+        for gi in range(len(groups)):
+            for gj in range(gi + 1, len(groups)):
+                cross = [(min(a, b), max(a, b)) for a in groups[gi] for b in groups[gj]]
+                if not all(SAME.get(p) for p in cross):
+                    continue
+                # a "same" the judge put no number on counts as 0.0 here: it can still join,
+                # but only after every join backed by an actual confidence
+                weakest = min(CONF.get(p) or 0.0 for p in cross)
+                if best is None or weakest > best[0]:
+                    best = (weakest, gi, gj)
+        if best is None:
+            return sorted(groups, key=lambda g: (-len(g), g))
+        _, gi, gj = best
+        groups[gi] = sorted(groups[gi] + groups[gj]); groups.pop(gj)
+
+
+groups = conflict_free_clusters()
+print(f"[cluster] {n} -> {len(groups)} conflict-free cluster(s)", flush=True)
+
+# 3) cluster-level validation — may only split a cluster, never join
+if args.no_validate:
+    print("[validate] skipped (--no-validate)", flush=True)
+else:
+    to_check = [g for g in groups if len(g) >= args.validate_min_size]
+    if not to_check:
+        print(f"[validate] no cluster reaches {args.validate_min_size} variants — "
+              f"nothing to check", flush=True)
+    else:
+        print(f"[validate] checking {len(to_check)} cluster(s) of >= {args.validate_min_size} "
+              f"variants for Reactome reaction identity, {MAX_WORKERS} concurrent...", flush=True)
+        t2 = time.time()
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            splits = list(pool.map(validate_cluster, to_check))
+        kept = [g for g in groups if len(g) < args.validate_min_size]
+        for original, parts in zip(to_check, splits):
+            if len(parts) > 1:
+                print(f"   SPLIT: {len(original)} variants -> {len(parts)} reaction(s)", flush=True)
+            kept.extend(parts)
+        groups = sorted(kept, key=lambda g: (-len(g), g))
+        print(f"[validate] {sum(1 for p in splits if len(p) > 1)}/{len(to_check)} cluster(s) "
+              f"split in {time.time()-t2:.0f}s -> {len(groups)} cluster(s)", flush=True)
+        if validate_failures:
+            from collections import Counter
+            print(f"[warn] {len(validate_failures)}/{len(to_check)} cluster(s) were not "
+                  f"validated and were left exactly as stage 2 built them:", flush=True)
+            for (name, detail), count in Counter(validate_failures).most_common():
+                print(f"         {count}x {name}: {detail}", flush=True)
+
+multi = [g for g in groups if len(g) > 1]
+if multi:
+    print(f"[cluster] {len(multi)} multi-variant cluster(s):", flush=True)
+    for g in multi:
+        cs = [CONF[p] for p in itertools.combinations(g, 2)
+              if SAME.get(p) and CONF.get(p) is not None]
+        print(f"   {len(g)} variants, weakest verdict {min(cs) if cs else '?'}:", flush=True)
+        for k in g:
+            print(f"      - {unique[k]['annotation_result'].get('name','')}", flush=True)
 
 # merge_confidence answers "was this reaction correctly merged?", which is a different
 # question from the per-reaction "confidence" extraction self-assigns (that one is left
 # alone — cosine_similarity_score.py reads it as llm_confidence). A cluster is only as
 # sound as the shakiest verdict holding it together, so take the MINIMUM: a mean would let
 # three confident joins hide one bad one.
-cluster_confs = {}
-for i, j, same, conf in verdicts:
-    if same and conf is not None:
-        cluster_confs.setdefault(find(i), []).append(conf)
-
 merged_results = []
-for root, idxs in clusters.items():
+for idxs in groups:
     cur = unique[idxs[0]]
     for k in idxs[1:]:
         cur = merge_two(cur, unique[k])
-    cs = cluster_confs.get(root)
+    # recomputed from the FINAL membership, so a stage-3 split drops the confidences of the
+    # pairs it separated instead of crediting them to the group that survived
+    cs = [CONF[p] for p in itertools.combinations(idxs, 2)
+          if SAME.get(p) and CONF.get(p) is not None]
     # None rather than 1.0 for a reaction that never merged: there is no merge to be
     # confident about, and that must stay distinguishable from "merged, but shakily"
     cur['annotation_result']['merge_confidence'] = min(cs) if cs else None
@@ -496,7 +749,7 @@ for root, idxs in clusters.items():
     cur['annotation_result']['confidence'] = round(sum(vals) / len(vals), 3) if vals else None
     merged_results.append(cur)
 
-# 3) consolidate subsections of every reaction that actually merged something —
+# 4) consolidate subsections of every reaction that actually merged something —
 # a single-variant reaction has nothing to deduplicate, so it is left untouched
 to_fix = [e for e in merged_results if len(e['annotation_result'].get('merged_names') or []) > 1]
 if to_fix:
@@ -521,7 +774,7 @@ if to_fix:
         for (name, detail), count in Counter(consolidate_failures).most_common():
             print(f"         {count}x {name}: {detail}", flush=True)
 
-# 4) one summation section per reaction, uniformly shaped, whatever happened above
+# finally, one summation section per reaction, uniformly shaped, whatever happened above
 for e in merged_results:
     normalize_summation(e['annotation_result'])
 
