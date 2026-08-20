@@ -254,57 +254,6 @@ class LiteratureSearchTool(BaseTool):
         return embeddable[:top_k]
 
 
-class FullTextAnalysisTool(BaseTool):
-    """Tool for analyzing full-text papers when available"""
-    
-    name: str = "fulltext_analysis"  
-    description: str = "Analyze full-text papers when available for deeper information extraction"
-    
-    gene_annotator: GenePathwayAnnotator = Field(..., description="Gene annotator instance")
-    
-    def _run(self, pmid: str, gene: str = "") -> str:
-        """Analyze full-text paper for gene-related information.
-        
-        `pmid` may be a bare PMID string (e.g. '25391454') or an explicit local PDF path
-        (e.g. 'data/papers/25391454.pdf'). Bare PMIDs are resolved automatically to
-        data/papers/<pmid>.pdf relative to the working directory.
-        """
-        try:
-            analysis_gene = (gene or "").strip() or "UNSPECIFIED_GENE"
-            # Resolve a bare PMID to the expected local PDF path.
-            pdf_path = pmid if str(pmid).lower().endswith(".pdf") else f"data/papers/{pmid}.pdf"
-
-            from pathlib import Path as _Path
-            if not _Path(pdf_path).exists():
-                return json.dumps({
-                    "pmid": pmid,
-                    "gene": analysis_gene,
-                    "status": "skipped",
-                    "error": f"Local PDF not found at '{pdf_path}'; full-text analysis skipped."
-                })
-
-            model = self.gene_annotator.get_default_llm()
-            result = self.gene_annotator.analyze_full_paper(pdf_path, analysis_gene, model=model)
-
-            # Convert model responses (e.g., LangChain AIMessage) into JSON-safe data.
-            def _json_default(obj: Any) -> Any:
-                if hasattr(obj, "content"):
-                    return obj.content
-                return str(obj)
-
-            return json.dumps({
-                "pmid": pmid,
-                "gene": analysis_gene,
-                "analysis": result,
-                "status": "success"
-            }, default=_json_default)
-        except Exception as e:
-            return json.dumps({
-                "pmid": pmid,
-                "gene": (gene or "").strip() or "UNSPECIFIED_GENE",
-                "error": str(e),
-                "status": "failed"
-            })
 
 
 class ReactomeQueryTool(BaseTool):
@@ -594,7 +543,6 @@ class ReactomeToolkit:
     def _init_tools(self):
         """Initialize all available tools"""
         self.literature_search = LiteratureSearchTool(gene_annotator=self.gene_annotator)
-        self.fulltext_analysis = FullTextAnalysisTool(gene_annotator=self.gene_annotator)
         self.reactome_query = ReactomeQueryTool(gene_annotator=self.gene_annotator)
         self.protein_interactions = ProteinInteractionTool(gene_annotator=self.gene_annotator)
         self.schema_validation = SchemaValidationTool(gene_annotator=self.gene_annotator)
@@ -644,7 +592,6 @@ class ReactomeToolkit:
         """Get tools for Literature Extractor agent"""
         tools = [
             self.literature_search,
-            self.fulltext_analysis,
             self.protein_interactions,
             self.evidence_evaluation
         ]
@@ -683,7 +630,6 @@ class ReactomeToolkit:
         """Get all available tools"""
         return [
             self.literature_search,
-            self.fulltext_analysis, 
             self.reactome_query,
             self.protein_interactions,
             self.schema_validation,

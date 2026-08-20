@@ -4,8 +4,8 @@ import re
 from typing import List
 from xml.dom.minidom import Document
 
-from langchain.text_splitter import SentenceTransformersTokenTextSplitter
-from langchain.text_splitter import TextSplitter
+from langchain_text_splitters import SentenceTransformersTokenTextSplitter
+from langchain_text_splitters import TextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.vectorstores import VectorStore
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -756,52 +756,6 @@ class GenePathwayAnnotator:
         avg_similarity = np.mean(similarity_scores)
         return avg_similarity
         
-
-    def analyze_full_paper(self,
-                           paper_file_name: str,
-                           query_gene: str,
-                           model: any,
-                           top_pages: int = 12,
-                           max_score: float = 50.0) -> list:
-        """Analyze a full text pdf paper provided by paper_file_name.
-
-        Args:
-            paper_file_name (str): the file location of the full text pdf
-            query_gene (str): the query gene the analysis should focus on
-            model (any): an LLM model
-            top_pages (int): only select these many top matched text chunks
-            max_score (float): the max score should be used to filter out text chunks
-        """
-        # Load the paper first
-        loader = PyPDFLoader(paper_file_name)
-        token_splitter = self._get_text_splitter()
-        pages = loader.load_and_split(token_splitter)
-
-        # Embedding the paper
-        embeddings = self._get_embedding()
-        paper_db = FAISS.from_documents(pages, embeddings)
-
-        # Fetch the best matched text
-        query = f'({query_gene} interactions) or ({query_gene} reactions) or ({query_gene} pathways)'
-        matched_pages = paper_db.similarity_search_with_score(
-            query, k=top_pages)
-
-        # Prepare to call llm
-        parameters = {
-            'query_gene': query_gene
-        }
-        prompt = prompts.relationship_extraction_prompt
-        results = []
-        for doc, score in matched_pages:
-            if score > max_score:
-                # The returned results are sorted. If we see this, we can break the loop.
-                break
-            parameters['docs'] = doc.page_content
-            parameters['document'] = doc.page_content
-            result = self.invoke_llm(
-                model=model, parameters=parameters, prompt=prompt)
-            results.append(result)
-        return results
 
     def output_llm_result(self, result):
         formatted_result = '\nResult: {}\n\nDoc: {}'.format(

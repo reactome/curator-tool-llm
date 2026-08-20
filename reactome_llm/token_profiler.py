@@ -72,6 +72,18 @@ def reset() -> None:
         _RECORDS.clear()
 
 
+def totals() -> dict:
+    """Programmatic snapshot of everything recorded so far -> {calls, input, output, total}.
+
+    Used by run_analysis.py to read the in-process (retrieval-side) token spend and combine it
+    with the partner extractor's subprocess usage. Returns zeros when profiling is off/empty."""
+    with _LOCK:
+        calls = sum(r.calls for r in _RECORDS)
+        inp = sum(r.input_tokens for r in _RECORDS)
+        out = sum(r.output_tokens for r in _RECORDS)
+    return {"calls": calls, "input": inp, "output": out, "total": inp + out}
+
+
 def _add(record: UsageRecord) -> None:
     with _LOCK:
         _RECORDS.append(record)

@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 from typing import Collection
-from langchain.text_splitter import SentenceTransformersTokenTextSplitter
+from langchain_text_splitters import SentenceTransformersTokenTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -283,23 +283,6 @@ Roles of the query gene in reactions annotated in the pathway: {}
     )
     log.debug('text for {}\n'.format(pathway, pathway_text))
     return pathway_text
-
-
-def download_pdf_paper(url: str,
-                       pmid: str | int,
-                       paper_dir: str):
-    """Download a PDF file directly from the provided URL.
-    Note: The downloading of using a script from the PMC web site is blocked!
-
-    Args:
-        url (str): _description_
-        pmid (str | int): _description_
-        paper_dir (str): _description_
-    """
-    response = requests.get(url)
-    file_name = Path(paper_dir, '{}.pdf'.format(pmid))
-    with open(file_name, 'wb') as file:
-        file.write(response.content)
 
 
 def map_interactions_in_pathways(interaction_dict, pathway_file: str = REACTOME_PATHWAY_GENE_FILE) -> pd.DataFrame:

@@ -24,7 +24,6 @@ warnings.filterwarnings('ignore')
 
 from dotenv import load_dotenv
 load_dotenv()
-PDF_PAPERS_FOLDER = os.getenv('PDF_PAPERS_FOLDER')
 
 # Shared variables for all
 api = Flask(__name__)
@@ -80,7 +79,6 @@ _CREWAI_DASHBOARD_CONFIG = {
     'toolsByAgent': {
         'extractor': [
             {'id': 'literature_search', 'label': 'literature_search'},
-            {'id': 'fulltext_analysis', 'label': 'fulltext_analysis'},
             {'id': 'protein_interactions', 'label': 'protein_interactions'},
             {'id': 'evidence_evaluation', 'label': 'evidence_evaluation'},
         ],
@@ -127,86 +125,6 @@ def _make_job_event_sink(job_id: str):
 # async def get_openai_key():
 #     return os.getenv('OPENAI_API_KEY')
 
-
-@api.route('/fulltext/<pmid>/<gene>')
-async def analyze_full_text(pmid, gene):
-    # global full_text_return_json
-    # if full_text_return_json:
-    #     return full_text_return_json
-    # For test
-    # pdf_file = '/Users/wug/git/reactome/curator-tool-llm/data/papers/zns15102.pdf'
-    file_path = Path(PDF_PAPERS_FOLDER, '{}.pdf'.format(pmid))
-    # print(str(file_path))
-    full_text_return_json = []
-    if not file_path.exists():
-        # Make sure the same data structure is returned
-        result_json = {
-            'failure': 'The PDF full text paper cannot be found at the server'
-        }
-        full_text_return_json.append(result_json)
-        return full_text_return_json
-    results = annotator.analyze_full_paper(str(file_path), gene, model, top_pages=4) # Use 4 for test
-    
-    for result in results:
-        result_json = {
-            'content': result['answer'].content,
-            'docs':  result['docs'],
-        }
-        full_text_return_json.append(result_json)
-    return full_text_return_json
-
-
-@api.route('/fulltext/list')
-def listPdfs():
-    """Return a list of all PMIDs that have a PDF available in PDF_PAPERS_FOLDER."""
-    if not PDF_PAPERS_FOLDER:
-        return jsonify({'papers': [], 'error': 'PDF_PAPERS_FOLDER not configured'}), 500
-    folder = Path(PDF_PAPERS_FOLDER)
-    if not folder.is_dir():
-        return jsonify({'papers': [], 'error': f'Folder not found: {PDF_PAPERS_FOLDER}'}), 500
-    papers = [
-        {
-            'pmid': p.stem,
-            'exists': True,
-            'size_bytes': p.stat().st_size,
-        }
-        for p in sorted(folder.glob('*.pdf'))
-        if p.stem.isdigit()
-    ]
-    return jsonify({'papers': papers})
-
-
-@api.route('/fulltext/check_pdf/<pmid>')
-async def pdfExists(pmid: str) -> bool:
-    file_path = Path(PDF_PAPERS_FOLDER, '{}.pdf'.format(pmid))
-    return True if file_path.exists() else False
-
-
-@api.route('/fulltext/uploadPDF', methods=['POST'])
-async def uploadPDF():
-    if 'pdf' not in request.files and 'pmid' not in request.form:
-        return {'status': 'no file provided or no pmid provided'}
-    try:
-        pdf = request.files['pdf']
-        pmid = request.form['pmid']
-        # utils.save_pdf_paper(pdf, pmid, PDF_PAPERS_FOLDER)
-        file_name = '{}'.format(Path(PDF_PAPERS_FOLDER, '{}.pdf'.format(pmid)))
-        # print(file_name)
-        pdf.save(file_name)
-        return {'status': 'success'}
-    except Exception as e:
-        return {'failure': 'An error occurred: {}'.format(e)}
-
-
-@api.route('/fulltext/download/<pmid>')
-async def downloadPdf(pmid: str):
-    try: 
-        # Expect the URL from the query parameters
-        url = request.args.get('pdfUrl')
-        utils.download_pdf_paper(url, pmid, PDF_PAPERS_FOLDER)
-        return {'status': 'success'}
-    except Exception as e:
-        return {'failure': 'An error occurred: {}'.format(e)}
 
 
 @api.route('/annotate', methods=['POST'])
@@ -446,8 +364,8 @@ def crewai_logs(job_id: str):
                 "logs": [
                     {"seq": 0, "ts": "...", "event_type": "job", "status": "start", "gene": "..."},
                     {"seq": 1, "ts": "...", "event_type": "agent", "status": "start", "agent": "LiteratureExtractor", "phase": "phase_1_literature_extraction", "gene": "..."},
-                    {"seq": 2, "ts": "...", "event_type": "tool", "status": "start", "tool": "fulltext_analysis"},
-                    {"seq": 3, "ts": "...", "event_type": "tool", "status": "end", "tool": "fulltext_analysis"}
+                    {"seq": 2, "ts": "...", "event_type": "tool", "status": "start", "tool": "literature_search"},
+                    {"seq": 3, "ts": "...", "event_type": "tool", "status": "end", "tool": "literature_search"}
                 ],
         "next_since": 12
       }

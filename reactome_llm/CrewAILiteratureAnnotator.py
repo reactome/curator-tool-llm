@@ -229,13 +229,15 @@ class CrewAILiteratureAnnotator:
             # upfront retrieve+judge below). Reset per-run so a reused annotator can't return a
             # prior gene's papers if this run skips or fails retrieval.
             self.gene_annotator.judged_papers = {}
-            # Full-text resolution manifest {pmid: {source, path}} and the merged evidence the
+            # Full-text resolution manifest {pmid: {source, path}} and the merged reactions the
             # partner's extractor produced from it. Reset per-run so a reused annotator can't
-            # leak one gene's full-text into the next; the manifest is also published on the
-            # shared gene_annotator for reporting/inspection.
+            # leak one gene's full-text into the next; both the manifest and the reactions are
+            # also published on the shared gene_annotator for reporting/inspection.
             self.fulltext_manifest = {}
-            self._fulltext_evidence = None
+            self._fulltext_reactions = []
             self.gene_annotator.fulltext_manifest = {}
+            self.gene_annotator.fulltext_reactions = {}
+            self.gene_annotator.fulltext_per_paper = {}  # per-paper results: counts + review scores
             # Resolve the gene's UniProt accession once, deterministically (Reactome graph,
             # then UniProt), so every phase uses the same verified identifier instead of each
             # agent recalling its own guess. Resolving here (not in an agent) is the fix for
@@ -420,10 +422,11 @@ class CrewAILiteratureAnnotator:
           1. FullTextResolver.resolve_fulltext -> manifest {pmid: {source, path|miss}}. Prefers
              the curator's local PDFs (request.fulltext_index); otherwise downloads/reuses a
              cached PMC XML. Published on the shared gene_annotator for reporting.
-          2. If the partner's extractor module is importable, run it over every non-miss file and
-             merge the results into a single {interactions, pathways, functions} dict cached on
-             self._fulltext_evidence for Phase 1 to fold in. If the module is absent, this is a
-             no-op beyond building the manifest -- Phase 1 proceeds on abstracts alone.
+          2. If the partner's extractor module is importable, run extract_and_merge over the
+             non-miss entries -> a list of merged reaction dicts cached on
+             self._fulltext_reactions (and published on the shared gene_annotator) for the
+             downstream Reactome curation phase to seed from. If the module is absent, this is a
+             no-op beyond building the manifest -- the pipeline proceeds on abstracts alone.
         """
         import FullTextResolver
 
@@ -442,34 +445,30 @@ class CrewAILiteratureAnnotator:
         self.fulltext_manifest = manifest
         self.gene_annotator.fulltext_manifest = {gene: manifest}
 
-        # Deterministic extraction via the partner's module, if it has been integrated.
+        # Deterministic per-paper extraction via the partner's module, if integrated.
+        # extract_review_per_paper runs a full INDEPENDENT pipeline (extract -> merge -> OpenAI
+        # review) for each non-miss paper, in parallel (capped), and returns one result per paper
+        # with its own review score. Reactions are flattened across papers for the curation phase
+        # (NOTE: no cross-paper dedup yet -- duplicates across papers are possible). It never
+        # raises -- failures degrade to fewer/no reactions.
         try:
-            from fulltext_extractor import extract_fulltext
+            from fulltext_extractor import extract_review_per_paper
         except Exception:
             logger.info(
-                "Partner full-text extractor (fulltext_extractor.extract_fulltext) not present; "
+                "Partner full-text extractor (fulltext_extractor) not present; "
                 "manifest built but no deterministic extraction run.")
             return
 
-        model = self.gene_annotator.get_default_llm()
-        merged = {"interactions": [], "pathways": [], "functions": []}
-        n_ok = 0
-        for pmid, entry in manifest.items():
-            if entry.get("source") == "miss":
-                continue
-            try:
-                out = extract_fulltext(entry["path"], entry["source"], gene, model=model) or {}
-                for key in merged:
-                    merged[key].extend(out.get(key, []))
-                n_ok += 1
-            except Exception as e:
-                logger.warning(f"Full-text extraction failed for PMID {pmid} ({entry}): {e}")
-        if any(merged.values()):
-            self._fulltext_evidence = merged
+        per_paper = extract_review_per_paper(manifest, gene) or []
+        reactions = [rx for p in per_paper for rx in (p.get("reactions") or [])]
+        if reactions:
+            self._fulltext_reactions = reactions
+            self.gene_annotator.fulltext_reactions[gene] = reactions
+        # Publish the per-paper breakdown (scores + counts) for reporting.
+        self.gene_annotator.fulltext_per_paper[gene] = per_paper
         logger.info(
-            f"Full-text extraction for {gene}: {n_ok} paper(s) parsed -> "
-            f"{len(merged['interactions'])} interactions, {len(merged['pathways'])} pathways, "
-            f"{len(merged['functions'])} functions.")
+            f"Full-text (per-paper) for {gene}: {len(per_paper)} paper(s) -> "
+            f"{len(reactions)} reaction(s) total available for the Reactome curation phase.")
 
     # Size of the cross-encoder candidate pool the LLM curator-judge chooses the final papers from,
     # and the rubric floor below which a candidate is dropped (1-2 = "not usable for a specific
@@ -538,17 +537,16 @@ class CrewAILiteratureAnnotator:
             enable_full_text=request.enable_full_text,
             enable_literature_search=request.enable_literature_search,
             accession=self.resolved_accession,
-            prefetched_fulltext=getattr(self, "_fulltext_evidence", None),
+            # Full-text now yields *reactions* (self._fulltext_reactions), which seed the Reactome
+            # curation phase downstream rather than this Phase-1 agent. The old
+            # {interactions,pathways,functions} injection is retired -> always None here until the
+            # Phase-1->2 rewire lands; Phase 1 proceeds on abstracts.
+            prefetched_fulltext=None,
         )
-        # Full-text disabled -> also drop the fulltext_analysis tool so the extractor can't waste
-        # ReAct turns calling it (with no local PDFs every call just returns "skipped"). Mirrors the
-        # reduced-toolset pattern used in Phases 3/4.
-        if not request.enable_full_text:
-            ext_tools = [t for t in self.toolkit.get_extractor_tools(self.enabled_tools_map.get("extractor"))
-                         if t.name != "fulltext_analysis"]
-            extraction_task.agent = self.agents.create_literature_extractor(ext_tools)
-        else:
-            extraction_task.agent = self.extractor_agent
+        # Full-text is now a deterministic pre-Phase-1 step (extract_review_per_paper), not an agent
+        # tool -- the old fulltext_analysis tool has been removed -- so the extractor uses its
+        # standard toolset regardless of the full-text flag.
+        extraction_task.agent = self.extractor_agent
 
         # Update crew with this task
         self.crew.tasks = [extraction_task]

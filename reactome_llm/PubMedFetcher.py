@@ -22,7 +22,10 @@ import requests
 
 PROJECT_ROOT = os.path.expanduser('~/curator-tool-llm')
 CACHE_DIR = os.path.join(PROJECT_ROOT, 'data', 'pmc')
-PAPERS_DIR = os.path.join(PROJECT_ROOT, 'data', 'papers')
+PAPERS_DIR = os.path.join(PROJECT_ROOT, 'data', 'fulltext_pdf')
+# FullTextResolver downloads PMC XML here, keyed by PMID. load_source reads it before
+# resolving/refetching so a paper the resolver already fetched is not pulled from NCBI twice.
+FULLTEXT_CACHE_DIR = os.path.join(PROJECT_ROOT, 'data', 'fulltext_cache')
 
 IDCONV_URL = 'https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/'
 EFETCH_URL = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi'
@@ -162,6 +165,23 @@ def fetch_jats(pmcid, use_cache=True):
         raise ValueError(f'efetch error for {pmcid}: {msg.group(1).strip() if msg else "unknown"}')
     with open(path, 'w', encoding='utf-8') as f:
         f.write(xml)
+    return xml
+
+
+def read_fulltext_cache(pmid):
+    """Return JATS XML for a PMID from FullTextResolver's data/fulltext_cache, or None.
+
+    None on a miss (no file, empty file, or body-less XML). The resolver only writes
+    full-text hits, but validating <article>/<body> here guards against a partial or
+    interrupted write that would otherwise reach section detection and fail there.
+    """
+    path = os.path.join(FULLTEXT_CACHE_DIR, f'{pmid}.xml')
+    if not (os.path.isfile(path) and os.path.getsize(path) > 0):
+        return None
+    with open(path, encoding='utf-8') as f:
+        xml = f.read()
+    if '<article' not in xml or '<body' not in xml:
+        return None
     return xml
 
 
@@ -340,15 +360,24 @@ def load_source(spec, client=None, model=None, pmcid=None, unwrap_pdf=False):
     spec = str(spec).strip()
 
     if is_pmid(spec) or is_pmcid(spec):
-        if is_pmid(spec):
+        # Reuse FullTextResolver's already-downloaded XML before touching NCBI. That cache
+        # is keyed by PMID and holds the same efetch JATS this module would otherwise
+        # refetch, so a hit skips both the ID Converter and the efetch call. A PMCID spec
+        # has no PMID to key on, so it always takes the fetch path below.
+        cached = read_fulltext_cache(spec) if is_pmid(spec) else None
+        if cached is not None:
+            xml = cached
+            source_id = f'PMID:{spec}'
+        elif is_pmid(spec):
             pmcid = pmcid or resolve_pmcids([spec]).get(spec)
             if not pmcid:
                 raise ValueError(f'PMID {spec} has no PMCID — not in PubMed Central')
             source_id = f'PMID:{spec}'
+            xml = fetch_jats(pmcid)
         else:
             pmcid = (pmcid or spec).upper()
             source_id = pmcid
-        xml = fetch_jats(pmcid)
+            xml = fetch_jats(pmcid)
         text, how = results_from_jats(xml, client=client, model=model)
         # flatten AFTER section detection, which uses the element/line structure
         return source_id, flatten_jats_text(text), how
