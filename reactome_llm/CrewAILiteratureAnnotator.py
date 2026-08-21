@@ -238,6 +238,10 @@ class CrewAILiteratureAnnotator:
             self.gene_annotator.fulltext_manifest = {}
             self.gene_annotator.fulltext_reactions = {}
             self.gene_annotator.fulltext_per_paper = {}  # per-paper results: counts + review scores
+            # Per-gene pathway-placement status. For a gate-fail gene (no confident FI-partner
+            # placement) this carries an explicit "no confident pathway" message so the reactions
+            # can be returned unplaced with a clear signal instead of silently having no pathway.
+            self.gene_annotator.placement_status = {}
             # Resolve the gene's UniProt accession once, deterministically (Reactome graph,
             # then UniProt), so every phase uses the same verified identifier instead of each
             # agent recalling its own guess. Resolving here (not in an agent) is the fix for
@@ -261,6 +265,22 @@ class CrewAILiteratureAnnotator:
                     f"{placement['status']} (confident={confident}; "
                     f"{'injecting directive' if confident else 'gated out, no directive'})"
                 )
+                # Record the placement outcome so a gate-fail gene's reactions can be returned
+                # with an explicit "no confident pathway" signal (rather than silently unplaced).
+                self.gene_annotator.placement_status[request.gene] = {
+                    "confident": confident,
+                    "status": placement.get("status"),
+                    "primary": (placement.get("primary") if confident else None),
+                    "message": (
+                        None if confident else
+                        "Unable to compute a confident pathway placement for this gene; "
+                        "returning extracted reactions without a pathway assignment for a "
+                        "curator to place."),
+                }
+                if not confident:
+                    logger.info(
+                        f"{request.gene}: no confident pathway — reactions will be returned "
+                        f"unplaced (gate fail).")
                 # Gate failed -> Phase 2 would otherwise see only the raw Phase-1 extraction.
                 # Generate a lightweight gene background as orientation. build_query_and_search_terms
                 # makes a BLOCKING LLM .invoke(); running it directly on the event loop collides with
@@ -452,7 +472,8 @@ class CrewAILiteratureAnnotator:
         # (NOTE: no cross-paper dedup yet -- duplicates across papers are possible). It never
         # raises -- failures degrade to fewer/no reactions.
         try:
-            from fulltext_extractor import extract_review_per_paper
+            from fulltext_extractor import (extract_review_per_paper,
+                                            extract_abstracts_for_misses)
         except Exception:
             logger.info(
                 "Partner full-text extractor (fulltext_extractor) not present; "
@@ -460,15 +481,29 @@ class CrewAILiteratureAnnotator:
             return
 
         per_paper = extract_review_per_paper(manifest, gene) or []
-        reactions = [rx for p in per_paper for rx in (p.get("reactions") or [])]
+
+        # Abstract fallback: any selected PMID that resolved to a MISS (no local PDF, no PMC full
+        # text) still gets its ABSTRACT mined for reactions -- labeled provenance "abstract" so a
+        # curator can weight them below full-text ones. The abstract text is already in hand from
+        # retrieval (judge_select keeps each candidate's Summary as "abstract"); pass it through so
+        # the fallback doesn't re-download it. This is what makes a gene like TANC1 -- 5 strong
+        # abstracts, 0 with full text -- still yield reactions instead of nothing.
+        abstracts_by_pmid = {str(p.get("pmid")): (p.get("abstract") or "")
+                             for p in selected if p.get("pmid")}
+        abstract_per_paper = extract_abstracts_for_misses(
+            manifest, gene, abstracts_by_pmid) or []
+
+        all_per_paper = per_paper + abstract_per_paper
+        reactions = [rx for p in all_per_paper for rx in (p.get("reactions") or [])]
         if reactions:
             self._fulltext_reactions = reactions
             self.gene_annotator.fulltext_reactions[gene] = reactions
-        # Publish the per-paper breakdown (scores + counts) for reporting.
-        self.gene_annotator.fulltext_per_paper[gene] = per_paper
+        # Publish the per-paper breakdown (scores + counts, full-text and abstract) for reporting.
+        self.gene_annotator.fulltext_per_paper[gene] = all_per_paper
         logger.info(
-            f"Full-text (per-paper) for {gene}: {len(per_paper)} paper(s) -> "
-            f"{len(reactions)} reaction(s) total available for the Reactome curation phase.")
+            f"Reactions for {gene}: {len(per_paper)} full-text paper(s) + "
+            f"{len(abstract_per_paper)} abstract paper(s) -> {len(reactions)} reaction(s) total "
+            f"available for the Reactome curation phase.")
 
     # Size of the cross-encoder candidate pool the LLM curator-judge chooses the final papers from,
     # and the rubric floor below which a candidate is dropped (1-2 = "not usable for a specific
@@ -602,9 +637,40 @@ class CrewAILiteratureAnnotator:
                 "gene": request.gene,
             })
 
+        # Deterministic convert path: if the front half already produced extracted reactions
+        # (full-text and/or abstract, on gene_annotator.fulltext_reactions), translate THOSE into
+        # Reactome instances with ONE structured LLM call -- no curator agent, no tool loop. This
+        # is the reaction-shaped stream feeding the data model directly (what the whole redesign is
+        # about); the agent path below is kept only as a fallback for a gene with no reactions.
+        reactions = (getattr(self.gene_annotator, "fulltext_reactions", {}) or {}).get(request.gene) or []
+        if reactions:
+            logger.info(f"Phase 2: deterministic reaction->instance conversion for "
+                        f"{request.gene} ({len(reactions)} reaction(s), no agent)")
+            emit_agent_event("ReactomeCurator", "start", phase=phase_id, gene=request.gene)
+            from reaction_to_instances import build_instances
+            placement_status = (getattr(self.gene_annotator, "placement_status", {}) or {}).get(request.gene)
+            # Blocking .invoke -> worker thread so it can't collide with CrewAI's event loop; the
+            # token_profiler label propagates into the thread via the copied context (contextvar).
+            with token_profiler.label("phase_2_convert"):
+                curation = await asyncio.to_thread(
+                    build_instances, request.gene, reactions,
+                    accession=self.resolved_accession,
+                    placement=self.resolved_placement,
+                    placement_status=placement_status,
+                    target_pathways=request.pathways)
+            curation = self._repair_dangling_references(curation)
+            emit_agent_event("ReactomeCurator", "end", phase=phase_id, gene=request.gene)
+            return {
+                "raw_result": "",
+                "reactome_instances": curation.model_dump(by_alias=True),
+                "pathways_created": len(curation.pathways),
+                "gene": request.gene,
+                "source": "deterministic_convert",
+            }
+
         logger.info(f"Phase 2: Data model creation for {request.gene}")
         emit_agent_event("ReactomeCurator", "start", phase=phase_id, gene=request.gene)
-        
+
         # Create curation task
         curation_task = self.tasks.create_reactome_curation_task(
             gene=request.gene,

@@ -119,6 +119,8 @@ def main():
     ap.add_argument("gene", nargs="?", help="Gene symbol (prompted if omitted).")
     ap.add_argument("--papers-dir", default=None, help="Full-text PDF folder (prompted if omitted).")
     ap.add_argument("--no-full-text", action="store_true", help="Retrieval only; skip full-text.")
+    ap.add_argument("--no-convert", action="store_true",
+                    help="Skip the deterministic reaction->Reactome-instance conversion step.")
     ap.add_argument("--max-papers", type=int, default=5, help="Papers the judge selects (default 5).")
     args = ap.parse_args()
 
@@ -248,7 +250,49 @@ def main():
             print(f"\n  saved this run's per-paper merged JSON + OpenAI review files -> {run_dir}/"
                   f"  ({copied} files)")
 
-    # ---- 3) runtime + tokens + cost (the combined tracker) ----
+    # ---- 3) reactome instances (deterministic convert: reactions -> Reactome data model) ----
+    # run_analysis stops before the CrewAI phases, so Phase 2 never runs here; call the same
+    # convert step directly on the extracted reactions so the deterministic path is testable
+    # end-to-end without any agent. One structured LLM call; tokens shown as a before/after delta.
+    if not args.no_full_text and not args.no_convert:
+        reactions = (getattr(ga, "fulltext_reactions", {}) or {}).get(gene, [])
+        print(f"\n{'-' * 74}\n3) REACTOME INSTANCES (deterministic convert)\n{'-' * 74}")
+        if not reactions:
+            print("(no reactions to convert)")
+        else:
+            from reaction_to_instances import build_instances
+            _before = token_profiler.totals()
+            placement_status = (getattr(ga, "placement_status", {}) or {}).get(gene)
+            dm = build_instances(gene, reactions,
+                                 accession=crewai.resolved_accession,
+                                 placement=crewai.resolved_placement,
+                                 placement_status=placement_status)
+            _after = token_profiler.totals()
+            c_in, c_out = _after["input"] - _before["input"], _after["output"] - _before["output"]
+            print(f"instances : {len(dm.entities)} entities · {len(dm.complexes)} complexes · "
+                  f"{len(dm.reactions)} reactions · {len(dm.pathways)} pathways")
+            ps = placement_status or {}
+            if ps.get("message"):
+                print(f"placement : {ps['message']}")
+            for e in dm.entities:
+                comp = f" @{e.compartment}" if e.compartment else ""
+                print(f"    entity    {e.displayName} [{e.cls}] {e.identifier}{comp}")
+            for c in dm.complexes:
+                print(f"    complex   {c.displayName} <- {', '.join(c.components) or '(none)'}")
+            for rx in dm.reactions:
+                prov = f" ({rx.provenance})" if rx.provenance else ""
+                print(f"    reaction  {rx.displayName}{prov}: "
+                      f"{', '.join(rx.input) or '∅'} -> {', '.join(rx.output) or '∅'}")
+            for pw in dm.pathways:
+                print(f"    pathway   {pw.displayName}")
+            out_json = os.path.join("results", f"{gene.lower()}_instances_{_run_stamp}.json")
+            os.makedirs("results", exist_ok=True)
+            with open(out_json, "w") as f:
+                import json as _json
+                _json.dump(dm.model_dump(by_alias=True), f, indent=2)
+            print(f"  saved -> {out_json}   (convert tokens in {c_in:,} / out {c_out:,})")
+
+    # ---- 4) runtime + tokens + cost (the combined tracker) ----
     # Rough cost. Retrieval runs on sonnet-4-6, full-text on sonnet-5 (+ OpenAI review); exact
     # sonnet-5 / OpenAI rates aren't published in this repo, so both halves are estimated at
     # sonnet-tier $3 in / $15 out per MTok (same constants token_profiler uses). Adjust if needed.

@@ -26,6 +26,10 @@ PAPERS_DIR = os.path.join(PROJECT_ROOT, 'data', 'fulltext_pdf')
 # FullTextResolver downloads PMC XML here, keyed by PMID. load_source reads it before
 # resolving/refetching so a paper the resolver already fetched is not pulled from NCBI twice.
 FULLTEXT_CACHE_DIR = os.path.join(PROJECT_ROOT, 'data', 'fulltext_cache')
+# Abstracts for MISS papers (no full text) are cached here as <pmid>.txt, keyed by PMID, so the
+# abstract-fallback extractor (abstract_extractor.py) does not re-download an abstract it already
+# has. Populated either from the abstract already in hand from retrieval or via a PubMed efetch.
+ABSTRACT_CACHE_DIR = os.path.join(PROJECT_ROOT, 'data', 'abstract_cache')
 
 IDCONV_URL = 'https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/'
 EFETCH_URL = 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi'
@@ -183,6 +187,47 @@ def read_fulltext_cache(pmid):
     if '<article' not in xml or '<body' not in xml:
         return None
     return xml
+
+
+def fetch_abstract(pmid, use_cache=True, fallback_text=None):
+    """Return the abstract text for a PMID, or None if it cannot be obtained.
+
+    Cache-first, keyed by PMID under data/abstract_cache/<pmid>.txt (so a MISS paper's abstract
+    is never downloaded twice). Resolution order:
+      1. the cached <pmid>.txt, if present and non-empty;
+      2. `fallback_text` -- the abstract already in hand from retrieval (its Summary field);
+         written to the cache so subsequent runs are cache hits;
+      3. a PubMed efetch (db=pubmed, rettype=abstract, retmode=text), written to the cache.
+    Best-effort: any failure returns None and the caller drops the paper.
+    """
+    pmid = str(pmid)
+    os.makedirs(ABSTRACT_CACHE_DIR, exist_ok=True)
+    path = os.path.join(ABSTRACT_CACHE_DIR, f'{pmid}.txt')
+    if use_cache and os.path.isfile(path) and os.path.getsize(path) > 0:
+        with open(path, encoding='utf-8') as f:
+            return f.read()
+
+    text = (fallback_text or '').strip()
+    if not text:
+        params = {'db': 'pubmed', 'id': pmid, 'rettype': 'abstract', 'retmode': 'text',
+                  'tool': TOOL, 'email': EMAIL}
+        if API_KEY:
+            params['api_key'] = API_KEY
+        try:
+            _throttle()
+            r = requests.get(EFETCH_URL, params=params, timeout=60)
+            r.raise_for_status()
+            text = (r.text or '').strip()
+        except Exception as e:
+            print(f'abstract efetch failed for {pmid}: {type(e).__name__}: {e}',
+                  file=sys.stderr, flush=True)
+            return None
+
+    if not text:
+        return None
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(text)
+    return text
 
 
 # ─────────────────────────────────────────────────────────────────────────────

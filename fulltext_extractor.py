@@ -340,6 +340,59 @@ def _pipeline_one_paper(spec: dict, gene: str, timeout: int, review: bool) -> di
     return result
 
 
+def extract_abstracts_for_misses(manifest: Dict[str, dict], gene: str,
+                                 abstracts_by_pmid: Dict[str, str] = None,
+                                 max_workers: int = 4, review: bool = True) -> List[dict]:
+    """Abstract fallback: for every manifest entry marked ``miss`` (no full text), extract
+    reactions from its ABSTRACT via abstract_extractor (one bounded LLM call each, run in
+    parallel and capped). Returns one per-paper result dict per miss paper, shaped like
+    extract_review_per_paper's results but with source/provenance "abstract" -- so the caller
+    can concatenate full-text and abstract reactions into one stream.
+
+    ``abstracts_by_pmid`` supplies the abstract text already in hand from retrieval (keyed by
+    PMID); abstract_extractor falls back to its own cache / a PubMed efetch when it's absent.
+    Token usage from these in-process calls is folded into the shared full-text tally so
+    run_analysis reports one combined figure. Never raises -- a paper that fails yields no
+    reactions.
+    """
+    miss = [str(pmid) for pmid, entry in (manifest or {}).items()
+            if (entry or {}).get("source") == "miss"]
+    if not miss:
+        return []
+
+    import abstract_extractor
+    abstract_extractor.reset_usage()
+    abstracts_by_pmid = abstracts_by_pmid or {}
+
+    workers = max(1, min(max_workers, len(miss)))
+    logger.info("abstract fallback for %s -- %d miss paper(s), %d worker(s)",
+                gene, len(miss), workers)
+
+    results = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futs = {pool.submit(abstract_extractor.extract_abstract, p, gene,
+                            abstracts_by_pmid.get(p), review): p for p in miss}
+        done = 0
+        for fut in as_completed(futs):
+            done += 1
+            r = fut.result()
+            logger.info("abstract [%d/%d] %s: %d reaction(s) from abstract",
+                        done, len(miss), r["pmid"], r["n_extracted"])
+            results.append(r)
+
+    # Fold the abstract-extractor's in-process token usage into the shared full-text tally.
+    u = abstract_extractor.get_usage()
+    _FT_USAGE["calls"] += u.get("calls", 0)
+    _FT_USAGE["input"] += u.get("input", 0)
+    _FT_USAGE["output"] += u.get("output", 0)
+    _FT_USAGE["cache_read"] += u.get("cache_read", 0)
+    _FT_USAGE["cache_write"] += u.get("cache_write", 0)
+
+    order = {p: i for i, p in enumerate(miss)}
+    results.sort(key=lambda r: order.get(r["pmid"], 0))
+    return results
+
+
 def extract_review_per_paper(manifest: Dict[str, dict], gene: str, timeout: int = 1800,
                              review: bool = True, max_workers: int = _MAX_PAPER_WORKERS) -> List[dict]:
     """Per-paper mode: run extract -> merge -> review INDEPENDENTLY for each paper, in parallel

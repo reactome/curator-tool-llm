@@ -68,6 +68,7 @@ class ReactomeEntity(BaseModel):
     identifier: str = Field("", description="UniProt accession (use the verified one)")
     species: str = Field("Homo sapiens", description="Species name")
     referenceEntity: str = Field("", description="Reference entity details")
+    compartment: str = Field("", description="Subcellular compartment, only if explicitly stated")
 
 
 class ReactomeComplex(BaseModel):
@@ -82,11 +83,20 @@ class ReactomeReaction(BaseModel):
     model_config = {"populate_by_name": True}
     cls: str = Field("Reaction", alias="class", description="Reactome class name")
     displayName: str = Field(..., description="Human-readable reaction name")
+    reactionType: str = Field("", description="transition / binding / dissociation / omitted / blackBoxEvent")
     input: List[str] = Field(default_factory=list, description="Input entity names/ids")
     output: List[str] = Field(default_factory=list, description="Output entity names/ids")
     catalystActivity: List[str] = Field(default_factory=list, description="Catalyst entity names/ids")
+    regulatedBy: List[str] = Field(default_factory=list,
+                                   description="Regulators, each 'regulationType: regulator (note)'")
+    compartment: str = Field("", description="Subcellular compartment, only if explicitly stated")
     inferredFrom: List[str] = Field(default_factory=list, description="Orthologous events")
+    summation: str = Field("", description="Factual description of the molecular event")
+    evidence: List[str] = Field(default_factory=list,
+                                description="Verbatim source excerpts supporting this reaction")
     literatureReference: List[str] = Field(default_factory=list, description="Supporting PMIDs")
+    confidence: float = Field(0.0, description="Extractor's self-assessed confidence, 0.0-1.0")
+    provenance: str = Field("", description="Evidence source for this reaction: fulltext / abstract")
 
 
 class ReactomePathway(BaseModel):
