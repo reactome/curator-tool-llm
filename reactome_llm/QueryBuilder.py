@@ -575,7 +575,8 @@ def build_gene_specific_pathway_descriptions(gene: str, drop_generic: bool = Tru
 
 
 def build_gene_specific_enriched_pathway_description(gene: str,
-                                                     summary_snippet: int = 400) -> dict:
+                                                     summary_snippet: int = 400,
+                                                     placement: dict | None = None) -> dict:
     """Gene-SPECIFIC description of a COLD-START gate-pass gene's PREDICTED role in its primary
     partner-enriched pathway -- the cold-start analogue of build_gene_specific_pathway_descriptions
     for the Stage-2 re-rank target.
@@ -608,7 +609,9 @@ def build_gene_specific_enriched_pathway_description(gene: str,
     # description would never be read there.
     if select_pathway_names(gene):
         return {}
-    placement = utils.suggest_pathway_placement(gene)
+    # Reuse a precomputed placement when the caller (Curator) already resolved it, so it isn't
+    # recomputed here; fall back to computing it for standalone use.
+    placement = placement or utils.suggest_pathway_placement(gene)
     if not utils.is_confident_placement(placement):
         return {}
 
@@ -638,7 +641,8 @@ def build_gene_specific_enriched_pathway_description(gene: str,
 def get_reranking_target(gene: str, drop_generic: bool = True,
                          max_pathways: int = 15,
                          description_override: str | None = None,
-                         pathway_descriptions: dict | None = None) -> list[str]:
+                         pathway_descriptions: dict | None = None,
+                         placement: dict | None = None) -> list[str]:
     """Pathway-level text(s) to re-rank retrieved papers against, replacing the gene-specific
     description that mis-ranked pathway/mechanism-level ground-truth papers (final recall
     collapsed to ~1% vs 2.8% pool recall).
@@ -672,7 +676,8 @@ def get_reranking_target(gene: str, drop_generic: bool = True,
         # a weak placement would anchor re-ranking on the wrong pathway. Otherwise leave names
         # empty so we fall through to the gene-description target below.
         import ReactomeUtils as utils  # lazy: pulls in scanpy/faiss at module load
-        placement = utils.suggest_pathway_placement(gene)
+        # Reuse the Curator's precomputed placement when supplied; else compute (standalone use).
+        placement = placement or utils.suggest_pathway_placement(gene)
         if utils.is_confident_placement(placement):
             names = [placement["primary"]["pathway_name"]]
 

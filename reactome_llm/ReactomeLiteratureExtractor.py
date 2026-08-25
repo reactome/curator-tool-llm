@@ -75,7 +75,8 @@ class ReactomeLiteratureExtractor:
                 max_papers: int = DEFAULT_MAX_PAPERS,
                 candidate_pool: int = DEFAULT_CANDIDATE_POOL,
                 min_score: int = DEFAULT_MIN_SCORE,
-                adjustment: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                adjustment: Optional[Dict[str, Any]] = None,
+                placement: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Gene -> the papers to annotate from.
 
         `adjustment`: the Reviewer's proposed changes for a re-run (or None on the first
@@ -104,10 +105,11 @@ class ReactomeLiteratureExtractor:
 
         # Rerank context: gene-specific pathway descriptions (best), else a gate-fail gene
         # background. Passed straight into re-rank + judge (no worker-thread/stash needed here).
-        description, pathway_descs = self._build_rerank_context(gene)
+        description, pathway_descs = self._build_rerank_context(gene, placement=placement)
 
         cand = self._retrieve_candidates(gene, candidate_pool, description, pathway_descs,
-                                         additional_terms=additional_terms, avoid_pmids=avoid_pmids)
+                                         additional_terms=additional_terms, avoid_pmids=avoid_pmids,
+                                         placement=placement)
         candidates = cand["papers"]
         base = {"gene": gene, "accession": accession,
                 "name_query": cand["name_query"], "context_query": cand["context_query"],
@@ -161,7 +163,8 @@ class ReactomeLiteratureExtractor:
     def _retrieve_candidates(self, gene: str, candidate_pool: int,
                              description: Optional[str], pathway_descs: Optional[dict],
                              fetch_papers: int = 200, additional_terms: str = "",
-                             avoid_pmids: Optional[set] = None) -> dict:
+                             avoid_pmids: Optional[set] = None,
+                             placement: Optional[dict] = None) -> dict:
         """Stage-1 result-set merge + cross-encoder re-rank -> top-`candidate_pool` paper dicts
         (with abstracts). LLM-FREE. Lifted from the old LiteratureSearchTool so retrieval logic
         lives with the extractor, not in the agent-tool file."""
@@ -181,7 +184,7 @@ class ReactomeLiteratureExtractor:
             before = len(pool)
             pool = [d for d in pool if str(d.get("uid")) not in avoid_pmids]
             logger.info(f"Excluded {before - len(pool)} avoid_pmids from the {before}-doc pool")
-        ranked = self._rerank(gene, pool, candidate_pool, description, pathway_descs)
+        ranked = self._rerank(gene, pool, candidate_pool, description, pathway_descs, placement=placement)
         return {
             "name_query": name_query,
             "context_query": context_query,
@@ -211,7 +214,8 @@ class ReactomeLiteratureExtractor:
         return pool
 
     def _rerank(self, gene: str, pool: List[dict], top_k: int,
-                description: Optional[str], pathway_descs: Optional[dict]) -> List[dict]:
+                description: Optional[str], pathway_descs: Optional[dict],
+                placement: Optional[dict] = None) -> List[dict]:
         """Re-rank pool docs by MAX cross-encoder score against the gene's re-ranking targets,
         returning the top `top_k`. Falls back to pool order if there are no embeddable abstracts
         or no targets. Targets are passed in (description/pathway_descs) rather than read off a
@@ -221,7 +225,7 @@ class ReactomeLiteratureExtractor:
             return pool[:top_k]
 
         targets = get_reranking_target(gene, description_override=description,
-                                       pathway_descriptions=pathway_descs)
+                                       pathway_descriptions=pathway_descs, placement=placement)
         if not targets:
             return pool[:top_k]
 
@@ -248,7 +252,8 @@ class ReactomeLiteratureExtractor:
         } for d in docs]
 
     # ------------------------------------------------------------------ rerank context
-    def _build_rerank_context(self, gene: str) -> tuple[Optional[str], dict]:
+    def _build_rerank_context(self, gene: str,
+                              placement: Optional[dict] = None) -> tuple[Optional[str], dict]:
         """Compute the re-rank/judge target text for `gene`.
 
         Prefers per-pathway gene-SPECIFIC descriptions (has-data genes; validated to rerank
@@ -265,7 +270,8 @@ class ReactomeLiteratureExtractor:
             with token_profiler.label("litextract_desc_per_pathway"):
                 pathway_descs = build_gene_specific_pathway_descriptions(gene) or {}
                 if not pathway_descs:
-                    pathway_descs = build_gene_specific_enriched_pathway_description(gene) or {}
+                    pathway_descs = build_gene_specific_enriched_pathway_description(
+                        gene, placement=placement) or {}
         except Exception as e:
             logger.warning(f"Gene-specific pathway descriptions failed for {gene}: {e}")
             pathway_descs = {}

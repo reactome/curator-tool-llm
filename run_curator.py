@@ -57,23 +57,27 @@ def check_services():
 
 
 def _print_attempt(attempt, result):
+    """Show the CURATOR agent and the return of each of its 4 tools for this attempt."""
     r, ft, pl = result.retrieval, result.fulltext, result.placement
-    print(f"\n{'─' * 70}\nATTEMPT {attempt + 1}   (adjustment applied: {result.adjustment_applied or 'none'})\n{'─' * 70}")
-    print(f"  retrieval : pool {r.get('pool_size')} -> {r.get('candidate_pool')} candidates "
-          f"-> {len(r.get('papers', []))} selected  (mean score {r.get('mean_score')}, "
-          f"dropped {r.get('dropped_below_threshold')})")
-    print(f"  PMIDs     : {', '.join(str(p.get('pmid')) for p in r.get('papers', [])) or '(none)'}")
     c = ft.get("counts", {})
-    print(f"  full text : {c.get('pdf', 0)} PDF · {c.get('xml', 0)} XML · {c.get('miss', 0)} miss "
-          f"-> {len(ft.get('reactions', []))} reaction(s)")
-    print(f"  placement : {pl.get('predicted_pathway')}  (confident={pl.get('confident')}, "
-          f"status={pl.get('status')})")
+    print(f"\n{'─' * 70}\nCURATOR AGENT — attempt {attempt + 1}   "
+          f"(adjustment applied: {result.adjustment_applied or 'none'})\n{'─' * 70}")
+    print("  called 4 tools:")
+    print(f"    [Tool 1] pathway placement    -> {pl.get('predicted_pathway')}  "
+          f"(confident={pl.get('confident')}, status={pl.get('status')})")
+    print(f"    [Tool 2] literature retrieval -> pool {r.get('pool_size')} -> {r.get('candidate_pool')} "
+          f"candidates -> {len(r.get('papers', []))} selected  (mean {r.get('mean_score')}, "
+          f"dropped {r.get('dropped_below_threshold')})")
+    print(f"               PMIDs: {', '.join(str(p.get('pmid')) for p in r.get('papers', [])) or '(none)'}")
+    print(f"    [Tool 3] full-text resolver   -> {c.get('pdf', 0)} PDF · {c.get('xml', 0)} XML · "
+          f"{c.get('miss', 0)} miss")
+    print(f"    [Tool 4] full-text analysis   -> {len(ft.get('reactions', []))} reaction(s) extracted")
 
 
 def _print_verdict(verdict):
-    print(f"  REVIEWER  : {verdict.decision.upper()} — {verdict.reason}")
+    print(f"\n  REVIEWER AGENT -> {verdict.decision.upper()}: {verdict.reason}")
     if verdict.adjustment:
-        print(f"              next adjustment -> {verdict.adjustment}")
+        print(f"                   next adjustment -> {verdict.adjustment}")
 
 
 def _n_reactions(result):
@@ -147,7 +151,7 @@ def run_one(gene, curator, reviewer, qa, args):
     reactions = (final_result.fulltext.get("reactions") or []) if final_result else []
     summary["reactions"] = len(reactions)
 
-    print(f"\n{'-' * 70}\nOUTCOME — {gene}\n{'-' * 70}")
+    print(f"\n{'-' * 70}\nQA AGENT — {gene}\n{'-' * 70}")
     if not reactions:
         print(f"No reactions in any attempt ({final_verdict.decision}: {final_verdict.reason}) "
               f"-> manual review. QA skipped.")
