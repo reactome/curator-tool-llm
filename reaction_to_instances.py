@@ -105,7 +105,8 @@ def _placement_directive(gene, placement, placement_status, target_pathways):
             f"final placement.")
 
 
-def build_prompt(gene, reactions, accession, placement, placement_status, target_pathways):
+def build_prompt(gene, reactions, accession, placement, placement_status, target_pathways,
+                 fix_notes=None):
     items = _reaction_items(reactions)
     reactions_json = json.dumps(items, indent=2, default=str)
     accession_line = (
@@ -113,6 +114,17 @@ def build_prompt(gene, reactions, accession, placement, placement_status, target
         f"exactly as the identifier/referenceEntity of the {gene} protein entity; do not invent "
         f"another.\n" if accession else "")
     placement_line = _placement_directive(gene, placement, placement_status, target_pathways)
+    # QA repair loop: when a prior conversion of these SAME reactions was rejected by QA, its
+    # corrections are injected here so the re-conversion fixes them instead of repeating them.
+    fix_block = "" if not fix_notes else f"""
+
+QA CORRECTIONS — a previous conversion of THESE SAME reactions was reviewed by a Reactome QA
+expert and REJECTED. Fix every issue below in this re-conversion and do NOT reintroduce them
+(correct UniProt identifiers; model multi-protein complexes as Complex, not EWAS; attach
+literatureReference PMIDs; set compartments where the evidence states one; drop off-target /
+positive-control reactions the reviewer flagged as out of scope):
+{fix_notes}
+"""
 
     return f"""You are a Reactome biocurator. You are given biochemical reactions that have ALREADY
 been extracted from the literature for the gene {gene} (each with its participants, roles,
@@ -156,12 +168,13 @@ Rules:
 - Keep the output compact so nothing is truncated: for each reaction's `evidence`, include at most
   the 2 most relevant verbatim excerpts, and keep `summation` to one sentence. Every input
   reaction that survives the rule above MUST appear as a Reaction — do not stop early.
-
+{fix_block}
 Return the Reactome data model for {gene}."""
 
 
 def build_instances(gene, reactions, accession=None, placement=None,
-                    placement_status=None, target_pathways=None) -> ReactomeDataModel:
+                    placement_status=None, target_pathways=None,
+                    fix_notes=None) -> ReactomeDataModel:
     """Convert extracted reactions into a ReactomeDataModel via one structured LLM call.
 
     Never raises: on an empty input or any failure it returns an empty-but-valid model so the
@@ -172,7 +185,8 @@ def build_instances(gene, reactions, accession=None, placement=None,
         logger.info("convert: no reactions for %s -- empty data model", gene)
         return ReactomeDataModel(gene=gene)
 
-    prompt = build_prompt(gene, reactions, accession, placement, placement_status, target_pathways)
+    prompt = build_prompt(gene, reactions, accession, placement, placement_status,
+                          target_pathways, fix_notes=fix_notes)
     try:
         model = _model().with_structured_output(ReactomeDataModel)
         result = model.invoke(prompt)
