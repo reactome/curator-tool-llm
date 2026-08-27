@@ -56,7 +56,8 @@ Generated instances (JSON):
 Deterministic schema / referential-integrity findings:
 {schema_findings}
 
-Existing-data consistency findings (overlap with curated Reactome pathways):
+Existing-pathway MERGE targets (a generated pathway that already exists in Reactome, with the \
+reactions already curated there for this gene):
 {consistency_findings}
 
 Assess, and flag technical_issues for any of:
@@ -64,13 +65,24 @@ Assess, and flag technical_issues for any of:
 - a reactionType that doesn't match the input/output pattern (e.g. 'binding' with no association)
 - a Complex with fewer than two components (should be an entity)
 - a compartment implausible for the event, or a species mismatch
-- an entity/reaction/pathway that likely duplicates existing curated Reactome content
+- an entity or reaction that duplicates existing curated Reactome content
 - a summation that overstates or misstates what the evidence supports
 
-Give an overall qa_score in [0,1] (1 = clean, ready for a curator to accept as-is), the \
-technical_issues (each with severity high/medium/low, category, description, location, \
-resolution), and an integration_assessment. Be strict but fair; reserve 'high' severity for \
-issues that make an instance wrong or unusable."""
+If a generated pathway appears under MERGE targets, that is NOT a defect: the extracted reactions \
+should be MERGED into the existing pathway. Treat the extracted reactions as candidate ADDITIONS — \
+some may be genuinely new (not yet curated there). Do not flag the pathway itself as a duplicate; \
+only note individual extracted reactions that clearly already exist among the curated ones.
+
+Return:
+1. an overall qa_score in [0,1] (1 = clean, ready for a curator to accept as-is);
+2. technical_issues (each with severity high/medium/low, category, description, location, resolution);
+3. flagged_instances — EVERY generated instance you judge NOT curator-ready, given by its EXACT \
+displayName, its class (EWAS/Complex/Reaction/Pathway), a verdict of 'needs_revision' or 'bad', and \
+a one-line reason. Do NOT list instances you consider good — anything omitted is treated as good, so \
+this list is how the good instances stay visible instead of being hidden behind the overall score;
+4. an integration_assessment.
+Be strict but fair; reserve 'high' severity (and a 'bad' verdict) for issues that make an instance \
+wrong or unusable."""
 
 
 @dataclass
@@ -210,21 +222,40 @@ class ReactomeQA:
         return {"valid": not errors, "errors": errors, "warnings": warnings}
 
     def _consistency_check(self, gene: str, instances: Dict[str, Any]) -> Dict[str, Any]:
-        """Flag generated pathways that overlap existing curated Reactome pathways for the gene
-        (integrate vs. duplicate). LLM-free; degrades gracefully if Neo4j is unreachable."""
-        report = {"gene": gene, "conflicts": [], "recommendations": []}
+        """When a generated pathway ALREADY exists in Reactome this is a MERGE, not a conflict: the
+        extracted reactions should be integrated into the existing pathway, and some may be genuinely
+        new additions. For each such pathway we pull the reactions already curated there for this gene
+        so the reviewer/curator can add only what's missing rather than duplicating the whole pathway.
+        LLM-free; degrades gracefully if Neo4j is unreachable."""
+        report = {"gene": gene, "merge_targets": [], "recommendations": []}
         try:
             existing = {p["pathway"] for p in (neo4j_utils.query_pathways_for_gene(gene) or [])}
         except Exception as e:
-            report["recommendations"].append(f"Could not query existing pathways ({e}); skipped overlap check.")
+            report["recommendations"].append(f"Could not query existing pathways ({e}); skipped merge check.")
             return report
         for pw in instances.get("pathways", []):
             name = pw.get("displayName", "")
-            if name in existing:
-                report["conflicts"].append(
-                    {"type": "pathway_overlap", "description": f"Pathway '{name}' already exists in Reactome"})
-        if report["conflicts"]:
-            report["recommendations"].append("Integrate into the existing pathway rather than duplicating.")
+            if name not in existing:
+                continue
+            # Reactions already curated in this pathway for this gene — the merge context.
+            curated: List[str] = []
+            try:
+                df = neo4j_utils.query_reaction_roles_of_pathway(name, [gene])
+                if df is not None and not df.empty and "reaction" in df.columns:
+                    curated = sorted({str(r) for r in df["reaction"].tolist()})
+            except Exception:
+                pass  # no reaction context available -> still emit the merge target
+            report["merge_targets"].append({
+                "type": "pathway_merge",
+                "pathway": name,
+                "description": (f"Pathway '{name}' already exists in Reactome. MERGE the extracted "
+                                f"reactions into it — add any not already curated (the extracted set may "
+                                f"include new reactions); do NOT create a parallel/duplicate pathway."),
+                "already_curated_reactions": curated,
+            })
+        if report["merge_targets"]:
+            report["recommendations"].append(
+                "Merge extracted reactions into the existing pathway(s); add only reactions not already curated.")
         return report
 
     # ------------------------------------------------------------------ agentic review
@@ -261,16 +292,17 @@ class ReactomeQA:
         for warn in schema_check.get("warnings", []):
             issues.append({"severity": "low", "category": "schema", "description": warn,
                            "location": "", "resolution": ""})
-        conflicts = consistency_check.get("conflicts", [])
-        for c in conflicts:
-            issues.append({"severity": "medium", "category": "consistency",
-                           "description": c.get("description", ""), "location": "",
-                           "resolution": "Integrate rather than duplicate."})
+        merges = consistency_check.get("merge_targets", [])
+        for m in merges:
+            # A merge target is an integration TODO, not a defect -> low severity, doesn't tank the score.
+            issues.append({"severity": "low", "category": "integration",
+                           "description": m.get("description", ""), "location": m.get("pathway", ""),
+                           "resolution": "Merge extracted reactions into the existing pathway; add only new ones."})
         qa_score = 1.0 if not issues else (0.4 if not schema_check.get("valid") else 0.7)
-        return {"qa_score": qa_score, "technical_issues": issues,
-                "integration_assessment": {"conflicts_detected": bool(conflicts),
+        return {"qa_score": qa_score, "technical_issues": issues, "flagged_instances": [],
+                "integration_assessment": {"conflicts_detected": bool(merges),
                                            "performance_impact": "minimal",
-                                           "compatibility_score": 0.7 if conflicts else 1.0}}
+                                           "compatibility_score": 1.0}}
 
     @staticmethod
     def _verdict(report: Dict[str, Any], schema_check: Dict[str, Any]) -> tuple[str, bool]:

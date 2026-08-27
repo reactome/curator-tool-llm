@@ -164,12 +164,26 @@ class IntegrationAssessment(BaseModel):
     compatibility_score: float = Field(0.0, description="0.0-1.0")
 
 
+class InstanceVerdict(BaseModel):
+    """Per-instance QA judgement. Only instances that are NOT curator-ready are listed here;
+    every instance not named is implicitly 'good'. This is what keeps a handful of bad
+    instances from masking the (usually many) good ones behind a single overall qa_score."""
+    instance: str = Field("", description="Exact displayName of the instance being judged")
+    instance_class: str = Field("", description="EWAS / Complex / Reaction / Pathway")
+    verdict: str = Field("", description="needs_revision or bad")
+    reason: str = Field("", description="One-line reason it is not curator-ready")
+
+
 class QAReport(BaseModel):
     """Phase 4 output: technical QA and integration assessment."""
     gene: str = Field(..., description="Target gene symbol")
     qa_score: float = Field(..., description="Overall QA score, 0.0-1.0")
     technical_issues: List[TechnicalIssue] = Field(default_factory=list)
     integration_assessment: IntegrationAssessment = Field(default_factory=IntegrationAssessment)
+    flagged_instances: List[InstanceVerdict] = Field(
+        default_factory=list,
+        description="Instances that are NOT curator-ready (needs_revision or bad), by exact "
+                    "displayName. Everything not listed is treated as good.")
 
 
 # ---------------------------------------------------------------------------

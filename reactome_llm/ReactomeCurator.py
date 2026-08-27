@@ -65,12 +65,19 @@ class ReactomeCurator:
         self.fulltext_index = fulltext_index or {}
 
     def run(self, gene: str, adjustment: Optional[Dict[str, Any]] = None,
-            max_papers: int = 5) -> CuratorResult:
+            max_papers: int = 5, papers_only: bool = False) -> CuratorResult:
         gene = (gene or "").strip().upper()
-        logger.info(f"Curator attempt for {gene} (adjustment={adjustment or 'none'})")
+        logger.info(f"Curator attempt for {gene} (adjustment={adjustment or 'none'}, "
+                    f"papers_only={papers_only})")
 
         # Tool 1 — pathway placement, computed ONCE and reused for retrieval + result + build_instances.
         placement = self.placement_tool.resolve(gene)
+
+        # PAPERS-ONLY: the curator already has the papers they want. Skip Tool 2 (retrieval) entirely
+        # and feed the local PDF index straight into Tools 3/4. Placement (Tool 1) still runs so the
+        # reactions can be grouped; there is nothing to retry, so run_curator caps this at 1 attempt.
+        if papers_only:
+            return self._run_papers_only(gene, placement)
 
         # Tool 2 — literature retrieval; reuse the placement so its rerank target isn't recomputed.
         retrieval = self.extractor.extract(gene, max_papers=max_papers, adjustment=adjustment,
@@ -92,6 +99,37 @@ class ReactomeCurator:
             fulltext=fulltext,
             adjustment_applied=retrieval.get("adjustment_applied", {}),
         )
+
+    def _run_papers_only(self, gene: str, placement: Dict[str, Any]) -> CuratorResult:
+        """Build a CuratorResult from the curator-supplied PDFs, with NO retrieval.
+
+        The full-text index (built by run_curator from --papers-dir) is {pmid: path}, where the
+        PMID was recovered from each PDF's page-1 DOI. We treat every indexed PDF as a resolved
+        'pdf' source and run Tool 4 (analysis) directly. PDFs with no recoverable DOI/PMID never
+        make it into the index, so build_index already reported them as unresolvable.
+        """
+        index = self.fulltext_index or {}
+        papers = [{"pmid": pmid} for pmid in index]
+        manifest = {pmid: {"source": "pdf", "path": path} for pmid, path in index.items()}
+        counts = {"pdf": len(manifest), "xml": 0, "miss": 0}
+        extracted = (self.analyzer.analyze(gene, papers, manifest) if manifest
+                     else {"per_paper": [], "reactions": []})
+        fulltext = {"manifest": manifest, "counts": counts, **extracted}
+
+        # Retrieval normally resolves the accession; without it, get it from the graph directly.
+        accession = None
+        try:
+            import ReactomeNeo4jUtils as neo4j_utils
+            accession = neo4j_utils.query_accession_for_gene(gene)
+        except Exception as e:
+            logger.warning(f"papers-only: could not resolve accession for {gene}: {e}")
+
+        retrieval = {"name_query": None, "context_query": None, "pool_size": None,
+                     "candidate_pool": None, "papers": papers, "mean_score": None,
+                     "per_paper_scores": [], "dropped_below_threshold": None, "papers_only": True}
+        logger.info(f"papers-only {gene}: {len(manifest)} PDF(s) -> {len(fulltext['reactions'])} reaction(s)")
+        return CuratorResult(gene=gene, accession=accession, retrieval=retrieval,
+                             placement=placement, fulltext=fulltext, adjustment_applied={})
 
     # ------------------------------------------------------------------ helpers
     @staticmethod

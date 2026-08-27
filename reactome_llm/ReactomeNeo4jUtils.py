@@ -157,11 +157,16 @@ def query_reaction_roles_of_pathway(pathway: str,
     Returns:
         pd.DataFrame: _description_
     """
+    # Bind the variable-length role chain to a PATH and pull its relationships with
+    # relationships(), rather than binding the pattern straight to a variable -- the latter is
+    # deprecated in Neo4j 5+ (warning 01N42). Semantics are unchanged: r_role[0] is still the
+    # first hop out of the reaction, so type(r_role[0]) is the same role as before.
     query = """
         MATCH (p:Pathway {displayName: $pathway_name})
         MATCH (p) - [:hasEvent*] -> (r:ReactionLikeEvent)
-        MATCH (r) - [r_role:input|catalystActivity|regulatedBy|physicalEntity|hasComponent|hasMember|hasCandidate*] -> (ewas:EntityWithAccessionedSequence)
+        MATCH role_path = (r) - [:input|catalystActivity|regulatedBy|physicalEntity|hasComponent|hasMember|hasCandidate*] -> (ewas:EntityWithAccessionedSequence)
         MATCH (ewas) - [:referenceEntity] -> (g:ReferenceSequence) WHERE g.geneName[0] in $gene_names
+        WITH p, r, g, relationships(role_path) AS r_role
         RETURN DISTINCT p.displayName AS pathway, r.displayName AS reaction, type(r_role[0]) AS role, g.geneName[0] AS gene
     """
     result_df = None

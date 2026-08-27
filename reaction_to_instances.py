@@ -45,9 +45,12 @@ logger = logging.getLogger(__name__)
 
 # A gene with many reactions produces a large structured output (entities + complexes + reactions
 # + pathways). 8000 was too low -- SHANK3 (30 reactions) truncated after entities/complexes with
-# ZERO reactions emitted. 32000 comfortably fits a rich multi-paper gene; the evidence-capping in
-# the prompt keeps per-reaction size bounded. (Claude sonnet 4.x supports well beyond this.)
-_CONVERT_MAX_TOKENS = 32000
+# ZERO reactions emitted. 32000 still truncated a rich multi-paper gene: SHANK3 (51 reactions)
+# came out at 46 with an entity cut mid-object (QA flagged "JSON truncated mid-entity"). 64000 is
+# claude-sonnet-4-6's max output ceiling and gives ~2x headroom. NOTE: this is the ceiling, not a
+# fix for arbitrarily large genes -- a gene whose annotation exceeds 64k output tokens still needs
+# the conversion BATCHED (convert N reactions at a time and stitch), which removes the cap entirely.
+_CONVERT_MAX_TOKENS = 64000
 
 
 def _model():
