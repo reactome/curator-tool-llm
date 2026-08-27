@@ -26,6 +26,7 @@ conda run -n paperqa python run_curator.py "GENE"
 - [How full-text extraction works (Tool 4)](#how-full-text-extraction-works-tool-4)
 - [Repository layout](#repository-layout)
 - [Known limitations](#known-limitations)
+- [Experimental: dense-retrieval investigation](#experimental-dense-retrieval-investigation-dense_retrieval)
 
 ---
 
@@ -322,3 +323,24 @@ data/                          # local caches: PDFs, PMC XML, abstracts (gitigno
   matches whole pathways by name; it does not yet detect that an individual extracted *reaction*
   already exists in Reactome.
 - **A local PDF with no page-1 DOI can't be identified** and is skipped.
+
+---
+
+## Experimental: dense-retrieval investigation (`dense_retrieval/`)
+
+Reference code only — **not part of the live pipeline** and not imported by it. These scripts are
+the investigation into whether a dense, embedding-based approach could improve on the current
+lexical retrieval and on matching extracted reactions to curated Reactome reactions:
+
+- `cosine_retrieval_test.py`, `embedding_benchmark.py`, `cosine_similarity_score.py` — measured the
+  ceiling of embedding-only similarity and showed *why* it falls short (two reactions differing only
+  in substrate score within ~0.02 of each other, so a wrong match can outrank the right one).
+- `pool_match.py` + `ReactionMatcher.py` — the resulting "filter-then-rank" idea: a deterministic
+  structural candidate pool (shared input/output/catalyst) → cross-encoder ranking → an LLM that can
+  also answer "none".
+- `ReactomeFullCacheEmbeddingTest.py`, `check_sections.py` — a bi-encoder positive-control eval and a
+  chunk-preview diagnostic.
+
+The written findings (`dense_retrieval_investigation.md`) are kept with the run outputs, outside
+version control. These scripts are preserved as a record, not a maintained entry point — running them
+as-is would need import fixes (they expect repo-root modules like `TextEmbedder`).
