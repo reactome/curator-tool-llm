@@ -130,16 +130,24 @@ the query) / `give_up`. It can only *propose* a retry — `run_curator.py` owns 
 
 ## Install
 
+Three steps — **all three are required**; the Python install alone will not run the pipeline.
+
+**1. Python environment + dependencies:**
 ```bash
-# In the conda env (paperqa):
+conda create -n paperqa python=3.10
+conda activate paperqa
 pip install -r requirements.txt
 ```
+`requirements.txt` is the **single, authoritative** dependency list — install from it. (There is
+deliberately no conda `environment.yaml`: a stale export from another machine caused more confusion
+than it solved.) Core libraries: `anthropic`, `openai`, `langchain-*` / `langgraph`, `neo4j`,
+`pymongo`, `sentence-transformers` + `flair` + `torch` (cross-encoder rerank), `PyMuPDF` (PDF
+parsing), `pandas`/`numpy`/`scipy`, `pydantic`, `jsonschema`.
 
-`requirements.txt` is the authoritative, complete dependency list. `environment.yaml` is a conda
-export of the same env (note: it is currently missing a few pip-only packages — `requirements.txt`
-is the source of truth). Core libraries: `anthropic`, `openai`, `langchain-*` / `langgraph`,
-`neo4j`, `pymongo`, `sentence-transformers` + `flair` + `torch` (cross-encoder rerank), `PyMuPDF`
-(PDF parsing), `pandas`/`numpy`/`scipy`, `pydantic`, `jsonschema`.
+**2. Services + data** — a Neo4j Reactome graph and two MongoDB databases that live *outside* this
+repo. **This is the step people miss.** See [Services & data you must set up](#services--data-you-must-set-up).
+
+**3. `.env`** — API keys + connection strings. See [Configuration (.env)](#configuration-env).
 
 ---
 
@@ -175,14 +183,43 @@ FIS_MONGO_RELATIONSHIPS=...         # collection name for the pairwise relations
 
 `run_curator.py` sets `TOKEN_PROFILE=1` itself, so per-gene token/cost accounting is on by default.
 
-### Data & resources
-- `resources/reactome_domain_model.json` — the Reactome schema QA validates against (tracked).
-- `resources/ReactomePathwayGenes_Ver_91.txt` — pathway↔gene map for enrichment (tracked).
-- `resources/interactions/` — BioGRID + IntAct interaction files (gitignored; large). See
-  `resources/llm_interactions/README.txt` for exact download URLs/versions. Placement reads
-  functional interactions from `FIS_MONGO_DB`; these flat files are the loading source/fallback.
-- `data/` — gitignored local caches: `fulltext_pdf/` (curator PDFs), `fulltext_cache/`
-  (downloaded PMC XML), `abstract_cache/`, and `user_config.json` (remembers your `--papers-dir`).
+### Services & data you must set up
+
+The `pip install` is **not enough** — the pipeline reads a Reactome graph and two Mongo databases
+that are not shipped in this repo. This is what silently breaks a fresh setup, so do each explicitly:
+
+**1. Neo4j — the Reactome graph.** Install Neo4j and load a **Reactome graph database** into it
+(obtain it from Reactome's data downloads at <https://reactome.org> — the "Reactome Graph Database";
+it is *not* in this repo). Point `REACTOME_NEO4J_URI/USER/PWD/DATABASE` at it. On this setup the DB
+name is `graph.db` (not `reactome`). Sanity check: `run_curator.py` exits at startup if Bolt `:7687`
+is unreachable.
+
+**2. MongoDB — two databases on `:27017`:**
+- **`PUBMED_MONGO_DB` (PubMed abstract cache) — self-populating.** Abstracts/JATS are fetched from
+  NCBI on demand and cached as you run (needs `PUBMED_API_KEY`). Nothing to preload.
+- **`FIS_MONGO_DB` = `idg_pairwise` (functional-interaction partners, used for placement) — must be
+  loaded separately.** This repo only *reads* it. The data is produced by the Reactome
+  `org.reactome.idg.pairwise` Java project (`MainApp`), or copied from a machine that already has it
+  (see migration below). **Without this DB, pathway placement finds no interaction partners** and
+  cold-start genes can't be placed.
+
+**3. Interaction flat files (`resources/interactions/`)** — BioGRID + IntAct, gitignored (large).
+Download the exact versions listed in `resources/llm_interactions/README.txt`. These feed the
+non-Mongo interaction path (`ProteinProteinInteractionsLoader.load_interactions`).
+
+**Moving the Mongo DBs between machines** (e.g. from a dev box to `curator.reactome.org`):
+```bash
+mongodump    --db idg_pairwise --out /path/to/backup
+mongorestore --db idg_pairwise /path/to/backup/idg_pairwise   # same for the abstract-cache DB
+```
+
+### Tracked resource files (shipped in the repo)
+- `resources/reactome_domain_model.json` — the Reactome schema QA validates against.
+- `resources/ReactomePathwayGenes_Ver_91.txt` — pathway↔gene map for enrichment.
+
+### Local caches (gitignored, auto-created under `data/`)
+`fulltext_pdf/` (curator PDFs you point `--papers-dir` at), `fulltext_cache/` (downloaded PMC XML),
+`abstract_cache/`, and `user_config.json` (remembers your last `--papers-dir`).
 
 ---
 
