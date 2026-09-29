@@ -1,5 +1,4 @@
 import os
-from tkinter import NO
 import dotenv
 from neo4j import GraphDatabase
 import neo4j
@@ -92,11 +91,19 @@ def query_pathways_for_gene(gene: str) -> list[dict]:
     Returns:
         list[dict]: List of dicts with keys 'pathway' and 'pathway_id'
     """
+    # Restrict to RELEASED HUMAN pathways: without this, the match returns (a) unreleased
+    # draft/proposal curations -- e.g. "(NEW)InfectiousDiseaseProposal", "(draft)Viral Infection
+    # Pathways", "...Proposal" (doRelease = false/null) -- and (b) non-human orthologs, since the
+    # geneName match isn't species-scoped (BRCA1 pulled in Gallus gallus R-GGA- pathways). Both
+    # polluted the Stage-1 context query and the Stage-2 re-rank target. doRelease is Reactome's
+    # canonical "included in the release" flag (releaseStatus is null even for released pathways,
+    # so it can't be used).
     query = """
         MATCH (ewas:EntityWithAccessionedSequence)-[:referenceEntity]->(g:ReferenceSequence)
         WHERE g.geneName[0] = $gene_name
         MATCH (p:Pathway)-[:hasEvent*]->(r:ReactionLikeEvent)
               -[:input|catalystActivity|regulatedBy|physicalEntity|hasComponent|hasMember|hasCandidate*]->(ewas)
+        WHERE p.speciesName = 'Homo sapiens' AND p.doRelease = true
         RETURN DISTINCT p.displayName AS pathway, p.dbId AS pathway_id
         ORDER BY p.displayName
     """
@@ -111,6 +118,34 @@ def query_pathways_for_gene(gene: str) -> list[dict]:
     return result_df.to_dict(orient='records')
 
 
+def query_accession_for_gene(gene: str) -> str | None:
+    """Look up the canonical UniProt accession for a gene from the Reactome graph.
+
+    Resolves a gene symbol to the reviewed UniProt accession Reactome already stores,
+    preferring the entry where the symbol is the primary gene name and the canonical
+    (non-isoform) identifier. Returns None if the gene is not present in the graph, in
+    which case callers should fall back to an external lookup (e.g. the UniProt REST API).
+
+    Args:
+        gene (str): Gene symbol (e.g. 'TANC1').
+
+    Returns:
+        str | None: The canonical UniProt accession (e.g. 'Q9C0D5'), or None if not found.
+    """
+    query = """
+        MATCH (rgp:ReferenceGeneProduct)
+        WHERE $gene IN rgp.geneName AND rgp.databaseName = 'UniProt'
+        RETURN rgp.identifier AS accession
+        ORDER BY (rgp.geneName[0] = $gene) DESC, (rgp.variantIdentifier IS NULL) DESC
+        LIMIT 1
+    """
+    with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        records = driver.execute_query(query, db=DB, gene=gene).records
+    if not records:
+        return None
+    return records[0]["accession"]
+
+
 def query_reaction_roles_of_pathway(pathway: str,
                                     genes: list[str]) -> pd.DataFrame:
     """Get the reactions and roles for a list of genes in a specific pathway.
@@ -122,11 +157,16 @@ def query_reaction_roles_of_pathway(pathway: str,
     Returns:
         pd.DataFrame: _description_
     """
+    # Bind the variable-length role chain to a PATH and pull its relationships with
+    # relationships(), rather than binding the pattern straight to a variable -- the latter is
+    # deprecated in Neo4j 5+ (warning 01N42). Semantics are unchanged: r_role[0] is still the
+    # first hop out of the reaction, so type(r_role[0]) is the same role as before.
     query = """
         MATCH (p:Pathway {displayName: $pathway_name})
         MATCH (p) - [:hasEvent*] -> (r:ReactionLikeEvent)
-        MATCH (r) - [r_role:input|catalystActivity|regulatedBy|physicalEntity|hasComponent|hasMember|hasCandidate*] -> (ewas:EntityWithAccessionedSequence)
+        MATCH role_path = (r) - [:input|catalystActivity|regulatedBy|physicalEntity|hasComponent|hasMember|hasCandidate*] -> (ewas:EntityWithAccessionedSequence)
         MATCH (ewas) - [:referenceEntity] -> (g:ReferenceSequence) WHERE g.geneName[0] in $gene_names
+        WITH p, r, g, relationships(role_path) AS r_role
         RETURN DISTINCT p.displayName AS pathway, r.displayName AS reaction, type(r_role[0]) AS role, g.geneName[0] AS gene
     """
     result_df = None
@@ -197,3 +237,133 @@ def map_pathway_name_to_dbId(pathway_names: list[str]) -> dict[int, str]:
             name2id[row['displayName']] = row['dbId']
         return name2id
     return None
+
+def query_literature_references_for_gene(gene: str) -> list[int]:
+    """Get all PMIDs cited (at pathway or reaction level) for events the gene participates in.
+
+    Args:
+        gene (str): Gene symbol (e.g. 'SHANK3')
+
+    Returns:
+        list[int]: List of PMIDs
+    """
+    query = """
+        MATCH (ewas:EntityWithAccessionedSequence)-[:referenceEntity]->(g:ReferenceSequence)
+        WHERE g.geneName[0] = $gene_name AND ewas.speciesName = "Homo sapiens"
+        MATCH (p:Pathway)-[:hasEvent*]->(r:ReactionLikeEvent)
+              -[:input|catalystActivity|regulatedBy|physicalEntity|hasComponent|hasMember|hasCandidate*]->(ewas)
+        MATCH (p)-[:literatureReference]->(plit:LiteratureReference)
+        RETURN DISTINCT plit.pubMedIdentifier AS pmid
+
+        UNION
+
+        MATCH (ewas:EntityWithAccessionedSequence)-[:referenceEntity]->(g:ReferenceSequence)
+        WHERE g.geneName[0] = $gene_name
+        MATCH (p:Pathway)-[:hasEvent*]->(r:ReactionLikeEvent)
+              -[:input|catalystActivity|regulatedBy|physicalEntity|hasComponent|hasMember|hasCandidate*]->(ewas)
+        MATCH (r)-[:literatureReference]->(rlit:LiteratureReference)
+        RETURN DISTINCT rlit.pubMedIdentifier AS pmid
+    """
+    result_df = None
+    with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        result_df = driver.execute_query(query,
+                                         db=DB,
+                                         gene_name=gene,
+                                         result_transformer_=neo4j.Result.to_df)
+    if result_df is None or result_df.empty:
+        return []
+    return result_df['pmid'].to_list()
+
+
+
+def get_random_annotated_genes(n: int = 10, min_pathways: int = 3) -> list[str]:
+    """Get a random sample of gene names with at least min_pathways pathway annotations.
+
+    Args:
+        n (int): Number of genes to sample.
+        min_pathways (int): Minimum number of pathways a gene must appear in to qualify.
+
+    Returns:
+        list[str]: List of gene names.
+    """
+    query = """
+        MATCH (ewas:EntityWithAccessionedSequence)-[:referenceEntity]->(g:ReferenceSequence)
+        WHERE g.geneName IS NOT NULL AND ewas.speciesName = "Homo sapiens"
+        MATCH (p:Pathway)-[:hasEvent*]->(r:ReactionLikeEvent)
+            -[:input|catalystActivity|regulatedBy|physicalEntity|hasComponent|hasMember|hasCandidate*]->(ewas)
+        WITH g.geneName[0] AS gene, count(DISTINCT p) AS pathway_count
+        WHERE pathway_count >= $min_pathways
+        RETURN gene
+        ORDER BY rand()
+        LIMIT $n
+    """
+    result_df = None
+    with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        result_df = driver.execute_query(query,
+                                        db=DB,
+                                        min_pathways=min_pathways,
+                                        n=n,
+                                        result_transformer_=neo4j.Result.to_df)
+    if result_df is None or result_df.empty:
+        return []
+    return result_df['gene'].to_list()
+
+
+def get_reaction_and_all_pmids_for_gene(gene: str) -> tuple[str | None, list[str]]:
+    """Get one reaction the given gene participates in, along with ALL PMIDs cited for that reaction.
+
+    Args:
+        gene (str): Gene symbol (e.g. 'SHANK3')
+
+    Returns:
+        tuple[str | None, list[str]]: (reaction_name, list_of_pmids), or (None, []) if not found.
+    """
+    # Step 1: find one reaction the gene participates in
+    reaction_query = """
+        MATCH (ewas:EntityWithAccessionedSequence)-[:referenceEntity]->(g:ReferenceSequence)
+        WHERE g.geneName[0] = $gene_name
+        MATCH (r:ReactionLikeEvent)
+              -[:input|catalystActivity|regulatedBy|physicalEntity|hasComponent|hasMember|hasCandidate*]->(ewas)
+        RETURN DISTINCT r.displayName AS reaction
+        LIMIT 1
+    """
+    with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        result = driver.execute_query(reaction_query, db=DB, gene_name=gene,
+                                      result_transformer_=neo4j.Result.to_df)
+    if result.empty:
+        return None, []
+    reaction_name = result.iloc[0]["reaction"]
+
+    # Step 2: get ALL PMIDs cited for that specific reaction
+    pmid_query = """
+        MATCH (r:ReactionLikeEvent {displayName: $reaction})-[:literatureReference]->(lit:LiteratureReference)
+        RETURN DISTINCT lit.pubMedIdentifier AS pmid
+    """
+    with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        pmid_result = driver.execute_query(pmid_query, db=DB, reaction=reaction_name,
+                                           result_transformer_=neo4j.Result.to_df)
+    pmids = pmid_result["pmid"].to_list() if not pmid_result.empty else []
+    return reaction_name, pmids
+
+
+def query_reaction_summary(reaction: str) -> str | None:
+    """Query the reaction summary from the database.
+
+    Args:
+        reaction (str): Reaction display name.
+
+    Returns:
+        str | None: The reaction's summation text, or None if not found.
+    """
+    query = """
+        MATCH (r:ReactionLikeEvent {displayName: $reaction})
+        OPTIONAL MATCH (r)-[:summation]->(summation:Summation)
+        RETURN summation.text AS text
+    """
+    text = None
+    with GraphDatabase.driver(URI, auth=AUTH) as driver:
+        with driver.session(database=DB) as session:
+            result = session.run(query, reaction=reaction).single()
+            if result is not None:
+                text = result['text']
+    return text

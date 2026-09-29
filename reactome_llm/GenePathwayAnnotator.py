@@ -4,15 +4,14 @@ import re
 from typing import List
 from xml.dom.minidom import Document
 
-from langchain.text_splitter import SentenceTransformersTokenTextSplitter
-from langchain.text_splitter import TextSplitter
+from langchain_text_splitters import SentenceTransformersTokenTextSplitter
+from langchain_text_splitters import TextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_community.vectorstores import VectorStore
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.language_models import BaseChatModel
-from langchain_openai import ChatOpenAI
 from langchain_community.document_loaders import PyPDFLoader
 
 from sentence_transformers import SentenceTransformer
@@ -27,10 +26,13 @@ from ReactomeLLMErrors import NoAbstractFoundError, NoAbstractSupportingInteract
 
 import ReactomePrompts as prompts
 from ModelConfig import create_reactome_chat_model
+import token_profiler
 
 from ReactomePubMed import ReactomePubMedRetriever
 import ReactomeUtils as utils
 import ProteinProteinInteractionsLoader as ppi_loader
+import ReactomeNeo4jUtils as neo4j_utils
+import requests
 
 # This script should be the main entry.
 import logging_config
@@ -72,7 +74,7 @@ class GenePathwayAnnotator:
         return embeddings
     
     def _get_pubmed_retriver(self, 
-                             maxdate: str = '2024/12/31',
+                             maxdate: str = '2026/03/31',
                              top_k_results: int = 8,
                              max_query_length: int = 1000) -> ReactomePubMedRetriever:
         pubmed_retriever = ReactomePubMedRetriever()
@@ -88,6 +90,56 @@ class GenePathwayAnnotator:
         if self.ppi_loader is None:
             self.ppi_loader = ppi_loader.PPILoader()
         return self.ppi_loader
+
+    def resolve_uniprot_accession(self, gene: str) -> str | None:
+        """Resolve a gene symbol to its canonical UniProt accession deterministically.
+
+        Looks the gene up in the Reactome graph first (reusing the accession Reactome
+        already stores, which also avoids creating a duplicate of an existing entity),
+        then falls back to the reviewed-human UniProt REST API for genes not yet in
+        Reactome. This replaces letting the LLM agents recall accessions from training,
+        which was the source of the cross-phase identifier inconsistency.
+
+        Args:
+            gene (str): Gene symbol (e.g. 'TANC1').
+
+        Returns:
+            str | None: The verified UniProt accession, or None if it could not be resolved.
+        """
+        if not gene:
+            return None
+        # 1) Reactome's own graph — authoritative, and reuses the existing entity.
+        accession = neo4j_utils.query_accession_for_gene(gene)
+        if accession:
+            logger.info(f"Resolved {gene} -> {accession} from the Reactome graph")
+            return accession
+        # 2) Fall back to UniProt for genes not yet in Reactome.
+        accession = self._lookup_uniprot_accession(gene)
+        if accession:
+            logger.info(f"Resolved {gene} -> {accession} from the UniProt REST API")
+        else:
+            logger.warning(f"Could not resolve a UniProt accession for {gene}")
+        return accession
+
+    def _lookup_uniprot_accession(self, gene: str) -> str | None:
+        """Query the UniProt REST API for the reviewed human accession of a gene symbol."""
+        url = "https://rest.uniprot.org/uniprotkb/search"
+        params = {
+            "query": f"gene_exact:{gene} AND organism_id:9606 AND reviewed:true",
+            "fields": "accession",
+            "format": "tsv",
+            "size": "1",
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=15)
+            resp.raise_for_status()
+            lines = resp.text.strip().splitlines()
+            # Line 0 is the "Entry" header; line 1 (if present) is the accession.
+            if len(lines) >= 2:
+                return lines[1].strip()
+        except Exception as e:
+            logger.warning(f"UniProt REST lookup failed for {gene}: {e}")
+        return None
     
     def set_ppi_loader(self, ppi_loader):
         self.ppi_loader = ppi_loader
@@ -357,7 +409,7 @@ class GenePathwayAnnotator:
 
     async def query_pubmed_abstracts_for_gene(self,
                                               query_gene: str,
-                                              pubmed_maxdate: str='2024/12/31',
+                                              pubmed_maxdate: str='2026/03/31',
                                               top_k_results: int = 8,
                                               max_query_length: int = 1000) -> List[Document]:
         """Query pubmed about interactions, reactions, and pathways for a gene and return
@@ -459,7 +511,11 @@ class GenePathwayAnnotator:
         # Pass a dummy runnable passthrough to make the chain work.
         dummy = RunnablePassthrough()
         llm_chain = dummy | answer
-        result = llm_chain.invoke(parameters)
+        # Fallback attribution for token profiling: force=False so a caller that already set a
+        # more specific label (e.g. the precompute paths) keeps it; bare invoke_llm calls (the
+        # in-pipeline rerank similarity validation) get tagged here instead of "unattributed".
+        with token_profiler.label("genepathway_invoke_llm", force=False):
+            result = llm_chain.invoke(parameters)
         return result
 
     async def _summarize_abstract_results_for_multiple_pathways(self,
@@ -700,52 +756,6 @@ class GenePathwayAnnotator:
         avg_similarity = np.mean(similarity_scores)
         return avg_similarity
         
-
-    def analyze_full_paper(self,
-                           paper_file_name: str,
-                           query_gene: str,
-                           model: any,
-                           top_pages: int = 12,
-                           max_score: float = 50.0) -> list:
-        """Analyze a full text pdf paper provided by paper_file_name.
-
-        Args:
-            paper_file_name (str): the file location of the full text pdf
-            query_gene (str): the query gene the analysis should focus on
-            model (any): an LLM model
-            top_pages (int): only select these many top matched text chunks
-            max_score (float): the max score should be used to filter out text chunks
-        """
-        # Load the paper first
-        loader = PyPDFLoader(paper_file_name)
-        token_splitter = self._get_text_splitter()
-        pages = loader.load_and_split(token_splitter)
-
-        # Embedding the paper
-        embeddings = self._get_embedding()
-        paper_db = FAISS.from_documents(pages, embeddings)
-
-        # Fetch the best matched text
-        query = f'({query_gene} interactions) or ({query_gene} reactions) or ({query_gene} pathways)'
-        matched_pages = paper_db.similarity_search_with_score(
-            query, k=top_pages)
-
-        # Prepare to call llm
-        parameters = {
-            'query_gene': query_gene
-        }
-        prompt = prompts.relationship_extraction_prompt
-        results = []
-        for doc, score in matched_pages:
-            if score > max_score:
-                # The returned results are sorted. If we see this, we can break the loop.
-                break
-            parameters['docs'] = doc.page_content
-            parameters['document'] = doc.page_content
-            result = self.invoke_llm(
-                model=model, parameters=parameters, prompt=prompt)
-            results.append(result)
-        return results
 
     def output_llm_result(self, result):
         formatted_result = '\nResult: {}\n\nDoc: {}'.format(

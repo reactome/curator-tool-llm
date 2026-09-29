@@ -1,0 +1,18 @@
+.env
+
+# Large local interaction datasets (IntAct / BioGRID) — not version controlled
+resources/interactions/
+
+# OS / editor / Python cruft
+.DS_Store
+__pycache__/
+*.log
+.ipynb_checkpoints/
+
+# Generated run artifacts and scratch output
+results/
+mongo_ingest.out
+*.out
+
+# Full-text: local user config, index cache, downloaded PMC XML, and all other local data artifacts
+data/

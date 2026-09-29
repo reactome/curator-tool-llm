@@ -1,6 +1,7 @@
+import os
 from pathlib import Path
 from typing import Collection
-from langchain.text_splitter import SentenceTransformersTokenTextSplitter
+from langchain_text_splitters import SentenceTransformersTokenTextSplitter
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_community.embeddings import HuggingFaceEmbeddings
@@ -24,7 +25,11 @@ logger = log.getLogger(__name__)
 
 # Used to query interacting pathways
 REACTOME_IDG_FI_API_URL = 'https://idg.reactome.org/idgpairwise/relationships/combinedScoreGenesForTerm/'
-REACTOME_PATHWAY_GENE_FILE = 'resources/ReactomePathwayGenes_Ver_91.txt'
+# Resolve relative to this module (repo_root/resources/...) so callers work regardless of
+# cwd (e.g. running from notebooks/). Points at the same file the cwd-relative path used to.
+REACTOME_PATHWAY_GENE_FILE = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), '..', 'resources',
+                 'ReactomePathwayGenes_Ver_91.txt'))
 
 RANDOM_STATE = 123456
 
@@ -280,23 +285,6 @@ Roles of the query gene in reactions annotated in the pathway: {}
     return pathway_text
 
 
-def download_pdf_paper(url: str,
-                       pmid: str | int,
-                       paper_dir: str):
-    """Download a PDF file directly from the provided URL.
-    Note: The downloading of using a script from the PMC web site is blocked!
-
-    Args:
-        url (str): _description_
-        pmid (str | int): _description_
-        paper_dir (str): _description_
-    """
-    response = requests.get(url)
-    file_name = Path(paper_dir, '{}.pdf'.format(pmid))
-    with open(file_name, 'wb') as file:
-        file.write(response.content)
-
-
 def map_interactions_in_pathways(interaction_dict, pathway_file: str = REACTOME_PATHWAY_GENE_FILE) -> pd.DataFrame:
     """Map the interactions to pathways.
 
@@ -387,6 +375,12 @@ def pathway_binomial_enrichment_df(map_df,
             mapped_genes_all.append(mapped_genes)
             pmids_all.append(row['pmids'])
 
+    # No pathway overlapped the interaction set (common for sparse/uncharacterized genes) -> nothing
+    # to FDR-correct. Return an empty frame instead of letting multipletests divide by zero on an
+    # empty list (the "float division by zero" that broke FAM120C's protein_interactions call).
+    if not p_values:
+        return pd.DataFrame(columns=["pathway_id", "pathway_name", "overlap_count",
+                                     "mapped_genes", "pmids_all", "pVal", "FDR"])
     # Apply FDR correction using Benjamini-Hochberg method
     q_values = smm.multipletests(p_values, method='fdr_bh')[1]
 
@@ -456,6 +450,10 @@ def pathway_binomial_enrichment(gene_list, pathway_file: str = REACTOME_PATHWAY_
             overlap_counts.append(overlap_count)
             p_values.append(p_value)
 
+    # Same empty-overlap guard as pathway_binomial_enrichment_df: avoid the multipletests
+    # divide-by-zero when no pathway overlaps the gene set.
+    if not p_values:
+        return pd.DataFrame(columns=["pathway_id", "pathway_name", "overlap_count", "pVal", "FDR"])
     # Apply FDR correction using Benjamini-Hochberg method
     q_values = smm.multipletests(p_values, method='fdr_bh')[1]
 
@@ -472,3 +470,117 @@ def pathway_binomial_enrichment(gene_list, pathway_file: str = REACTOME_PATHWAY_
     df = df.sort_values(by="FDR").reset_index(drop=True)
 
     return df
+
+
+# --- Deterministic pathway placement (Part 3) --------------------------------------------
+# Lazily-constructed MongoFILoader singleton; its __init__ hits Mongo to load the gene
+# index, so build it once and reuse across genes.
+_fi_loader = None
+
+
+def _get_fi_loader():
+    global _fi_loader
+    if _fi_loader is None:
+        from ProteinProteinInteractionsLoader import MongoFILoader
+        _fi_loader = MongoFILoader()
+    return _fi_loader
+
+
+def _placement_candidate(row) -> dict:
+    """One enriched-pathway row -> a JSON-serializable candidate dict."""
+    return {
+        "pathway_id": int(row["pathway_id"]),
+        "pathway_name": row["pathway_name"],
+        "fdr": float(row["FDR"]),
+        "overlap_count": int(row["overlap_count"]),
+        "mapped_genes": list(row["mapped_genes"]),  # top-N partners hitting this pathway
+    }
+
+
+def suggest_pathway_placement(gene: str, fi_cutoff: float = 0.8, top_n: int = 10,
+                              fdr_cutoff: float = 0.05,
+                              tie_margin_orders: float = 1.0) -> dict:
+    """Suggest Reactome pathway placement for a gene from its top interaction partners.
+
+    Deterministic and LLM-free: ranks the gene's functional-interaction partners by FI score
+    (top ``top_n``), maps them into Reactome pathways, and runs binomial + BH-FDR enrichment.
+    The #1 FDR-ranked pathway is the primary suggestion; any pathway whose FDR is within
+    ``tie_margin_orders`` decades of the primary's FDR is surfaced as a close secondary
+    candidate (a genuine statistical tie, not a re-decision). This produces a ranked,
+    statistically-grounded suggestion for Phase 2's reactome_curator agent to *verify*; it
+    does not itself decide the answer beyond what the FDR ranking determines.
+
+    Returns a JSON-serializable dict:
+        gene, status, primary, secondary, partners_used, n_significant_total, params
+    status is one of:
+        "ok"                     -> primary populated
+        "no_partners"            -> gene has no FI partners above fi_cutoff
+        "no_significant_pathway" -> partners found but none clear fdr_cutoff
+    """
+    result = {
+        "gene": gene,
+        "status": "ok",
+        "primary": None,
+        "secondary": [],
+        "partners_used": [],
+        "n_significant_total": 0,
+        "params": {"fi_cutoff": fi_cutoff, "top_n": top_n,
+                   "fdr_cutoff": fdr_cutoff, "tie_margin_orders": tie_margin_orders},
+    }
+
+    fi_df = _get_fi_loader().fetch_fis(gene, fi_cutoff=fi_cutoff)
+    if fi_df is None or fi_df.empty:
+        result["status"] = "no_partners"
+        return result
+
+    top = fi_df.sort_values("score", ascending=False).head(top_n)
+    partners = list(top["gene"])
+    result["partners_used"] = [{"gene": g, "score": float(s)}
+                               for g, s in zip(top["gene"], top["score"])]
+
+    map_df = map_interactions_in_pathways({p: set() for p in partners},
+                                          pathway_file=REACTOME_PATHWAY_GENE_FILE)
+    if map_df is None or map_df.empty:
+        result["status"] = "no_significant_pathway"
+        return result
+
+    enriched = pathway_binomial_enrichment_df(map_df, partners,
+                                              pathway_file=REACTOME_PATHWAY_GENE_FILE,
+                                              fdr_cutoff=fdr_cutoff)
+    if enriched is None or enriched.empty:
+        result["status"] = "no_significant_pathway"
+        return result
+
+    result["n_significant_total"] = len(enriched)
+    primary_fdr = float(enriched.iloc[0]["FDR"])
+    result["primary"] = _placement_candidate(enriched.iloc[0])
+
+    # Close ties: within tie_margin_orders decades of the primary FDR. enriched is sorted by
+    # FDR ascending, so once a row exceeds the threshold every later row does too -> break.
+    # Floor the primary FDR to avoid a zero threshold when it underflows to 0.0.
+    threshold = max(primary_fdr, 1e-300) * (10 ** tie_margin_orders)
+    for _, row in enriched.iloc[1:].iterrows():
+        if float(row["FDR"]) <= threshold:
+            result["secondary"].append(_placement_candidate(row))
+        else:
+            break
+    return result
+
+
+def is_confident_placement(placement: dict, max_fdr: float = 1e-3,
+                           min_partners: int = 2) -> bool:
+    """Whether a suggest_pathway_placement result is confident enough to anchor retrieval /
+    the curation directive on (vs falling back to gene-name/synonym retrieval).
+
+    Gate tuned on a cold-start vs have-data sweep (2026-07-08): every have-data reference
+    placement clears FDR<=1.9e-5 with >=3 partners, while the TANC1-class failures (which
+    tanked the end-to-end annotation: 0.88 -> 0.48, approved -> rejected) had FDR>1e-3 and a
+    single supporting partner. Cost is asymmetric — a wrong anchor propagates through Stage-1
+    retrieval + rerank + the curator prompt, whereas a false negative just reverts to the safe
+    gene-name baseline — so the gate errs toward gating out.
+    """
+    if not placement or placement.get("status") != "ok" or not placement.get("primary"):
+        return False
+    primary = placement["primary"]
+    return (primary["fdr"] < max_fdr
+            and len(primary.get("mapped_genes", [])) >= min_partners)
