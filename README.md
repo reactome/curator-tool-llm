@@ -9,7 +9,7 @@ result](#how-to-read-the-result).
 The whole pipeline runs from one command:
 
 ```bash
-conda run -n paperqa python run_curator.py "GENE"
+conda run -n reactome_ai python run_curator.py "GENE"
 ```
 
 ---
@@ -106,7 +106,7 @@ the query) / `give_up`. It can only *propose* a retry — `run_curator.py` owns 
   pathway, `fail` when it doesn't (reactions, if any, come back unplaced for manual placement).
 
 - **Full-text extraction runs as subprocesses.** Tool 4 (`fulltext_extractor.py`) shells out to
-  `run_extraction.py` → `run_merge.py` → `run_review.py` (the partner's tested CLIs). They *look*
+  `run_extraction.py` → `run_merge.py` → `run_review.py` (the tested CLIs). They *look*
   like standalone scripts but are a live part of the pipeline — don't delete them.
 
 - **Two MongoDBs, one server.** MongoDB (`:27017`) holds **two** databases the pipeline uses:
@@ -121,7 +121,7 @@ the query) / `give_up`. It can only *propose* a retry — `run_curator.py` owns 
 
 ## Prerequisites
 
-- **Python 3.10** (conda env recommended; on this setup it's `paperqa`)
+- **Python 3.10** (conda env recommended; on this setup it's `reactome_ai`)
 - **Neo4j** with a Reactome graph loaded (Bolt on `:7687`)
 - **MongoDB** on `:27017` with two databases (abstracts + functional interactions)
 - **API keys:** Anthropic (extraction/merge/convert/QA), OpenAI (`run_review.py` full-text review only), NCBI/PubMed (E-utilities)
@@ -134,8 +134,8 @@ Three steps — **all three are required**; the Python install alone will not ru
 
 **1. Python environment + dependencies:**
 ```bash
-conda create -n paperqa python=3.10
-conda activate paperqa
+conda create -n reactome_ai python=3.10
+conda activate reactome_ai
 pip install -r requirements.txt
 ```
 `requirements.txt` is the **single, authoritative** dependency list — install from it. (There is
@@ -195,8 +195,7 @@ name is `graph.db` (not `reactome`). Sanity check: `run_curator.py` exits at sta
 is unreachable.
 
 **2. MongoDB — two databases on `:27017`:**
-- **`PUBMED_MONGO_DB` (PubMed abstract cache) — self-populating.** Abstracts/JATS are fetched from
-  NCBI on demand and cached as you run (needs `PUBMED_API_KEY`). Nothing to preload.
+- **`PUBMED_MONGO_DB` (PubMed abstract cache)** This may need to be pre-loaded. See the script for details on how to load: [PubmedHandler.py](https://github.com/reactome-idg/fi-network-ml/blob/master/scripts/nlp/PubmedHandler.py).
 - **`FIS_MONGO_DB` = `idg_pairwise` (functional-interaction partners, used for placement) — must be
   loaded separately.** This repo only *reads* it. The data is produced by the Reactome
   `org.reactome.idg.pairwise` Java project (`MainApp`), or copied from a machine that already has it
@@ -204,8 +203,7 @@ is unreachable.
   cold-start genes can't be placed.
 
 **3. Interaction flat files (`resources/interactions/`)** — BioGRID + IntAct, gitignored (large).
-Download the exact versions listed in `resources/llm_interactions/README.txt`. These feed the
-non-Mongo interaction path (`ProteinProteinInteractionsLoader.load_interactions`).
+Suggest to download the latest version from the web sites listed in `resources/llm_interactions/README.txt`. However, if there are any parsing errors, use the versions as described in the file. These feed the non-Mongo interaction path (`ProteinProteinInteractionsLoader.load_interactions`).
 
 **Moving the Mongo DBs between machines** (e.g. from a dev box to `curator.reactome.org`):
 ```bash
@@ -225,19 +223,21 @@ mongorestore --db idg_pairwise /path/to/backup/idg_pairwise   # same for the abs
 
 ## Running it
 
+*Note*: If you have already run conda activate reactome_ai (i.e. your local conda env has been activated) in the terminal, no need to add "conda run -n reactome_ai" before "python" below.
+
 ```bash
 # One or more genes (full pipeline: retrieval → extraction → QA)
-conda run -n paperqa python run_curator.py SHANK3
-conda run -n paperqa python run_curator.py SHANK3 TANC1 CTTNBP2
+conda run -n reactome_ai python run_curator.py SHANK3
+conda run -n reactome_ai python run_curator.py SHANK3 TANC1 CTTNBP2
 
 # Point at a folder of curator PDFs (remembered for next time)
-conda run -n paperqa python run_curator.py SHANK3 --papers-dir /path/to/pdfs
+conda run -n reactome_ai python run_curator.py SHANK3 --papers-dir /path/to/pdfs
 
 # Papers-only: skip retrieval, annotate ONLY the PDFs in the folder
-conda run -n paperqa python run_curator.py SHANK3 --papers-only --papers-dir /path/to/pdfs
+conda run -n reactome_ai python run_curator.py SHANK3 --papers-only --papers-dir /path/to/pdfs
 
 # Cheap smoke test (no full text, rule-based reviewer/QA — no LLM cost)
-conda run -n paperqa python run_curator.py SHANK3 --no-full-text --no-llm-review --no-llm-qa
+conda run -n reactome_ai python run_curator.py SHANK3 --no-full-text --no-llm-review --no-llm-qa
 ```
 
 | Flag | Default | Meaning |
@@ -287,7 +287,7 @@ Tool 4 turns resolved papers into reactions. For each paper, `fulltext_extractor
 subprocesses in order:
 
 1. **`run_extraction.py`** — isolates the paper's Results section (deterministic heading match, LLM
-   fallback for PDFs; exact JATS tags for PMC XML), then extracts reactions **chunk by chunk** with
+   fallback for PDFs; exact JATS (Journal Article Tag Suite) tags for PMC XML), then extracts reactions **chunk by chunk** with
    a LangGraph memory window (2 previous + 1 next chunk) so reactions spanning chunk boundaries are
    still captured.
 2. **`run_merge.py`** — a four-stage semantic merge (pairwise LLM judging → conflict-aware
