@@ -41,3 +41,12 @@ pypdf
 
 # Optional: Chainlit chat UI (notebooks/, chainlit.md)
 chainlit
+
+# REST service + tests
+fastapi
+uvicorn
+httpx
+rapidfuzz
+pytest
+jsonpatch
+python-multipart
