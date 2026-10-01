@@ -44,33 +44,47 @@ class DefaultPipeline:
             raise RuntimeError('no reactions could be extracted from this paper '
                                f'(no open-access full text, or nothing reaction-like in it): {res.error or ""}'.strip())
 
-        report('verifying quotes against the paper')
+        paper_for, papers = self._paper_loader(spec)
+        return self.assemble(spec, reactions, paper_for, papers, report)
+
+    @staticmethod
+    def _paper_loader(spec: PipelineInput):
+        """(source -> PaperText, cache of the papers loaded). A PDF is read once; a PMID through the PMC cache."""
         papers: Dict[str, Optional[PaperText]] = {}
         if spec.pdf_path:
             pdf = PaperText.from_pdf(None, spec.pdf_path)
-            paper_for = lambda src: pdf
             papers['main'] = pdf
-        else:
-            def paper_for(src):
-                if src not in papers:
-                    papers[src] = load_paper_text(src)
-                papers.setdefault('main', papers[src])
-                return papers[src]
+            return (lambda src: pdf), papers
+
+        def paper_for(src):
+            if src not in papers:
+                papers[src] = load_paper_text(src)
+            papers.setdefault('main', papers[src])
+            return papers[src]
+        return paper_for, papers
+
+    def assemble(self, spec: PipelineInput, reactions: List[dict], paper_for, papers: Dict[str, Optional[PaperText]],
+                 report: Callable[[str], None], draft=None) -> PipelineResult:
+        """Everything after extraction: verify quotes, build the typed draft, resolve identifiers, look for
+        existing reactions. Pass `draft` to skip the one LLM call that builds it (used to rebuild a saved result
+        from files without calling any model)."""
+        report('verifying quotes against the paper')
         store = EvidenceStore()
         attach_evidence(reactions, store, paper_for)
         issues: List[Issue] = iss.rejected_quote_issues({
             f'r{i}': (r.get('annotation_result', r).get('evidence_rejected') or [])
             for i, r in enumerate(reactions)})
 
-        report('building the Reactome draft')
-        accession = None
-        if spec.focus and self.uniprot:
-            try:
-                accession = self.uniprot.search_gene(spec.focus)
-            except Exception as e:
-                logger.warning('UniProt lookup for focus %s failed: %s', spec.focus, e)
-        draft, notes = build_draft(spec.focus or 'the paper', reactions, accession, self.model)
-        issues += iss.issues_from_notes('builder', notes)
+        if draft is None:
+            report('building the Reactome draft')
+            accession = None
+            if spec.focus and self.uniprot:
+                try:
+                    accession = self.uniprot.search_gene(spec.focus)
+                except Exception as e:
+                    logger.warning('UniProt lookup for focus %s failed: %s', spec.focus, e)
+            draft, notes = build_draft(spec.focus or 'the paper', reactions, accession, self.model)
+            issues += iss.issues_from_notes('builder', notes)
 
         report('resolving identifiers')
         issues += iss.issues_from_notes('resolver', Resolver(self.lookup, self.uniprot, self.ontology).resolve(draft))

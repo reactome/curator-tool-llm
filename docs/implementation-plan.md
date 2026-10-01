@@ -23,7 +23,15 @@ Also done since: (1) extract -> merge -> review behind a typed `Extractor` (`Ext
 
 Known limits: existing-event matching uses the release graph, so unreleased gk_central work is not seen; draft reactions with a single accession and no catalyst produce weak info-level "similar" matches; extraction and merge take about 10-15 minutes per paper.
 
-Not done: frontend work (Phase 6), and checking `SESSION_STORE=mongo` inside the running app.
+Frontend (curator-tool-frontend, branch `feature/paper-annotation`): the new module `src/app/paper-annotation` replaces the old CrewAI `paper2path` page at the same route; session list with PMID and PDF start forms, a workspace with reactions, evidence (page, section, figure, verification), issues, per-reaction QA, the chat with proposal cards (accept / reject), and an Evidence button on loaded staged instances. `HeaderInterceptor` sends the token to `environment.llmApiURL` but never logs the curator out because of it (service down, 401). The tour, help panel and tutorial text were rewritten for the new workflow.
+
+Staging decision (changed): loading does NOT merge. "Load into staged instances" first backs up whatever is staged (the same server save `persistInstances` makes; nothing is replaced if it fails), then replaces staging using the same load as the staged-instances file import. Ids are not renumbered, so a staged instance keeps the id the session knows it by, which is how its evidence is found. Loading again after accepting edits replaces the staged copies. A warning shows when the annotation exceeds `MAX_STAGED_INSTANCES` (200).
+
+Verified: frontend full suite 1042 of 1042, production build, strict-template type check; the real PINK1 export run through the frontend's `handleInstanceAttributes` and `cloneInstanceForCommit`; the real chain (ws login, `/api/auth/verify`, CORS preflight from :4200) against the running service. Not yet verified: a human click-through in a browser, and `hydrateUserInstances` against the live ws schema. `llmApiURL` in `environment.prod.ts` (`/llm/api/llm`) is a placeholder for the real reverse-proxy path.
+
+Not done: checking `SESSION_STORE=mongo` inside the running app.
+
+Faster interface work: every successful run is saved to `data/snapshots/` (keyed by PMID or PDF content, plus the focus gene). With `SNAPSHOT_MODE=replay` the service reuses a saved result instead of calling the models, so a ready session appears in about a second (record is the default; off disables it). `python scripts/make_snapshot.py --pmid ... --focus ... --pdf ... --merged ... --draft ...` builds a snapshot from files an earlier run left behind, with no model calls. Snapshots are not refreshed when prompts or code improve: delete one to extract again.
 
 Run the service: `uvicorn curator_llm.main:app --port 8000`. Settings (in `.env`): `WS_BASE_URL`, `SESSION_STORE=memory|mongo`, `CORS_ORIGINS`, `UPLOAD_DIR`, `CHAT_MODEL`, `LLM_REVIEW=1`.
 

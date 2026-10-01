@@ -1,8 +1,16 @@
 """Production wiring. Run:  uvicorn curator_llm.main:app --port 8000
 
-Environment (.env is loaded): WS_BASE_URL (default http://localhost:9090), SESSION_STORE=memory|mongo
-(default memory), CHAT_MODEL (default claude-sonnet-5-5), CORS_ORIGINS (default http://localhost:4200), UPLOAD_DIR (default data/uploads), LLM_REVIEW=1 to also run the OpenAI cross-model review, plus the existing
-ANTHROPIC_API_KEY, REACTOME_NEO4J_*, PUBMED_MONGO_URI."""
+Settings (.env is loaded):
+  WS_BASE_URL      curator-tool-ws, which checks every token (default http://localhost:9090)
+  SESSION_STORE    memory (default) or mongo
+  SNAPSHOT_MODE    record (default: save each successful run), replay (reuse a saved result instead of calling the
+                   models; for interface development and demos) or off. SNAPSHOT_DIR defaults to data/snapshots.
+  CHAT_MODEL       default claude-sonnet-5-5
+  CORS_ORIGINS     default http://localhost:4200
+  UPLOAD_DIR       default data/uploads
+  LLM_REVIEW=1     also run the OpenAI cross-model review
+plus the existing ANTHROPIC_API_KEY, REACTOME_NEO4J_* and PUBMED_MONGO_URI.
+"""
 import os
 
 from dotenv import load_dotenv
@@ -30,12 +38,15 @@ def build_app():
     lookup0 = Neo4jInstanceLookup.from_env()
     pipeline = DefaultPipeline(lookup0, RestUniProtClient(), OlsClient(),
                                review=os.getenv('LLM_REVIEW') == '1', events=lookup0)
+    from curator_llm.services.snapshots import SnapshotPipeline, SnapshotStore
     lookup = pipeline.lookup
     uniprot, ols = pipeline.uniprot, pipeline.ontology
     from curator_llm.services.resolvers import Resolver
+    snapshot_mode = os.getenv('SNAPSHOT_MODE', 'record')
     origins = [o.strip() for o in os.getenv('CORS_ORIGINS', 'http://localhost:4200').split(',') if o.strip()]
     return create_app(WsAuthProvider(os.getenv('WS_BASE_URL', 'http://localhost:9090')),
-                      store, InProcessJobRunner(), pipeline,
+                      store, InProcessJobRunner(), SnapshotPipeline(pipeline, SnapshotStore(
+                          os.getenv('SNAPSHOT_DIR', os.path.join(ROOT, 'data', 'snapshots'))), snapshot_mode),
                       resolver_factory=lambda: Resolver(lookup, uniprot, ols), events=lookup,
                       upload_dir=os.getenv('UPLOAD_DIR', os.path.join(ROOT, 'data', 'uploads')),
                       cors_origins=origins, chat_model=AnthropicChatModel())
