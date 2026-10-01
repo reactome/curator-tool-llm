@@ -10,6 +10,7 @@ nothing here touches an event loop.
 """
 
 import logging
+import os
 from typing import Any, Dict, List
 
 import logging_config
@@ -55,6 +56,13 @@ class ReactomeFullTextAnalyzer:
         all_per_paper = per_paper + abstract_per_paper
         # NOTE: no cross-paper dedup yet — duplicate reactions across papers are possible.
         reactions = [rx for p in all_per_paper for rx in (p.get("reactions") or [])]
+        # Verify every quote against its paper and give each reaction `evidence_ids`. Done once
+        # over all papers so ids are unique per gene run; the dicts are shared with per_paper.
+        try:
+            from curator_llm.services.evidence_attach import attach_gene_evidence
+            attach_gene_evidence(reactions, gene, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results"))
+        except Exception as e:
+            logger.warning(f"{gene}: evidence attach skipped: {e}")
         logger.info(
             f"{gene}: {len(per_paper)} full-text + {len(abstract_per_paper)} abstract paper(s) "
             f"-> {len(reactions)} reaction(s) total.")

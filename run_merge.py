@@ -26,10 +26,12 @@ Usage:
 """
 import os, sys, json, re, time, argparse, itertools
 from concurrent.futures import ThreadPoolExecutor
-PROJECT_ROOT = os.path.expanduser('~/curator-tool-llm')
+PROJECT_ROOT = os.environ.get('CURATOR_LLM_ROOT') or os.path.dirname(os.path.abspath(__file__))
 from dotenv import load_dotenv
 load_dotenv(os.path.join(PROJECT_ROOT, '.env'), override=True)
 import anthropic
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from curator_llm.services.evidence_attach import merge_details
 
 client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
 MODEL_NAME = 'claude-sonnet-5'
@@ -111,12 +113,23 @@ def _sig(a):
     return (_norm(a.get('name')), ins, outs)
 
 # 1) collapse exact duplicates to unique signatures
-_seen, unique = set(), []
+# The dropped copy's evidence is folded into the kept one: two extractions of the same reaction
+# usually quote different sentences, and discarding the copy would silently lose those quotes.
+_seen, unique = {}, []
 for e in extraction_results:
     a = e.get('annotation_result') or {}
     s = _sig(a)
-    if s and s not in _seen:
-        _seen.add(s); unique.append(e)
+    if not s:
+        continue
+    kept = _seen.get(s)
+    if kept is None:
+        _seen[s] = e; unique.append(e)
+        continue
+    if kept.get('source') != e.get('source'):
+        continue            # unchanged behaviour: a same-signature record from another paper is dropped
+    ka = kept['annotation_result']
+    ka['evidence'] = list(dict.fromkeys((ka.get('evidence') or []) + (a.get('evidence') or [])))
+    ka['evidence_details'] = merge_details(ka.get('evidence_details'), a.get('evidence_details'))
 
 print(f"[setup] {len(extraction_results)} entries -> {len(unique)} unique signatures", flush=True)
 print("[setup] unique reactions BEFORE semantic merge:", flush=True)
@@ -330,6 +343,7 @@ def merge_two(e1, e2):
         'relationships': union(a1.get('relationships',[]), a2.get('relationships',[])),
         # combine the source-text excerpts from both copies so the merged reaction cites every place it was found
         'evidence': union(a1.get('evidence',[]), a2.get('evidence',[])),
+        'evidence_details': merge_details(a1.get('evidence_details'), a2.get('evidence_details')),
         'confidence': round(((a1.get('confidence') or 0)+(a2.get('confidence') or 0))/2, 3),
         'merged_names': sorted(set(names1 + names2)),   # full cluster membership
         # which neighbouring chunks the variants had to consult — "none" only survives

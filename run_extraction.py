@@ -20,7 +20,7 @@ Writes results/<stem>[_<tag>]_extraction.json per paper (incremental, per
 chunk). Refuses to overwrite an existing extraction unless --overwrite is given.
 """
 import os, sys, json, time, glob, argparse, importlib.util
-PROJECT_ROOT = os.path.expanduser('~/curator-tool-llm')
+PROJECT_ROOT = os.environ.get('CURATOR_LLM_ROOT') or os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, 'reactome_llm'))
 from dotenv import load_dotenv
 load_dotenv(os.path.join(PROJECT_ROOT, '.env'), override=True)
@@ -33,6 +33,8 @@ from typing import TypedDict, List, Dict
 # PDF loading (fitz + extract_results_section) now lives in load_source(), so the
 # same call handles a local PDF or a PMID.
 import PubMedFetcher as fetcher
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from curator_llm.services.evidence_attach import split_evidence
 
 PAPERS_DIR = os.path.join(PROJECT_ROOT, 'data', 'papers')
 RESULTS_DIR = os.path.join(PROJECT_ROOT, 'results')
@@ -114,7 +116,7 @@ def process_chunk(state: PipelineState) -> PipelineState:
     next_context = state['chunks'][idx + 1] if idx + 1 < len(state['chunks']) else None
 
     result = extract_reactions(chunk, prev_contexts, next_context)
-    new_reactions = result.get('reactions', []) if result else []
+    new_reactions = [split_evidence(r) for r in (result.get('reactions', []) if result else [])]
     note = make_note(idx, new_reactions)
     recent = (([note] if note else []) + state['recent_notes'])[:PREV_WINDOW]
 

@@ -42,7 +42,8 @@ def build_extraction_prompt(current_chunk, prev_contexts=None, next_context=None
       - condition        : general biological condition/state (coarse; groups reactions)
       - summation        : Summation instance {text, literatureReference}
       - relationships    : "EntityA - relationship_type -> EntityB" lines
-      - evidence         : list of verbatim source-text excerpts the reaction was drawn from
+      - evidence         : list of evidence objects {quote, supports, system, experimental_species,
+                           claim_origin}; each quote is a verbatim source-text excerpt the reaction was drawn from
                            (provenance). Single citation pool for the WHOLE reaction — every
                            subsection filled in (regulatedBy, catalystActivity, compartment,
                            condition, input/output) must have a supporting excerpt here. May
@@ -92,7 +93,8 @@ captured ONCE no matter how many experiments demonstrate it:
     partners (e.g. HA-, His-, MBP-, GST-, FLAG-, GFP-, YFP-).
   - Normalize reagents and ortholog/species stand-ins to the entity they represent (a
     recombinant protein or an ortholog used as an in-vitro proxy is the SAME entity as the
-    native one).
+    native one). The entity name is normalized, but the species actually used is NOT thrown
+    away: record it on each evidence item as "experimental_species" (see the evidence rules).
   - Do NOT let the experimental SYSTEM (in vitro / cell-free / recombinant / in cells), the
     inducing TREATMENT, the DETECTION method, or a tool MUTANT (catalytic-dead trap,
     phosphomimetic, phospho-null) create separate reactions — the same enzyme + substrate +
@@ -184,6 +186,21 @@ of provenance and will naturally contain the experimental system, treatment, dos
 method — that is where all such specific detail lives. Add one excerpt per place the reaction is
 supported; if the reaction recurs in other chunks, its excerpts are pooled together later.
 
+Each evidence item is an OBJECT, not a bare string:
+  - "quote": the verbatim excerpt. Code checks every quote against the paper text, so a quote
+    that is reworded, stitched together, or not in the paper is REJECTED. To skip words inside
+    one sentence use "..." between the verbatim pieces; never paraphrase.
+  - "supports": which fields of THIS reaction the quote supports, from: "reaction", "input",
+    "output", "catalystActivity", "regulatedBy[i]" (i = index in your regulatedBy list),
+    "compartment", "condition".
+  - "system": how it was shown — "in_vitro_recombinant", "cell_free", "cellular", "in_vivo", or null.
+  - "experimental_species": the organism the protein/cells came from IN THIS EXPERIMENT, as the
+    Latin binomial ("Homo sapiens", "Tribolium castaneum" for an insect ortholog used as a
+    proxy), or null if not stated.
+  - "claim_origin": "this_paper" when the paper shows it, or "cited" when the paper only cites
+    it from earlier work (then give "cited_reference", e.g. "Kondapalli et al. 2012").
+One quote may support several fields: list them all in "supports" instead of repeating the quote.
+
 EVIDENCE THAT BLEEDS ACROSS THE CHUNK BOUNDARY — chunks cut the paper mid-sentence and
 mid-paragraph, so the passage supporting a reaction is often split across two chunks. You can
 always see the whole passage from the EARLIER side of a cut, because CONTEXT C gives you the
@@ -261,7 +278,15 @@ Return ONLY a JSON object, no markdown:
         "literatureReference": ["<PMID or citation string if mentioned, else empty list>"]
       }},
       "relationships": ["EntityA - relationship_type -> EntityB"],
-      "evidence": ["<verbatim excerpt supporting this reaction>", "<every additional excerpt where this reaction is stated — include all of them>", "<an excerpt for EACH subsection you filled in: regulator, catalyst, compartment, condition>", "<the continuing text from CONTEXT C if the passage ran past the chunk boundary>"],
+      "evidence": [
+        {{"quote": "<verbatim excerpt supporting this reaction>",
+          "supports": ["reaction", "catalystActivity"],
+          "system": "<in_vitro_recombinant | cell_free | cellular | in_vivo | null>",
+          "experimental_species": "<organism used in this experiment, or null>",
+          "claim_origin": "<this_paper | cited>",
+          "cited_reference": "<only when claim_origin is cited, else null>"}},
+        "<...one object for every additional excerpt where this reaction is stated — include all of them, and one for EACH subsection you filled in: regulator, catalyst, compartment, condition, plus the continuing text from CONTEXT C if the passage ran past the chunk boundary>"
+      ],
       "context_used": ["<none | previous_chunk | two_chunks_back | next_chunk — list EVERY context you consulted, whether to resolve the reaction or to quote an excerpt>"],
       "confidence": <float 0-1, confidence this reaction is correct and well-supported>
     }}

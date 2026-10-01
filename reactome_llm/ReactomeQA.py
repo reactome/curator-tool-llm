@@ -23,7 +23,6 @@ feedback loop can be added later without changing this class's `check()` contrac
 import json
 import logging
 import os
-import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -134,7 +133,8 @@ class ReactomeQA:
             instances = dm.model_dump(by_alias=True)
             schema_check = self._schema_check(instances)
             consistency_check = self._consistency_check(gene, instances)
-            report = (self._llm_review(gene, instances, schema_check, consistency_check)
+            report = (self._llm_review(gene, self._hydrate_evidence(instances, reactions),
+                                       schema_check, consistency_check)
                       if self.use_llm else self._rule_report(schema_check, consistency_check))
             verdict, passed = self._verdict(report, schema_check)
             n_issues = len(report.get("technical_issues", [])) + len(schema_check.get("errors", []))
@@ -259,6 +259,23 @@ class ReactomeQA:
         return report
 
     # ------------------------------------------------------------------ agentic review
+    @staticmethod
+    def _hydrate_evidence(instances: Dict[str, Any], reactions: List[dict]) -> Dict[str, Any]:
+        """For the LLM reviewer only: swap evidence ids for their quotes. The returned instances
+        keep ids, so the stored result is unchanged."""
+        quotes: Dict[str, str] = {}
+        for r in reactions or []:
+            ar = r.get("annotation_result", r) if isinstance(r, dict) else None
+            if isinstance(ar, dict) and ar.get("evidence_ids"):
+                quotes.update(zip(ar["evidence_ids"], ar.get("evidence") or []))   # parallel when nothing was rejected
+        if not quotes:
+            return instances
+        import copy
+        hydrated = copy.deepcopy(instances)
+        for rx in hydrated.get("reactions", []):
+            rx["evidence"] = [quotes.get(e, e) for e in rx.get("evidence", [])]
+        return hydrated
+
     def _llm_review(self, gene, instances, schema_check, consistency_check) -> Dict[str, Any]:
         """LLM Reactome-expert review -> QAReport (structured). Falls back to the rule report on error."""
         try:

@@ -26,7 +26,7 @@ own fetcher and splitter object, which costs a re-fetch.
 import os, sys, re, json, time, argparse
 from concurrent.futures import ThreadPoolExecutor
 
-PROJECT_ROOT = os.path.expanduser('~/curator-tool-llm')
+PROJECT_ROOT = os.environ.get('CURATOR_LLM_ROOT') or os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, PROJECT_ROOT)
 sys.path.insert(0, os.path.join(PROJECT_ROOT, 'reactome_llm'))
 from dotenv import load_dotenv

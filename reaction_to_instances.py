@@ -61,8 +61,8 @@ def _model():
 
 def _pmid_of(source: str) -> str:
     """Best-effort PMID from a reaction's source tag ('12345', '12345 (abstract)', a filename)."""
-    m = re.match(r"\s*(\d{5,9})", str(source or ""))
-    return m.group(1) if m else ""
+    from curator_llm.services.sources import pmid_of
+    return pmid_of(source) or ""
 
 
 def _reaction_items(reactions):
@@ -73,6 +73,11 @@ def _reaction_items(reactions):
         ar = r.get("annotation_result", r) if isinstance(r, dict) else r
         src = r.get("source", "") if isinstance(r, dict) else ""
         prov = r.get("provenance", "") if isinstance(r, dict) else ""
+        if isinstance(ar, dict) and ar.get("evidence_ids"):
+            # Evidence lives outside the LLM: show ids only, so quotes are never copied, trimmed
+            # or reworded here. Code restores the ids afterwards (restore_evidence_ids).
+            ar = {k: v for k, v in ar.items()
+                  if k not in ("evidence", "evidence_details", "evidence_rejected")}
         items.append({
             "provenance": prov or "fulltext",
             "pmid": _pmid_of(src),
@@ -149,7 +154,8 @@ Do ALL of the following:
 2. REACTIONS — create one Reaction per input reaction, carrying its fields over faithfully:
    reactionType, input, output, catalystActivity (the catalyst entity, if any), regulatedBy
    (format each as 'regulationType: regulator (note)'), compartment, summation, evidence (copy the
-   verbatim excerpts), confidence, and provenance ('fulltext' or 'abstract' from the input).
+   input reaction's `evidence_ids` UNCHANGED, e.g. ["ev-001", "ev-004"] -- ids, never quotes; if
+   the input has no evidence_ids, copy its verbatim excerpts), confidence, and provenance ('fulltext' or 'abstract' from the input).
    Put the reaction's PMID in literatureReference. Every entity you name in a reaction's
    input/output/catalystActivity MUST also exist as an entity (rule 1) — no dangling references.
 3. COMPLEXES — when a binding reaction forms a named complex (or a dissociation breaks one up),
@@ -168,11 +174,44 @@ Rules:
   "decreased EPSC amplitude", "increased synapse density", or "blocked transmission" -- those are
   observations, not Reactome PhysicalEntities. Drop reactions whose only output is such an
   observation.
-- Keep the output compact so nothing is truncated: for each reaction's `evidence`, include at most
-  the 2 most relevant verbatim excerpts, and keep `summation` to one sentence. Every input
+- Keep the output compact so nothing is truncated: `evidence` holds ids only (copy ALL of the
+  reaction's evidence_ids, none dropped), and keep `summation` to one sentence. Every input
   reaction that survives the rule above MUST appear as a Reaction — do not stop early.
 {fix_block}
 Return the Reactome data model for {gene}."""
+
+
+def _name_key(name) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(name or "").lower()).strip()
+
+
+def restore_evidence_ids(model: ReactomeDataModel, reactions) -> None:
+    """Make each converted reaction's `evidence` exactly its source reaction's evidence ids.
+
+    The model is asked to copy the ids, but it is not trusted to: ids it invented are dropped,
+    and ids it omitted are restored from the input reaction matched by name. Reactions with no
+    evidence_ids (abstract-only runs, older extractions) are left as the model returned them.
+    """
+    by_name, known = {}, set()
+    for r in reactions or []:
+        ar = r.get("annotation_result", r) if isinstance(r, dict) else None
+        if isinstance(ar, dict) and ar.get("evidence_ids"):
+            by_name[_name_key(ar.get("name"))] = list(ar["evidence_ids"])
+            known.update(ar["evidence_ids"])
+    if not by_name:
+        return
+    for rx in model.reactions:
+        key = _name_key(rx.displayName)
+        want = by_name.get(key)
+        if want is None and key:                          # the model lightly reworded the name
+            from rapidfuzz import process, fuzz
+            best = process.extractOne(key, list(by_name), scorer=fuzz.token_sort_ratio, score_cutoff=85)
+            want = by_name[best[0]] if best else None
+        kept = [e for e in rx.evidence if e in known]
+        if want is not None:
+            rx.evidence = list(dict.fromkeys(want))      # source of truth: the input reaction
+        else:
+            rx.evidence = kept
 
 
 def build_instances(gene, reactions, accession=None, placement=None,
@@ -201,6 +240,7 @@ def build_instances(gene, reactions, accession=None, placement=None,
     if isinstance(result, ReactomeDataModel):
         if not result.gene:
             result.gene = gene
+        restore_evidence_ids(result, reactions)
         logger.info("convert %s: %d entities, %d complexes, %d reactions, %d pathways",
                     gene, len(result.entities), len(result.complexes),
                     len(result.reactions), len(result.pathways))
