@@ -20,7 +20,7 @@ import xml.etree.ElementTree as et
 
 import requests
 
-PROJECT_ROOT = os.path.expanduser('~/curator-tool-llm')
+PROJECT_ROOT = os.environ.get('CURATOR_LLM_ROOT') or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CACHE_DIR = os.path.join(PROJECT_ROOT, 'data', 'pmc')
 PAPERS_DIR = os.path.join(PROJECT_ROOT, 'data', 'fulltext_pdf')
 # FullTextResolver downloads PMC XML here, keyed by PMID. load_source reads it before

@@ -6,17 +6,10 @@ can be reasoned about as usage scales. It is entirely GATED behind the TOKEN_PRO
 environment variable (default OFF) -- when off, every hook here is a no-op and the
 pipeline runs byte-for-byte unchanged.
 
-Two capture mechanisms, because the pipeline has two LLM paths:
-
-  A. CrewAI phases (Phases 1-5) run on CrewAI's native litellm-backed `LLM`. CrewAI
-     exposes per-crew `usage_metrics` after a kickoff. `profile_kickoff(...)` snapshots
-     a crew's metrics around one kickoff and records the delta (shared crew) or the raw
-     value (a fresh crew, whose metrics belong entirely to that one kickoff).
-
-  B. The description / gate / summary tools run on langchain_anthropic.ChatAnthropic.
-     `TokenProfileCallback` (a LangChain BaseCallbackHandler) reads token counts off each
-     response and attributes them to whatever `label(...)` context is active. Attach it
-     once in ModelConfig.create_reactome_chat_model() so it covers every direct call.
+Capture: the description / gate / summary tools run on langchain_anthropic.ChatAnthropic.
+`TokenProfileCallback` (a LangChain BaseCallbackHandler) reads token counts off each response and
+attributes them to whatever `label(...)` context is active. It is attached once in
+ModelConfig.create_reactome_chat_model(), so it covers every direct call.
 
 All records land in one process-global registry; `emit_report(gene)` writes a per-call-site
 CSV under data/ and prints a ranked summary with disproportion flags.
@@ -28,7 +21,7 @@ import logging
 import threading
 import contextvars
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -49,13 +42,13 @@ def enabled() -> bool:
 
 @dataclass
 class UsageRecord:
-    """One captured unit of token usage (one CrewAI kickoff, or one LangChain call)."""
+    """One captured unit of token usage (one LangChain call)."""
     label: str          # call-site / phase identifier, e.g. "phase_1_literature_extraction"
     phase: str          # coarse grouping, e.g. "phase_1" / "phase_5" / "precompute"
     model: str
     input_tokens: int
     output_tokens: int
-    calls: int          # underlying API requests (CrewAI: successful_requests; LangChain: 1)
+    calls: int          # underlying API requests (LangChain: 1 per call)
 
     @property
     def total_tokens(self) -> int:
@@ -113,63 +106,6 @@ def label(name: str, force: bool = True):
         yield
     finally:
         _current_label.reset(token)
-
-
-# --- CrewAI path: per-kickoff usage_metrics ------------------------------------------
-
-def _snapshot(crew: Any) -> Tuple[int, int, int, int]:
-    """(prompt_tokens, completion_tokens, total_tokens, successful_requests) from a crew, or zeros."""
-    m = getattr(crew, "usage_metrics", None)
-    if m is None:
-        return (0, 0, 0, 0)
-    return (
-        int(getattr(m, "prompt_tokens", 0) or 0),
-        int(getattr(m, "completion_tokens", 0) or 0),
-        int(getattr(m, "total_tokens", 0) or 0),
-        int(getattr(m, "successful_requests", 0) or 0),
-    )
-
-
-@contextmanager
-def profile_kickoff(label_name: str, crew: Any, phase: Optional[str] = None):
-    """Record the token cost of one CrewAI kickoff by diffing the crew's usage_metrics.
-
-    Robust to both accumulate- and reset-per-kickoff semantics: if the "after" totals exceed
-    "before", the crew accumulates and we take the delta; otherwise the crew reset and the
-    "after" value IS this kickoff's cost. Fresh crews (before == 0) yield delta == after either way.
-    """
-    if not enabled():
-        yield
-        return
-    before = _snapshot(crew)
-    try:
-        yield
-    finally:
-        after = _snapshot(crew)
-        # Per-field: accumulate -> after-before; reset -> after. See docstring.
-        pin, cin, tot, req = (
-            (a - b) if a >= b else a for a, b in zip(after, before)
-        )
-        # Raw values logged so the accumulate-vs-reset semantics can be verified on a real run.
-        logger.info(
-            "[token_profile] %s: before=%s after=%s -> in=%d out=%d calls=%d",
-            label_name, before, after, pin, cin, req,
-        )
-        _add(UsageRecord(
-            label=label_name,
-            phase=phase or _phase_of(label_name),
-            model="claude-sonnet-4-5 (crewai)",
-            input_tokens=pin,
-            output_tokens=cin,
-            calls=req,
-        ))
-
-
-def _phase_of(label_name: str) -> str:
-    """Coarse phase bucket from a label like 'phase_5_vote:reviewer' -> 'phase_5'."""
-    if label_name.startswith("phase_"):
-        return "_".join(label_name.split("_")[:2]).split(":")[0]
-    return "precompute"
 
 
 # --- LangChain path: callback handler -------------------------------------------------
