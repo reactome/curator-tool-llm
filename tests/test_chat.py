@@ -180,3 +180,14 @@ def test_anthropic_adapter_translates_stream_to_a_turn():
     assert got == ['Hel', 'lo'] and t.text == 'Hello' and t.tool_calls[0].name == 'get_reaction'
     assert t.content[1] == {'type': 'tool_use', 'id': 't1', 'name': 'get_reaction', 'input': {'key': 'r0'}}
     assert Client.messages.kw['system'] == 'sys' and Client.messages.kw['model'] == 'm'
+
+
+def test_chat_history_is_readable_after_the_turn_and_private():
+    c, sid, _ = setup([tool('propose_patch', reason='r', ops=CCCP, evidence=[{'quote': Q2}]), final('proposed')])
+    assert c.get(f'/api/llm/sessions/{sid}/chat', headers=H()).json() == []
+    chat(c, sid, 'add CCCP')
+    hist = c.get(f'/api/llm/sessions/{sid}/chat', headers=H()).json()
+    assert [m['role'] for m in hist] == ['user', 'assistant']
+    assert hist[0]['text'] == 'add CCCP' and hist[1]['text'] == 'proposed' and hist[1]['proposal_ids'] == ['p-001']
+    assert c.get(f'/api/llm/sessions/{sid}/chat', headers=H('bob')).status_code == 404
+    assert c.get(f'/api/llm/sessions/{sid}/chat').status_code == 401

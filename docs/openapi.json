@@ -790,6 +790,42 @@
       }
     },
     "/api/llm/sessions/{session_id}/chat": {
+      "get": {
+        "summary": "Chat History",
+        "description": "The conversation so far (user and assistant text, and the ids of any proposals a reply made).",
+        "operationId": "chat_history_api_llm_sessions__session_id__chat_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "summary": "Chat",
         "description": "Server-sent events: text (delta), tool, proposal, error, done. Use fetch with a streaming reader\n(EventSource cannot send the Authorization header).",

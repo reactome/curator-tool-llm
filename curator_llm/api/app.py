@@ -243,6 +243,11 @@ def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: O
             raise HTTPException(409, str(e))
         return next(p for p in s.proposals if p.id == proposal_id)
 
+    @router.get('/sessions/{session_id}/chat')
+    def chat_history(session_id: str, user: AuthUser = Depends(current_user)):
+        """The conversation so far (user and assistant text, and the ids of any proposals a reply made)."""
+        return load(session_id, user).chat
+
     @router.post('/sessions/{session_id}/chat')
     def chat(session_id: str, body: ChatRequest, user: AuthUser = Depends(current_user)):
         """Server-sent events: text (delta), tool, proposal, error, done. Use fetch with a streaming reader
