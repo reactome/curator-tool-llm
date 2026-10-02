@@ -159,7 +159,7 @@ repo. **This is the step people miss.** See [Services & data you must set up](#s
 
 ## Configuration (.env)
 
-Create a `.env` in the repo root (values loaded via `python-dotenv`; the Neo4j/Mongo vars can
+Copy [`.env.example`](.env.example) to `.env` in the repo root (`cp .env.example .env`) and fill in your values (values loaded via `python-dotenv`; the Neo4j/Mongo vars can
 alternatively live in your shell or `conda env config vars`):
 
 ```env
