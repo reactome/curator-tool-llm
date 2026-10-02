@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from curator_llm.models.evidence import Evidence
 from curator_llm.models.reactome import ReactomeDraft
+from curator_llm.models.usage import UsageEntry
 
 
 class Issue(BaseModel):
@@ -88,6 +89,9 @@ class Session(BaseModel):
     paper: Optional[dict] = None                # PaperText.to_dict(): for search and quote checks
     proposals: List[Proposal] = Field(default_factory=list)
     existing: List[ExistingMatch] = Field(default_factory=list)
+    usage: List[UsageEntry] = Field(default_factory=list)
+    # 'saved' when the result was replayed from a snapshot: the entries are from the original run, nothing was spent now
+    usage_source: Literal['run', 'saved'] = 'run'
     chat: List[ChatMessage] = Field(default_factory=list)
 
 

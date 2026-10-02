@@ -11,6 +11,7 @@ import threading
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from curator_llm.models.session import ChatMessage, Session
+from curator_llm.models.usage import UsageEntry
 from curator_llm.ports.chat_model import ChatModel
 from curator_llm.services.paper_text import PaperText
 from curator_llm.services.session_service import ProposalError, SessionService
@@ -218,12 +219,19 @@ class ChatAgent:
     def _loop(self, owner, session_id, message, selected, emit, q):
         proposals: List[str] = []
         final_text = ''
+        spent = UsageEntry(step='chat', model=getattr(self.model, 'model', None))     # this turn's model calls, summed
         try:
             s = self.service.store.get(session_id, owner)
             history = [{'role': m.role, 'content': m.text} for m in s.chat[-HISTORY_MESSAGES:]]
             messages: List[Dict[str, Any]] = history + [{'role': 'user', 'content': self._selection(s, selected) + message}]
             for _ in range(self.max_steps):
                 turn = self.model.turn(SYSTEM, messages, TOOLS, lambda t: emit('text', {'delta': t}))
+                spent.calls += 1
+                if turn.usage is not None:
+                    spent.input_tokens += turn.usage.input_tokens
+                    spent.output_tokens += turn.usage.output_tokens
+                    spent.cache_read_tokens += turn.usage.cache_read_tokens
+                    spent.cache_write_tokens += turn.usage.cache_write_tokens
                 final_text = turn.text or final_text
                 if not turn.tool_calls:
                     break
@@ -249,8 +257,15 @@ class ChatAgent:
                 s = self.service.store.get(session_id, owner)
                 s.chat.append(ChatMessage(role='user', text=message))
                 s.chat.append(ChatMessage(role='assistant', text=final_text, proposal_ids=proposals))
+                if spent.calls:
+                    spent.detail = f'turn {sum(m.role == "user" for m in s.chat)}'
+                    s.usage.append(spent)
                 self.service.store.save(s)
             except Exception:
                 logger.exception('could not save chat history')
-            emit('done', {'proposalIds': proposals})
+            done: Dict[str, Any] = {'proposalIds': proposals}
+            if spent.calls:
+                done['usage'] = {'calls': spent.calls, 'input_tokens': spent.input_tokens, 'output_tokens': spent.output_tokens,
+                                 'cache_read_tokens': spent.cache_read_tokens, 'cache_write_tokens': spent.cache_write_tokens}
+            emit('done', done)
             q.put(None)

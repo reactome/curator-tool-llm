@@ -22,6 +22,7 @@ from typing import Callable, Optional
 from curator_llm.models.evidence import Evidence
 from curator_llm.models.reactome import ReactomeDraft
 from curator_llm.models.session import ExistingMatch, Issue
+from curator_llm.models.usage import UsageEntry
 from curator_llm.ports.pipeline import Pipeline, PipelineInput, PipelineResult
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,8 @@ class SnapshotStore:
                'evidence': [e.model_dump(mode='json') for e in result.evidence],
                'issues': [i.model_dump(mode='json') for i in result.issues],
                'paper': result.paper,
-               'existing': [m.model_dump(mode='json') for m in result.existing]}
+               'existing': [m.model_dump(mode='json') for m in result.existing],
+               'usage': [u.model_dump(mode='json') for u in result.usage]}
         path = self.path(key)
         tmp = f'{path}.tmp'
         with open(tmp, 'w') as f:
@@ -83,7 +85,8 @@ class SnapshotStore:
                 evidence=[Evidence.model_validate(e) for e in doc['evidence']],
                 issues=[Issue.model_validate(i) for i in doc['issues']],
                 paper=doc.get('paper'),
-                existing=[ExistingMatch.model_validate(m) for m in doc.get('existing', [])])
+                existing=[ExistingMatch.model_validate(m) for m in doc.get('existing', [])],
+                usage=[UsageEntry.model_validate(u) for u in doc.get('usage', [])])       # absent in older snapshots
         except Exception as e:
             logger.warning('snapshot %s could not be read (%s: %s); ignoring it', key, type(e).__name__, e)
             return None
@@ -105,6 +108,7 @@ class SnapshotPipeline:
             saved = self.store.load(key)
             if saved is not None:
                 report(f'using the saved result for {key} (replay mode, no models called)')
+                saved.replayed = True              # its usage is the original run's, not spent now
                 return saved
         result = self.inner.run(spec, report)
         try:

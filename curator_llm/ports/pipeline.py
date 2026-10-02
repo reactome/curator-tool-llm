@@ -4,6 +4,7 @@ from typing import Callable, List, Optional, Protocol
 from curator_llm.models.evidence import Evidence
 from curator_llm.models.reactome import ReactomeDraft
 from curator_llm.models.session import ExistingMatch, Issue
+from curator_llm.models.usage import UsageEntry
 
 
 @dataclass
@@ -20,6 +21,8 @@ class PipelineResult:
     issues: List[Issue] = field(default_factory=list)
     paper: Optional[dict] = None       # PaperText.to_dict()
     existing: List[ExistingMatch] = field(default_factory=list)
+    usage: List[UsageEntry] = field(default_factory=list)
+    replayed: bool = False             # served from a saved result: the usage is the original run's
 
 
 class Pipeline(Protocol):

@@ -29,6 +29,7 @@ class QAResult(BaseModel):
     score: Optional[float] = None       # LLM's 0-1 confidence in the reaction, if it reviewed
     findings: List[QAFinding] = Field(default_factory=list)
     llm_used: bool = False
+    usage: Optional[Dict[str, int]] = None   # tokens the model review spent, when it ran
 
 
 def _state(draft: ReactomeDraft, key: str):
@@ -138,10 +139,14 @@ def qa_reaction(draft: ReactomeDraft, reaction_key: str, evidence: List[Evidence
         raise KeyError(reaction_key)
     ev = {e.id: e for e in evidence}
     findings = rule_findings(draft, r, ev)
-    score, verdict_llm, used = None, None, False
+    score, verdict_llm, used, spent = None, None, False, None
     if model is not None:
         try:
             turn = model.turn(QA_SYSTEM, [{'role': 'user', 'content': _llm_prompt(draft, r, ev, findings)}], [], lambda t: None)
+            u = getattr(turn, 'usage', None)           # recorded before parsing: a reply that cannot be parsed still cost tokens
+            if u is not None:
+                spent = {'input_tokens': u.input_tokens, 'output_tokens': u.output_tokens,
+                         'cache_read_tokens': u.cache_read_tokens, 'cache_write_tokens': u.cache_write_tokens}
             rev = parse_llm_review(turn.text)
             findings += rev['findings']
             score, verdict_llm, used = rev['score'], rev['verdict'], True
@@ -150,4 +155,4 @@ def qa_reaction(draft: ReactomeDraft, reaction_key: str, evidence: List[Evidence
                                       message=f'the LLM review could not be completed ({type(e).__name__})'))
     needs = any(f.severity == 'action' for f in findings) or verdict_llm == 'needs_work'
     return QAResult(reaction_key=reaction_key, verdict='needs_work' if needs else 'ok', score=score,
-                    findings=findings, llm_used=used)
+                    findings=findings, llm_used=used, usage=spent)

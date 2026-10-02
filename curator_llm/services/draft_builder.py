@@ -10,11 +10,13 @@ import json
 import logging
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
+from langchain_core.callbacks import UsageMetadataCallbackHandler
 from pydantic import BaseModel, Field
 
 from curator_llm.models.reactome import (CatalystSpec, ComplexSpec, DefinedSetSpec, EwasSpec, GoActivity,
                                          ModifiedResidueSpec, PathwaySpec, ReactionSpec, ReactomeDraft,
                                          RegulationSpec, SimpleEntitySpec)
+from curator_llm.models.usage import UsageEntry
 from curator_llm.services.resolvers import PSI_MOD
 from curator_llm.services.sources import pmid_of as _pmid_of
 
@@ -210,8 +212,11 @@ def assemble(gene: str, reactions: List[dict], ex: DraftExtraction,
 
 
 def build_draft(gene: str, reactions: List[dict], accession: Optional[str] = None, model: Any = None,
-                pathway_name: Optional[str] = None) -> Tuple[ReactomeDraft, List[str]]:
-    """One structured LLM call, then assembly. `model` is any LangChain chat model (injected in tests)."""
+                pathway_name: Optional[str] = None,
+                usage: Optional[List[UsageEntry]] = None) -> Tuple[ReactomeDraft, List[str]]:
+    """One structured LLM call, then assembly. `model` is any LangChain chat model (injected in tests).
+
+    Pass a list as `usage` to have the call's token usage appended to it as UsageEntry rows."""
     if not reactions:
         return ReactomeDraft(), ['no reactions']
     if model is None:
@@ -219,7 +224,16 @@ def build_draft(gene: str, reactions: List[dict], accession: Optional[str] = Non
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'reactome_llm'))
         from ModelConfig import create_reactome_chat_model
         model = create_reactome_chat_model()
-    ex = model.with_structured_output(DraftExtraction).invoke(build_prompt(gene, reactions, accession))
+    counter = UsageMetadataCallbackHandler()          # the structured-output wrapper hides the raw reply's usage
+    ex = model.with_structured_output(DraftExtraction).invoke(build_prompt(gene, reactions, accession),
+                                                              config={'callbacks': [counter]})
+    if usage is not None:
+        for name, u in counter.usage_metadata.items():
+            detail = u.get('input_token_details') or {}
+            usage.append(UsageEntry(step='draft', calls=1, model=name, input_tokens=u.get('input_tokens', 0),
+                                    output_tokens=u.get('output_tokens', 0),
+                                    cache_read_tokens=detail.get('cache_read', 0),
+                                    cache_write_tokens=detail.get('cache_creation', 0)))
     if not isinstance(ex, DraftExtraction):
         raise ValueError(f'unexpected model output: {type(ex)}')
     return assemble(gene, reactions, ex, pathway_name)

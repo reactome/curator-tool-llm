@@ -11,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from curator_llm.models.session import Issue, Session, SessionSummary
+from curator_llm.models.usage import summarize
 from curator_llm.ports.auth import AuthError, AuthProvider, AuthUser, ForbiddenError
 from curator_llm.ports.jobs import JobRunner
 from curator_llm.ports.pipeline import Pipeline, PipelineInput
@@ -145,6 +146,15 @@ def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: O
         issue.status = body.status
         svc().store.save(s)
         return issue
+
+    @router.get('/sessions/{session_id}/usage')
+    def usage(session_id: str, user: AuthUser = Depends(current_user)):
+        """Language-model tokens spent on this session, per step (extraction, merge, review, draft, reaction checks,
+        chat), with totals. When the result was replayed from a saved one (`source` is 'saved') the steps that produce
+        the annotation are flagged `saved`: their numbers are from the original run and nothing was spent on them now,
+        and `spent_now` totals only what was spent in this session. Steps that call no model are not listed."""
+        s = load(session_id, user)
+        return {'source': s.usage_source, 'entries': s.usage, **summarize(s.usage, s.usage_source == 'saved')}
 
     @router.get('/sessions/{session_id}/export')
     def export(session_id: str, user: AuthUser = Depends(current_user)):

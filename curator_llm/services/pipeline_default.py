@@ -8,6 +8,7 @@ from typing import Callable, Dict, List, Optional
 from curator_llm.models.session import Issue
 from curator_llm.ports.external import OntologyClient, UniProtClient
 from curator_llm.ports.lookup import InstanceLookup
+from curator_llm.models.usage import UsageEntry, entry_from_counts
 from curator_llm.ports.events import EventLookup
 from curator_llm.ports.extractor import Extractor
 from curator_llm.ports.pipeline import PipelineInput, PipelineResult
@@ -45,7 +46,11 @@ class DefaultPipeline:
                                f'(no open-access full text, or nothing reaction-like in it): {res.error or ""}'.strip())
 
         paper_for, papers = self._paper_loader(spec)
-        return self.assemble(spec, reactions, paper_for, papers, report)
+        result = self.assemble(spec, reactions, paper_for, papers, report)
+        # what the script steps spent comes first, then the draft call that assemble() recorded
+        result.usage = [entry_from_counts(step, counts) for step, counts in res.step_usage.items()
+                        if any(counts.values())] + result.usage
+        return result
 
     @staticmethod
     def _paper_loader(spec: PipelineInput):
@@ -69,6 +74,7 @@ class DefaultPipeline:
         existing reactions. Pass `draft` to skip the one LLM call that builds it (used to rebuild a saved result
         from files without calling any model)."""
         report('verifying quotes against the paper')
+        usage: List[UsageEntry] = []
         store = EvidenceStore()
         attach_evidence(reactions, store, paper_for)
         issues: List[Issue] = iss.rejected_quote_issues({
@@ -83,7 +89,7 @@ class DefaultPipeline:
                     accession = self.uniprot.search_gene(spec.focus)
                 except Exception as e:
                     logger.warning('UniProt lookup for focus %s failed: %s', spec.focus, e)
-            draft, notes = build_draft(spec.focus or 'the paper', reactions, accession, self.model)
+            draft, notes = build_draft(spec.focus or 'the paper', reactions, accession, self.model, usage=usage)
             issues += iss.issues_from_notes('builder', notes)
 
         report('resolving identifiers')
@@ -94,4 +100,4 @@ class DefaultPipeline:
             existing, ex_issues = find_existing(draft, spec.pmid, self.events)
             issues += ex_issues
         main = papers.get('main')
-        return PipelineResult(draft, store.all(), issues, main.to_dict() if main else None, existing)
+        return PipelineResult(draft, store.all(), issues, main.to_dict() if main else None, existing, usage)

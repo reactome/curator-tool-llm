@@ -7,6 +7,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from curator_llm.models.evidence import ClaimOrigin, Evidence, Verification
 from curator_llm.models.session import ChangeLogEntry, Issue, Proposal, Session
+from curator_llm.models.usage import UsageEntry
 from curator_llm.ports.jobs import JobRunner
 from curator_llm.ports.pipeline import Pipeline, PipelineInput
 from curator_llm.ports.sessions import SessionStore
@@ -95,6 +96,7 @@ class SessionService:
             s = self.store.get(session_id, owner)
             s.draft, s.evidence, s.paper = result.draft, result.evidence, result.paper
             s.existing, s.issues = list(result.existing), list(result.issues)
+            s.usage, s.usage_source = list(result.usage), 'saved' if result.replayed else 'run'
             self.refresh(s)
             s.status, s.progress, s.error = 'ready', 'done', None
             s.change_log.append(ChangeLogEntry(actor='pipeline', action='created',
@@ -233,6 +235,9 @@ class SessionService:
                        instance_db_id=s.key_to_db_id.get(reaction_key)) for f in result.findings]
         _carry_over([i for i in s.issues if mine(i)], fresh, lambda i: (i.code, i.message, i.reaction_key))
         s.issues = iss.assign_ids([i for i in s.issues if not mine(i)] + fresh)
+        if result.usage:
+            s.usage.append(UsageEntry(step='qa', calls=1, detail=reaction_key, model=getattr(model, 'model', None),
+                                      **result.usage))
         s.change_log.append(ChangeLogEntry(actor=owner, action=f'qa {reaction_key}', detail=result.verdict))
         self.store.save(s)
         return result

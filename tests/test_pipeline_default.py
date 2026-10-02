@@ -16,7 +16,7 @@ class Model:
     def with_structured_output(self, schema):
         return self
 
-    def invoke(self, prompt):
+    def invoke(self, prompt, config=None):
         return DraftExtraction(
             entities=[LlmEntity(key='pink1', kind='protein', name='PINK1'), LlmEntity(key='ub', kind='protein', name='UB')],
             reactions=[LlmReaction(source_index=0, name='PINK1 phosphorylates ubiquitin', inputs=['ub'], outputs=['ub'])])

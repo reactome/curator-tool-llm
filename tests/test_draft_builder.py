@@ -42,8 +42,8 @@ class FakeModel:
         self.schema = schema
         return self
 
-    def invoke(self, prompt):
-        self.prompt = prompt
+    def invoke(self, prompt, config=None):
+        self.prompt, self.config = prompt, config
         return self.out
 
 

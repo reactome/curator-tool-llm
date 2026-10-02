@@ -266,6 +266,44 @@
         }
       }
     },
+    "/api/llm/sessions/{session_id}/usage": {
+      "get": {
+        "summary": "Usage",
+        "description": "Language-model tokens spent on this session, per step (extraction, merge, review, draft, reaction checks,\nchat), with totals. When the result was replayed from a saved one (`source` is 'saved') the steps that produce\nthe annotation are flagged `saved`: their numbers are from the original run and nothing was spent on them now,\nand `spent_now` totals only what was spent in this session. Steps that call no model are not listed.",
+        "operationId": "usage_api_llm_sessions__session_id__usage_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/llm/sessions/{session_id}/export": {
       "get": {
         "summary": "Export",

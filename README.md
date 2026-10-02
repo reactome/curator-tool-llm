@@ -365,7 +365,8 @@ curl -N -X POST $API/sessions/SESSION_ID/chat -H "$AUTH" -H 'Content-Type: appli
 #    event: text       data: {"delta":"Two of the draft reactions..."}          the reply, in pieces
 #    event: proposal   data: {"id":"p-001","summary":[...],"evidence":[...]}    an edit awaiting your decision
 #    event: error      data: {"message":"..."}                                  a problem inside the turn
-#    event: done       data: {"proposalIds":["p-001"]}                          ends every turn that ran
+#    event: done       data: {"proposalIds":["p-001"],"usage":{"calls":2,"input_tokens":5878,"output_tokens":48,...}}
+#                                                                              ends every turn that ran, with its tokens
 
 # The assistant only PROPOSES edits. You decide:
 curl -s $API/sessions/SESSION_ID/proposals?status=pending -H "$AUTH"
@@ -398,6 +399,7 @@ Every route is under `/api/llm` and needs the bearer token.
 | `GET /sessions/{id}/instances/{dbId}/evidence` | The quotes behind one instance. |
 | `GET /sessions/{id}/reactions/{key}` | One reaction with its participants and evidence. |
 | `GET /sessions/{id}/paper/search` | Search the paper (`?q=`, `&section=`, `&limit=`). |
+| `GET /sessions/{id}/usage` | Language-model tokens spent, per step (extraction, merge, review, draft, reaction checks, chat) with totals. |
 | `GET /sessions/{id}/existing`, `POST /sessions/{id}/existing/check` | Draft reactions Reactome already seems to have; recheck. |
 | `POST /sessions/{id}/qa/{key}` | Check one reaction (`?llm=false` for the rule checks only). |
 | `GET`, `POST /sessions/{id}/proposals` | List, or submit your own edit as an RFC 6902 patch. |
@@ -417,10 +419,13 @@ appears in about a second:
 SNAPSHOT_MODE=replay uvicorn curator_llm.main:app --port 8000
 ```
 
+A replayed session shows the token usage of the run that was saved (flagged `saved`: nothing was spent on it now),
+and anything you do in it afterwards, such as chat, is counted as spent now. `GET /sessions/{id}/usage` gives both.
+
 A snapshot is found by the paper (PMID, or the PDF's content) and the focus gene. If there is none, the pipeline runs
 as usual and the result is saved for next time. Snapshots are **not** refreshed when prompts or code improve: delete the
 file to extract again. `scripts/make_snapshot.py` builds one from files an earlier run left behind, without any model
-call (see the script's header). Chat and the per-reaction review still call the model.
+call (see the script's header; `--usage extraction=LOG --usage merge=LOG` records those steps' token usage from their logs). Chat and the per-reaction review still call the model.
 
 ### Running it for real
 

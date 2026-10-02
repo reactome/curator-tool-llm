@@ -89,7 +89,9 @@ class SubprocessExtractor:
         except subprocess.TimeoutExpired:
             res.error = f'{name} timed out after {self.timeout}s'
             return None
-        res.usage = _add(res.usage, parse_usage(proc.stdout))
+        used = parse_usage(proc.stdout)
+        res.usage = _add(res.usage, used)
+        res.step_usage[name] = used
         if proc.returncode != 0:
             tail = (proc.stderr or proc.stdout or '').strip()[-600:]
             res.error = f'{name} failed (exit {proc.returncode}): {tail}'
