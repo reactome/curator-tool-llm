@@ -61,6 +61,13 @@ class Emitter:
     def _shell_of(ref: ExistingRef) -> dict:
         return {'dbId': ref.db_id, 'displayName': ref.display_name, 'schemaClassName': ref.schema_class}
 
+    def _store(self, inst: dict) -> None:
+        """Keep the instance. The frontend shows an instance's dbId and displayName from its attributes (as it
+        sets them on an instance a curator creates), so they go there too, after the schema check, which
+        only knows real schema attributes."""
+        inst['attributes'] = {'dbId': inst['dbId'], 'displayName': inst['displayName'], **inst['attributes']}
+        self.new.append(inst)
+
     def _add(self, cls: str, display: str, attrs: Dict[str, object]) -> dict:
         attrs = {k: v for k, v in attrs.items() if v not in (None, '', [])}
         inst = {'dbId': self.next_id, 'displayName': display, 'schemaClassName': cls, 'attributes': attrs}
@@ -68,7 +75,7 @@ class Emitter:
         problems = schema_index.check_instance(inst)
         if problems:
             raise ValueError('; '.join(problems))
-        self.new.append(inst)
+        self._store(inst)
         return {'dbId': inst['dbId'], 'displayName': display, 'schemaClassName': cls}
 
     def _publication(self, pmid: str) -> dict:
@@ -229,7 +236,7 @@ class Emitter:
         problems = schema_index.check_instance(inst)
         if problems:
             raise ValueError('; '.join(problems))
-        self.new.append(inst)
+        self._store(inst)
         self._link_evidence(r, reaction_id, claim_ids)
         return shell
 

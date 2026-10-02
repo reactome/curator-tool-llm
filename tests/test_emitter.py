@@ -48,6 +48,13 @@ def test_every_emitted_attribute_is_in_the_schema():
         assert schema_index.check_instance(inst) == []
 
 
+def test_dbid_and_display_name_are_also_attributes():
+    # the frontend's instance view reads them from the attributes, as for an instance a curator creates
+    for inst in emit_user_instances(draft(), ev()).user_instances['newInstances']:
+        assert inst['attributes']['dbId'] == inst['dbId']
+        assert inst['attributes']['displayName'] == inst['displayName']
+
+
 def test_ids_are_unique_negative_and_references_resolve():
     r = emit_user_instances(draft(), ev())
     new = r.user_instances['newInstances']
