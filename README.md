@@ -12,6 +12,11 @@ The whole pipeline runs from one command:
 conda run -n reactome_ai python run_curator.py "GENE"
 ```
 
+There is a second way in: a **RESTful service** (`curator_llm/`) that annotates **one paper** (a PubMed ID
+or an uploaded PDF), lists what needs a curator's attention, and lets the curator refine the draft by chat.
+The curator-tool-frontend uses it, and you can call it directly. See
+[Running the REST service](#running-the-rest-service-paper-annotation-and-chat).
+
 ---
 
 ## Table of contents
@@ -22,6 +27,7 @@ conda run -n reactome_ai python run_curator.py "GENE"
 - [Install](#install)
 - [Configuration (.env)](#configuration-env)
 - [Running it](#running-it)
+- [Running the REST service](#running-the-rest-service-paper-annotation-and-chat)
 - [How to read the result](#how-to-read-the-result)
 - [How full-text extraction works (Tool 4)](#how-full-text-extraction-works-tool-4)
 - [Repository layout](#repository-layout)
@@ -255,6 +261,192 @@ run exits with a clear message.
 
 ---
 
+## Running the REST service (paper annotation and chat)
+
+`curator_llm/` is a [FastAPI](https://fastapi.tiangolo.com) service for working on **one paper at a time**. It is
+separate from the gene-first pipeline above, shares its install and `.env`, and is what the curator-tool-frontend's
+Paper2Path page talks to. Given a PubMed ID or a PDF it extracts the reactions, checks every supporting quote against
+the paper, resolves identifiers against Reactome and UniProt, and produces a draft as **staged instances**. A curator
+can then review the issues it found, ask for changes by chat (edits are only *proposed*; nothing changes until they are
+accepted), and load the result into the curator tool.
+
+### Start it
+
+From the repo root, with the environment from [Install](#install):
+
+```bash
+conda activate reactome_ai
+uvicorn curator_llm.main:app --port 8000
+```
+
+[Uvicorn](https://www.uvicorn.org) is the web server; `curator_llm.main:app` names the module and the app inside it.
+Add `--reload` while editing code. Check it is up: open <http://localhost:8000/docs> (it lists every route; it cannot
+send the bearer token, so make the calls with `curl` as below), or
+
+```bash
+curl -i http://localhost:8000/api/llm/sessions      # 401 Unauthorized: it is running and asking for a token
+```
+
+**What must be running first**
+
+| Needs | Why |
+|---|---|
+| **curator-tool-ws** at `WS_BASE_URL` (default `http://localhost:9090`), with `GET /api/auth/verify` | every request is checked there; with ws down every call is refused |
+| **Neo4j** with the Reactome graph | identifier lookups and the check for reactions Reactome already has |
+| **Anthropic key** (`ANTHROPIC_API_KEY`) | extraction, the draft, QA and chat |
+
+### Settings
+
+Read from `.env` (the keys in [Configuration](#configuration-env) apply too):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `WS_BASE_URL` | `http://localhost:9090` | curator-tool-ws, which verifies tokens and roles. |
+| `SESSION_STORE` | `memory` | `memory`, or `mongo` to keep sessions across restarts (uses `PUBMED_MONGO_URI`). |
+| `SNAPSHOT_MODE` | `record` | `record` saves every successful run, `replay` reuses a saved result instead of calling the models, `off` does neither. See [Fast iteration](#fast-iteration-without-calling-the-models). |
+| `SNAPSHOT_DIR` | `data/snapshots` | Where saved results go. |
+| `CHAT_MODEL` | `claude-sonnet-5-5` | Model used by the chat and the per-reaction review. |
+| `CORS_ORIGINS` | `http://localhost:4200` | Comma-separated browser origins allowed to call the API. |
+| `UPLOAD_DIR` | `data/uploads` | Where uploaded PDFs are kept, per user. |
+| `LLM_REVIEW` | off | `1` also runs the OpenAI cross-model review (needs `OPENAI_API_KEY`). |
+
+### Authenticate
+
+There is no separate login. Use a **curator-tool-ws** token, which the service verifies with ws on each request. The
+account must have the `curator` role: no token or an invalid one gets `401`, a valid token without that role gets `403`.
+Tokens are short-lived (about five minutes); the frontend refreshes them for you.
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:9090/api/auth/login \
+          -H 'Content-Type: application/json' \
+          -d '{"username":"YOUR_USER","password":"YOUR_PASSWORD"}' | tr -d '"')
+```
+
+Sessions are private: a session, its job and everything under it are visible only to the curator who started it
+(anyone else gets `404`).
+
+### Example: annotate a paper
+
+```bash
+API=http://localhost:8000/api/llm
+AUTH="Authorization: Bearer $TOKEN"
+
+# 1. Start from a PubMed ID (the paper must be open access in PubMed Central) ...
+curl -s -X POST $API/sessions -H "$AUTH" -H 'Content-Type: application/json' \
+     -d '{"pmid":"24751536","focus":"PINK1"}'
+#    {"sessionId":"3f9c...","jobId":"a81d..."}        "focus" (a gene) is optional
+#    ... or upload a PDF (up to 50 MB):
+curl -s -X POST $API/sessions/upload -H "$AUTH" -F file=@paper.pdf -F focus=PINK1
+
+# 2. Poll the job. It runs in the background: about 10-15 minutes the first time.
+curl -s $API/jobs/JOB_ID -H "$AUTH"
+#    {"id":"a81d...","status":"running","progress":"extracting and merging reactions (several minutes)","error":null}
+#    status goes queued -> running -> done (or failed, with the reason in "error")
+
+# 3. What needs a curator's attention
+curl -s "$API/sessions/SESSION_ID/issues?status=open" -H "$AUTH"
+
+# 4. The draft as staged instances: the JSON the curator tool's "load staged instances" takes
+curl -s $API/sessions/SESSION_ID/export -H "$AUTH" > staged_instances.json
+
+# 5. The quotes behind one instance (use a negative dbId from the export)
+curl -s $API/sessions/SESSION_ID/instances/-5/evidence -H "$AUTH"
+```
+
+Piping the output through `jq` makes it readable.
+
+### Example: chat and edits
+
+```bash
+# Chat streams its reply as server-sent events (-N stops curl buffering them)
+curl -N -X POST $API/sessions/SESSION_ID/chat -H "$AUTH" -H 'Content-Type: application/json' \
+     -d '{"message":"Which reactions does Reactome already have?","selectedDbIds":[]}'
+#    event: tool       data: {"name":"find_existing_reactome","input":{}}      what it is doing
+#    event: text       data: {"delta":"Two of the draft reactions..."}          the reply, in pieces
+#    event: proposal   data: {"id":"p-001","summary":[...],"evidence":[...]}    an edit awaiting your decision
+#    event: error      data: {"message":"..."}                                  a problem inside the turn
+#    event: done       data: {"proposalIds":["p-001"]}                          ends every turn that ran
+
+# The assistant only PROPOSES edits. You decide:
+curl -s $API/sessions/SESSION_ID/proposals?status=pending -H "$AUTH"
+curl -s -X POST $API/sessions/SESSION_ID/proposals/p-001/accept -H "$AUTH"      # applies it
+curl -s -X POST $API/sessions/SESSION_ID/proposals/p-001/reject -H "$AUTH"
+
+# After accepting edits, export again to get the updated instances
+```
+
+A message refused up front (empty, or over 4,000 characters) gets a single `error` event and no `done`.
+
+An edit that changes what a reaction *is* (its inputs, outputs, catalyst or regulators) must carry a quote that is
+found in the paper, or be marked as a curator assertion; a quote that is not in the paper is refused.
+
+### All endpoints
+
+Every route is under `/api/llm` and needs the bearer token.
+
+| Method and path | Purpose |
+|---|---|
+| `GET /whoami` | Who the token belongs to. |
+| `POST /sessions` | Start from a PMID: `{"pmid": "...", "focus": "GENE"}` → `202 {sessionId, jobId}`. |
+| `POST /sessions/upload` | Start from a PDF (multipart `file`, optional `focus`) → `202`. |
+| `GET /sessions` | Your sessions. |
+| `GET /sessions/{id}` | One session: status, progress, reactions, counts. |
+| `GET /jobs/{jobId}` | Progress of the background job. |
+| `GET /sessions/{id}/issues` | Everything needing attention (`?status=open\|resolved\|dismissed`). |
+| `PATCH /sessions/{id}/issues/{issueId}` | `{"status": "resolved"\|"dismissed"\|"open"}`. |
+| `GET /sessions/{id}/export` | The draft as staged-instances JSON. |
+| `GET /sessions/{id}/instances/{dbId}/evidence` | The quotes behind one instance. |
+| `GET /sessions/{id}/reactions/{key}` | One reaction with its participants and evidence. |
+| `GET /sessions/{id}/paper/search` | Search the paper (`?q=`, `&section=`, `&limit=`). |
+| `GET /sessions/{id}/existing`, `POST /sessions/{id}/existing/check` | Draft reactions Reactome already seems to have; recheck. |
+| `POST /sessions/{id}/qa/{key}` | Check one reaction (`?llm=false` for the rule checks only). |
+| `GET`, `POST /sessions/{id}/proposals` | List, or submit your own edit as an RFC 6902 patch. |
+| `POST /sessions/{id}/proposals/{pid}/accept` , `/reject` | Decide a proposed edit. |
+| `GET`, `POST /sessions/{id}/chat` | Read the conversation; send a message (streams). |
+
+The machine-readable contract is [`docs/openapi.json`](docs/openapi.json); regenerate it after changing the API with
+`python scripts/export_openapi.py`.
+
+### Fast iteration without calling the models
+
+Extraction and merging take 10-15 minutes of LLM calls. Every successful run is saved under `data/snapshots/`, and
+with `SNAPSHOT_MODE=replay` the service serves a saved result instead of running the pipeline, so a ready session
+appears in about a second:
+
+```bash
+SNAPSHOT_MODE=replay uvicorn curator_llm.main:app --port 8000
+```
+
+A snapshot is found by the paper (PMID, or the PDF's content) and the focus gene. If there is none, the pipeline runs
+as usual and the result is saved for next time. Snapshots are **not** refreshed when prompts or code improve: delete the
+file to extract again. `scripts/make_snapshot.py` builds one from files an earlier run left behind, without any model
+call (see the script's header). Chat and the per-reaction review still call the model.
+
+### Running it for real
+
+- **One worker.** Sessions (unless `SESSION_STORE=mongo`) and background jobs live in the process, so do not start
+  several workers (`--workers`). Restarting the service ends any job still running. With `SESSION_STORE=mongo` finished
+  sessions survive a restart, but one that was still running when the service stopped keeps showing "running" (its job
+  is gone, and nothing marks it failed): start that paper again.
+- **Behind a reverse proxy**, do not let it buffer responses for the chat route, or the live steps arrive in one lump
+  (the service already sends `X-Accel-Buffering: no` for nginx), and allow long-running requests.
+- **Browsers** may only call it from the origins in `CORS_ORIGINS`.
+- Keep it on the same network as curator-tool-ws; every call depends on ws being reachable and fails closed if it is not.
+- Use a process manager (systemd, Docker) so it restarts if it stops.
+
+### Tests
+
+```bash
+pytest                      # unit and API tests, no services or models needed
+```
+
+The suite uses fakes for ws, Neo4j and the models. A few tests run against the real thing and **skip themselves** when it
+is not available: the Neo4j graph (`tests/test_neo4j_lookup.py`, `tests/test_existing_events.py`), MongoDB
+(`tests/test_sessions_store.py`, which uses a throwaway collection) and a running curator-tool-ws with `WS_USERNAME` /
+`WS_PASSWORD` in `.env` (`tests/test_ws_contract.py`).
+
+---
+
 ## How to read the result
 
 Each gene ends with a `RESULT` block and a batch summary:
@@ -341,9 +533,19 @@ reactome_llm/
   ReactomePrompts.py, ReactomePubMed.py, ReactomeLLMErrors.py,
   token_profiler.py, logging_config.py   # infra
 
+curator_llm/                   # the REST service (see "Running the REST service")
+  api/                         #   FastAPI app: routes, auth dependency
+  services/                    #   evidence, draft, resolvers, emitter, sessions, chat, QA, snapshots
+  adapters/                    #   Neo4j, UniProt, OLS, ws, Mongo, Anthropic, job runner
+  ports/, models/              #   interfaces and pydantic models
+  main.py                      #   production wiring: uvicorn curator_llm.main:app
+tests/                         # pytest suite for the service (fakes; a few live tests skip themselves)
+scripts/                       # export_openapi.py, make_snapshot.py
+docs/                          # openapi.json (API contract), implementation-plan.md (design and status)
+
 resources/                     # schema, pathway↔gene map, interaction data (see above)
 results/                       # all run outputs (gitignored)
-data/                          # local caches: PDFs, PMC XML, abstracts (gitignored)
+data/                          # local caches: PDFs, PMC XML, abstracts, snapshots, uploads (gitignored)
 ```
 
 ---
