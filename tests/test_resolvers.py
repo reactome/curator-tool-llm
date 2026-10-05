@@ -229,3 +229,31 @@ def test_uniprot_gene_search_is_cached_and_resolver_notes_are_unique():
     d.participants = {'a': EwasSpec(key='a', name='Parkin'), 'b': EwasSpec(key='b', name='Parkin')}
     notes = Resolver(FakeInstanceLookup(GK), FakeUniProt({}, {'Parkin': 'O60260'})).resolve(d)
     assert len(notes) == 1
+
+
+def test_protein_name_is_resolved_from_the_reactome_graph_before_uniprot():
+    class GraphLookup(FakeInstanceLookup):
+        def find_human_accession(self, name):
+            return {'parkin': 'O60260'}.get(name.lower())
+
+    d = ReactomeDraft()
+    d.participants = {'p': EwasSpec(key='p', name='Parkin'), 'u': EwasSpec(key='u', name='UB')}
+    res = Resolver(GraphLookup(GK), FakeUniProt({'O60260': {'accession': 'O60260', 'genes': ['PRKN'], 'names': ['E3 ubiquitin-protein ligase parkin'],
+                                                       'reviewed': True, 'organism': 'Homo sapiens'}}, {}))
+    notes = res.resolve(d)
+    assert d.participants['p'].uniprot == 'O60260'
+    assert d.participants['u'].uniprot is None and 'uniprot' in d.participants['u'].needs_resolution   # ambiguous: no guess
+    assert any('Reactome graph' in n for n in notes)
+
+
+def test_a_family_name_without_one_accession_lists_the_genes_reactome_groups_under_it():
+    class GraphLookup(FakeInstanceLookup):
+        def candidate_genes(self, name):
+            return ['UBB', 'UBC'] if name == 'UB' else []
+
+    d = ReactomeDraft()
+    d.participants = {'u': EwasSpec(key='u', name='UB'), 'x': EwasSpec(key='x', name='FOO1')}
+    notes = Resolver(GraphLookup(GK), FakeUniProt({}, {})).resolve(d)
+    assert d.participants['u'].uniprot is None and 'uniprot' in d.participants['u'].needs_resolution
+    assert any(n.startswith('UB:') and 'UBB, UBC' in n for n in notes)
+    assert not any(n.startswith('FOO1:') for n in notes)
