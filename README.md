@@ -400,6 +400,7 @@ Every route is under `/api/llm` and needs the bearer token.
 | `GET /sessions/{id}/reactions/{key}` | One reaction with its participants and evidence. |
 | `GET /sessions/{id}/paper/search` | Search the paper (`?q=`, `&section=`, `&limit=`). |
 | `GET /sessions/{id}/usage` | Language-model tokens spent, per step (extraction, merge, review, draft, reaction checks, chat) with totals. |
+| `GET /sessions/{id}/network` | The reactions and their entities as nodes and edges, for drawing a network. |
 | `GET /sessions/{id}/existing`, `POST /sessions/{id}/existing/check` | Draft reactions Reactome already seems to have; recheck. |
 | `POST /sessions/{id}/qa/{key}` | Check one reaction (`?llm=false` for the rule checks only). |
 | `GET`, `POST /sessions/{id}/proposals` | List, or submit your own edit as an RFC 6902 patch. |
