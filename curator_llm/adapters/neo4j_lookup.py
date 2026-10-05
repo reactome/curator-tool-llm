@@ -82,6 +82,41 @@ class Neo4jInstanceLookup:
         cypher, extra = search_query(class_name, attribute, operand, limit)
         return self._run(cypher, v=str(value), **extra)
 
+    def find_human_accession(self, name: str) -> Optional[str]:
+        """UniProt accession of the one human ReferenceGeneProduct in the graph known by `name`, or None.
+
+        Tries gene names and synonyms first (PRKN, PARK2), then the UniProt short name kept in the description
+        ("shortName: Parkin"). Several different accessions is ambiguous: no guess."""
+        n = name.strip()
+        if not n:
+            return None
+        base = ('MATCH (n:ReferenceGeneProduct)-[:species]->(:Taxon {displayName: $human}) WHERE n.identifier IS NOT NULL AND ')
+        with self.driver.session(database=self.database) as s:
+            ids = {r['id'] for r in s.run(
+                base + 'any(g IN n.geneName WHERE toLower(g) = toLower($n)) RETURN DISTINCT n.identifier AS id',
+                human=_HUMAN, n=n)}
+            if not ids:
+                short = re.compile(r'shortName: ' + re.escape(n) + r'(?= [A-Za-z]+(?: evidence=|:)|$)', re.I)
+                ids = {r['id'] for r in s.run(
+                    base + 'any(d IN n.description WHERE toLower(d) CONTAINS toLower($frag)) '
+                    'RETURN n.identifier AS id, n.description AS d', human=_HUMAN, frag=f'shortName: {n}')
+                    if any(short.search(d) for d in r['d'])}
+        return next(iter(ids)) if len(ids) == 1 else None
+
+    def candidate_genes(self, name: str) -> List[str]:
+        """Gene symbols of the members of human Reactome sets named `name` (e.g. "Ub [cytosol]"), in alphabetical order.
+
+        For a name that stands for a family of gene products and so has no single accession."""
+        n = name.strip()
+        if not n:
+            return []
+        with self.driver.session(database=self.database) as s:
+            return sorted({r['g'] for r in s.run(
+                'MATCH (s:DefinedSet)-[:species]->(:Taxon {displayName: $human}) '
+                'WHERE toLower(s.displayName) STARTS WITH toLower($prefix) '
+                'MATCH (s)-[:hasMember]->(:EntityWithAccessionedSequence)-[:referenceEntity]->(r:ReferenceEntity) '
+                'WHERE r.geneName IS NOT NULL RETURN DISTINCT head(r.geneName) AS g', human=_HUMAN, prefix=f'{n} [')})
+
     def find_by_db_id(self, db_id: int) -> Optional[Dict]:
         rows = self._run(f'MATCH (n:DatabaseObject {{dbId: $id}}) {_RETURN} LIMIT 1', id=int(db_id))
         return rows[0] if rows else None

@@ -433,6 +433,44 @@
         }
       }
     },
+    "/api/llm/sessions/{session_id}/network": {
+      "get": {
+        "summary": "Network",
+        "description": "The reactions and the entities they involve as nodes and edges (for drawing): input/output, catalyst,\nregulation, component/member and reaction-order edges, with each node's open-issue count.",
+        "operationId": "network_api_llm_sessions__session_id__network_get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/llm/sessions/{session_id}/existing": {
       "get": {
         "summary": "Existing",

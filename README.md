@@ -400,6 +400,7 @@ Every route is under `/api/llm` and needs the bearer token.
 | `GET /sessions/{id}/reactions/{key}` | One reaction with its participants and evidence. |
 | `GET /sessions/{id}/paper/search` | Search the paper (`?q=`, `&section=`, `&limit=`). |
 | `GET /sessions/{id}/usage` | Language-model tokens spent, per step (extraction, merge, review, draft, reaction checks, chat) with totals. |
+| `GET /sessions/{id}/network` | The reactions and their entities as nodes and edges, for drawing a network. |
 | `GET /sessions/{id}/existing`, `POST /sessions/{id}/existing/check` | Draft reactions Reactome already seems to have; recheck. |
 | `POST /sessions/{id}/qa/{key}` | Check one reaction (`?llm=false` for the rule checks only). |
 | `GET`, `POST /sessions/{id}/proposals` | List, or submit your own edit as an RFC 6902 patch. |
@@ -415,15 +416,32 @@ Extraction and merging take 10-15 minutes of LLM calls. Every successful run is 
 with `SNAPSHOT_MODE=replay` the service serves a saved result instead of running the pipeline, so a ready session
 appears in about a second:
 
-```bash
-SNAPSHOT_MODE=replay uvicorn curator_llm.main:app --port 8000
-```
+**How to use replay mode**
+
+1. **Record once.** Annotate the paper normally (the default `SNAPSHOT_MODE=record`, see [Example: annotate a
+   paper](#example-annotate-a-paper)). When the job is `done`, the result is saved as
+   `data/snapshots/pmid-<PMID>__<FOCUS>.json` (or `pdf-<hash>__<FOCUS>.json` for an upload). Check with
+   `ls data/snapshots/`.
+2. **Start the service in replay mode**, by the environment or in `.env`:
+
+   ```bash
+   SNAPSHOT_MODE=replay uvicorn curator_llm.main:app --port 8000
+   # or put SNAPSHOT_MODE=replay in .env and start uvicorn as usual
+   ```
+
+3. **Make the same start request** as before: the same PMID (or the same PDF file) and the same `focus`. The job
+   finishes in about a second, and its progress reads `using the saved result for <key> (replay mode, no models
+   called)`. Issues, export, evidence, chat and the other routes then work as on a real session.
+
+The service still needs curator-tool-ws for authentication, and the chat and per-reaction review still call the model.
+To go back to real runs, restart without `SNAPSHOT_MODE=replay` (or set `SNAPSHOT_MODE=off` to also stop saving).
 
 A replayed session shows the token usage of the run that was saved (flagged `saved`: nothing was spent on it now),
 and anything you do in it afterwards, such as chat, is counted as spent now. `GET /sessions/{id}/usage` gives both.
 
-A snapshot is found by the paper (PMID, or the PDF's content) and the focus gene. If there is none, the pipeline runs
-as usual and the result is saved for next time. Snapshots are **not** refreshed when prompts or code improve: delete the
+A snapshot is found by the paper (PMID, or the PDF's content) and the focus gene, so a different focus, or none, is a
+different snapshot. If there is none (or the file cannot be read), the pipeline runs as usual and the result is saved
+for next time. Snapshots are **not** refreshed when prompts or code improve: delete the
 file to extract again. `scripts/make_snapshot.py` builds one from files an earlier run left behind, without any model
 call (see the script's header; `--usage extraction=LOG --usage merge=LOG` records those steps' token usage from their logs). Chat and the per-reaction review still call the model.
 

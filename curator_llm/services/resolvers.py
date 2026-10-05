@@ -21,6 +21,7 @@ PSI_MOD = {
     'MOD:01148': ('N6-glycyl-L-lysine', 'ub'), 'MOD:00085': ('N6-methyl-L-lysine', 'me'),
 }
 _GENE_SYMBOL = re.compile(r'^[A-Za-z][A-Za-z0-9\-]{1,11}$')
+_GENE_OR_NAME = re.compile(r'^[A-Za-z][A-Za-z0-9\- ]{1,40}$')
 
 
 def _ref(inst: Optional[dict]) -> Optional[ExistingRef]:
@@ -128,7 +129,24 @@ class Resolver:
         self.notes = list(dict.fromkeys(self.notes))     # the same finding for several entities reads once
         return self.notes
 
+    def _graph_accession(self, name: str) -> Optional[str]:
+        """The accession Reactome already uses for this protein name (no external call), when the lookup can say."""
+        find = getattr(self.lookup, 'find_human_accession', None)
+        return self._call('Reactome graph', find, name) if find and _GENE_OR_NAME.match(name) else None
+
+    def _note_candidates(self, p: EwasSpec):
+        """A name with no single accession may stand for a family (ubiquitin): tell the curator which genes Reactome
+        groups under it, rather than guessing one."""
+        find = getattr(self.lookup, 'candidate_genes', None)
+        genes = self._call('Reactome graph', find, p.name) if find else None
+        if genes:
+            self.notes.append(f'{p.name}: no single UniProt accession; Reactome has a set of that name whose members '
+                              f'come from {", ".join(genes)}. Choose the gene(s) or use that set')
+
     def _ewas(self, p: EwasSpec):
+        if not p.uniprot and (acc := self._graph_accession(p.name)):
+            p.uniprot = acc
+            self.notes.append(f'{p.name}: UniProt {acc} found in the Reactome graph by name; confirm')
         if self.uniprot:
             if p.uniprot:
                 info = self._call('UniProt', self.uniprot.fetch, p.uniprot, default=False)
@@ -150,6 +168,7 @@ class Resolver:
                     self.notes.append(f'{p.name}: UniProt {acc} found by gene-name search; confirm')
                 else:
                     p.needs_resolution.append('uniprot')
+                    self._note_candidates(p)
         if p.uniprot and p.reference_entity is None:
             p.reference_entity = self.reference_gene_product(p.uniprot)
         for m in p.modifications:

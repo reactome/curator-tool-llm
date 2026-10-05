@@ -16,6 +16,7 @@ from curator_llm.ports.auth import AuthError, AuthProvider, AuthUser, ForbiddenE
 from curator_llm.ports.jobs import JobRunner
 from curator_llm.ports.pipeline import Pipeline, PipelineInput
 from curator_llm.ports.sessions import SessionStore
+from curator_llm.services.network import build_network
 from curator_llm.services.session_service import ProposalError, SessionService
 
 
@@ -181,6 +182,13 @@ def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: O
         return {'reaction': r, 'dbId': s.key_to_db_id.get(key),
                 'participants': {k: s.draft.participants[k] for k in used if k in s.draft.participants},
                 'evidence': [by_id[i] for i in r.evidence_ids if i in by_id]}
+
+    @router.get('/sessions/{session_id}/network')
+    def network(session_id: str, user: AuthUser = Depends(current_user)):
+        """The reactions and the entities they involve as nodes and edges (for drawing): input/output, catalyst,
+        regulation, component/member and reaction-order edges, with each node's open-issue count."""
+        s = load(session_id, user)
+        return build_network(s.draft, s.issues, s.existing, s.key_to_db_id)
 
     @router.get('/sessions/{session_id}/existing')
     def existing(session_id: str, user: AuthUser = Depends(current_user)):
