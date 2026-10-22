@@ -16,3 +16,21 @@ mongo_ingest.out
 
 # Full-text: local user config, index cache, downloaded PMC XML, and all other local data artifacts
 data/
+requirements-freeze.txt
+
+logs/
+.chainlit/config.toml
+.chainlit/translations/en-US.json
+.chainlit/translations/pt-BR.json
+.vscode/launch.json
+.vscode/settings.json
+test/NTN1.json
+test/test.py
+test/vectorstores/db/chroma.sqlite3
+test/vectorstores/db/62ce7c50-29d5-49f8-a77c-168d095920cd/data_level0.bin
+test/vectorstores/db/62ce7c50-29d5-49f8-a77c-168d095920cd/header.bin
+test/vectorstores/db/62ce7c50-29d5-49f8-a77c-168d095920cd/length.bin
+test/vectorstores/db/62ce7c50-29d5-49f8-a77c-168d095920cd/link_lists.bin
+notebooks/.chainlit/config.toml
+notebooks/.chainlit/translations/en-US.json
+notebooks/.chainlit/translations/pt-BR.json
