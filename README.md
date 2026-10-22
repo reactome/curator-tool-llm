@@ -272,15 +272,30 @@ accepted), and load the result into the curator tool.
 
 ### Start it
 
-From the repo root, with the environment from [Install](#install):
+Use [`scripts/run_api.sh`](scripts/run_api.sh). It works from any directory, and uses the active Python environment if
+it has uvicorn; otherwise it activates the conda environment `reactome_ai` (see [Install](#install)).
 
 ```bash
-conda activate reactome_ai
-uvicorn curator_llm.main:app --port 8000
+scripts/run_api.sh                  # local: 127.0.0.1:8000, in the foreground (Ctrl-C to stop)
+scripts/run_api.sh --reload         # local, restart on code changes (for editing code)
+HOST=0.0.0.0 scripts/run_api.sh     # server: listen on all interfaces
+scripts/run_api.sh --daemon         # server: run in the background, log in logs/api.log, pid in logs/api.pid
+scripts/run_api.sh --stop           # stop the background service
 ```
 
-[Uvicorn](https://www.uvicorn.org) is the web server; `curator_llm.main:app` names the module and the app inside it.
-Add `--reload` while editing code. Check it is up: open <http://localhost:8000/docs> (it lists every route; it cannot
+Any other argument is passed to uvicorn (for example `--log-level debug`). Environment variables, all optional:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `HOST` | `127.0.0.1` | Address to listen on. |
+| `PORT` | `8000` | Port to listen on. |
+| `CONDA_ENV` | `reactome_ai` | Conda environment to activate if the active one has no uvicorn. |
+| `WORKERS` | `1` | Keep it at 1, see [Running it for real](#running-it-for-real). |
+
+Settings such as `SNAPSHOT_MODE` or `SESSION_STORE` are read from `.env` or the shell, as described below.
+
+The script runs `python -m uvicorn curator_llm.main:app`; [Uvicorn](https://www.uvicorn.org) is the web server and
+`curator_llm.main:app` names the module and the app inside it. You can also run that command yourself. Check it is up: open <http://localhost:8000/docs> (it lists every route; it cannot
 send the bearer token, so make the calls with `curl` as below), or
 
 ```bash
@@ -425,8 +440,8 @@ appears in about a second:
 2. **Start the service in replay mode**, by the environment or in `.env`:
 
    ```bash
-   SNAPSHOT_MODE=replay uvicorn curator_llm.main:app --port 8000
-   # or put SNAPSHOT_MODE=replay in .env and start uvicorn as usual
+   SNAPSHOT_MODE=replay scripts/run_api.sh
+   # or put SNAPSHOT_MODE=replay in .env and start the script as usual
    ```
 
 3. **Make the same start request** as before: the same PMID (or the same PDF file) and the same `focus`. The job
