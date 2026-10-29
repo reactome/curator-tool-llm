@@ -205,7 +205,101 @@ Reading it:
 - Only 8 papers were scored against curated reactions; that is enough to show no regression, not to rank close options.
 - Papers with a PMC record may have no full-text body (3 of my first 5 candidates), so check before choosing test papers.
 
-## 10. How to reproduce
+## 10. REST service: measured end to end, progress messages, parallel lookups
+
+Measured over real HTTP with the production wiring (only the login check faked) on `PINK1.pdf`:
+
+| | Before | After |
+|---|---|---|
+| Whole job | 119 s | **109 s** |
+| Identifier lookups (UniProt, OLS, Neo4j) | 11.0 s, one at a time | **about 2 s**, 8 at a time |
+| Quote check + draft build | 24 s | unchanged (one LLM call) |
+| Every other endpoint (session, issues, export, network, existing, usage, search) | about 10 ms | unchanged |
+| Chat turn / per-reaction QA | 5-8 s / 9 s | unchanged (not optimised) |
+
+The job's `progress` text now follows the work instead of saying "several minutes" for the whole extract-and-merge
+phase: `extracting reactions: 7/20 chunks`, `merging reactions: compared 200/217 pairs`, `re-checking uncertain
+pairs`, `checking the groups`, `combining duplicate details`, then the existing `building the Reactome draft` and
+`resolving identifiers`. It is read live from the scripts' output (`StepProgress` in `services/extraction.py`).
+The longest silent step left is the draft build (about 20 s, one LLM call).
+
+Lookups run in a thread pool (`RESOLVE_WORKERS`, default 8, `1` = one at a time). Results and the order of the notes
+are identical to the serial version (a test compares the two). The service must be **restarted** to pick up changes
+to in-process code (resolvers, pipeline); the extraction and merge scripts are re-read on every run.
+
+### Per-reaction QA: does thinking matter?
+
+35 reactions from 3 papers (PINK1, clock Nature, clock Science), each reviewed three times with `claude-sonnet-5-5`:
+thinking on, thinking on again (to measure run-to-run noise), and thinking off (`between_tools`).
+
+| | on | on again | off |
+|---|---|---|---|
+| Latency, mean | 7.4 s | 7.5 s | 7.1 s |
+| Output tokens, mean | 847 | 855 | 837 |
+| Verdict `needs_work` | 35/35 | 35/35 | 35/35 |
+| Mean score | 0.39 | 0.38 | 0.38 |
+| Findings per reaction | 5.3 | 5.3 | 5.2 |
+| LLM review failed | 0 | 0 | 0 |
+
+Same verdicts in all 35 cases. Score difference on vs off: 0.037 mean (max 0.10), against 0.023 between the two
+identical "on" runs. Finding text overlap is about 0.37 for on vs off and 0.38 for on vs on again, so the wording
+varies as much between repeats as between settings. **Thinking off does not change the output, and it does not make QA
+faster**: 5.5 does not think by default (the API says so), and the 850 output tokens are the findings JSON itself.
+The `qa` role (`model_settings.py`) is set to thinking off anyway, with its own model instance so chat is unchanged.
+Chat's own `run_qa` tool still uses the chat model.
+
+Every one of the 35 reactions came back `needs_work` (mean score about 0.38), in all three runs. Why:
+
+- The verdict rule (`qa_reaction`) is: `needs_work` if any finding has severity `action`, or if the LLM's own verdict
+  is `needs_work`. The deterministic rule checks never emit `action` (only warning/info), so all 35 verdicts come from
+  the LLM reviewer: 28 reactions had at least one LLM `action` finding (22 had two), the other 7 had none but the LLM
+  still answered `needs_work`.
+- The findings are mostly substantive (a missing PPi output, a summation that overstates the quote, a null compartment,
+  a mutant ubiquitin recorded as plain ubiquitin, a reagent such as calf intestinal phosphatase recorded as a
+  regulator), so the drafts do have real problems.
+- But `QA_SYSTEM` never says when to answer `ok`, what separates `action` from `warning`, or what a score means. The
+  best score of all 35 was 0.60, and reactions with only warnings and notes were still `needs_work`.
+- Test of a prompt that defines them (`action` = wrong or unsupported as written, `needs_work` only with an action, score
+  bands; not adopted): 7 of 35 reactions became `ok`, scores spread to 0.15-0.80, and 6 of 6 deliberately broken
+  controls (wrong catalyst, no quotes) were still `needs_work`. Even then 28 of 35 kept an `action` finding, so most of
+  the pattern is the drafts, not the prompt. Scores of the broken controls (0.2-0.55) overlap the real reactions'
+  (0.05-0.60), so the score alone does not separate them.
+
+### Making QA output useful to a curator
+
+Problems with the QA output: a binary verdict that was `needs_work` for every reaction, findings in the model's own
+order, about 9 of 44 notes that only confirmed something was fine ("no catalyst is correct for a binding reaction"; each
+became an issue to dismiss), no one-line takeaway, and no way to see which reaction to open first. Also, QA held the
+session lock while it waited for the model.
+
+Changes (`services/qa.py`, `session_service.py`, `api/app.py`; front-end issues panel and reaction detail):
+
+- Prompt: defines action / warning / info, the verdict rule and score bands; "report problems only, never say what is
+  correct"; each finding says what to change; at most 5 findings, most important first; a one-sentence `summary`.
+- `priority` derived in code from the findings: `fix_first` (3 or more action findings), `fix` (1-2), `review`
+  (warnings only), `ok`. The verdict is kept for older callers.
+- Findings sorted most serious first; `POST /sessions/{id}/qa` checks all reactions concurrently and returns them
+  ranked (priority, then action count, then warnings, then lower score); the front-end issues panel has a "Check all
+  reactions" button and a "Look at these first" list.
+- The model call now runs outside the session lock (compute, then apply under the lock).
+
+Measured on the same 35 reactions plus 6 deliberately broken controls (wrong catalyst, no quotes):
+
+| | Before | After |
+|---|---|---|
+| Findings that only praise | 9 of 44 notes | **0** |
+| Findings per reaction (LLM) | 5.3, no cap | 4.7, max 5 |
+| Reactions with a summary | 0 | **35/35** |
+| Verdict `needs_work` | 35/35 | 35/35 (the reviewer still finds an action in every draft; 75 action findings, 2.1 per reaction) |
+| `priority` | – | `fix_first` for the worst, `fix` for the rest |
+| Broken controls | 6/6 `needs_work` | 6/6 `needs_work` (5 of 6 with 3-4 actions) |
+
+Number of action findings per real reaction: 1 for 7, 2 for 17, 3 for 10, 4 for 1; the broken controls had 2-4.
+The cutoff of 3 is a judgement fitted to these 35 reactions, not a validated threshold. Scores still do not separate
+broken from real reactions (controls 0.2-0.5, real 0.2-0.6), so the list is ranked by action count first.
+End to end on the saved PINK1 session: all 11 reactions checked in 14.8 s, ranked, each with a summary.
+
+## 11. How to reproduce
 
 ```bash
 # curated-reaction comparison (needs Neo4j with the Reactome graph; resumable; slow for the serial baseline)

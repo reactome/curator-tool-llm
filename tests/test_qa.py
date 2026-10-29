@@ -167,3 +167,90 @@ def test_chat_tool_runs_qa():
     chat(c, sid, 'is r good sound?')
     out = json.loads(model.calls[2]['messages'][-1]['content'][0]['content'])
     assert out['reaction_key'] == 'good' and out['llm_used'] and out['score'] == 0.8
+
+
+def test_qa_endpoint_uses_the_dedicated_qa_model_when_there_is_one():
+    chat_rv, qa_rv = Reviewer('{"verdict": "ok", "score": 0.1, "findings": []}'), Reviewer('{"verdict": "ok", "score": 0.9, "findings": []}')
+    c = TestClient(create_app(FakeAuthProvider(TOKENS), InMemorySessionStore(), SyncJobRunner(), Pipe(),
+                              chat_model=chat_rv, qa_model=qa_rv))
+    sid = c.post('/api/llm/sessions', json={'pmid': '1'}, headers=H()).json()['sessionId']
+    r = c.post(f'/api/llm/sessions/{sid}/qa/good', headers=H()).json()
+    assert r['score'] == 0.9 and qa_rv.calls and not chat_rv.calls
+
+
+# ── what the curator sees: priority, summary, order, ranking, and checking every reaction ─────────────────
+from curator_llm.services.qa import QAFinding, QAResult, priority_of, rank_results   # noqa: E402
+
+
+def F(sev, msg='m'):
+    return QAFinding(severity=sev, code='qa_llm', message=msg, source='llm')
+
+
+def test_priority_ranks_by_how_much_is_wrong():
+    assert priority_of([F('action')] * 3 + [F('info')], 'needs_work') == 'fix_first'
+    assert priority_of([F('action'), F('warning')], 'needs_work') == 'fix'
+    assert priority_of([F('warning')], 'ok') == 'review'
+    assert priority_of([], 'needs_work') == 'review'              # the reviewer objected without naming an action
+    assert priority_of([F('info')], 'ok') == 'ok'
+
+
+def test_findings_come_back_most_serious_first_capped_and_with_a_summary():
+    d = draft()
+    d.reactions[0].evidence_ids = []
+    many = [{'severity': s, 'message': f'{s}{i}'} for i, s in enumerate(['info', 'warning', 'action'] * 4)]
+    rv = Reviewer(json.dumps({'verdict': 'needs_work', 'score': 0.3, 'summary': '  Fix the catalyst first.  ', 'findings': many}))
+    res = qa_reaction(d, 'good', [], rv)
+    llm = [f for f in res.findings if f.source == 'llm']
+    assert len(llm) == 5 and [f.severity for f in llm] == ['action'] * 4 + ['warning']        # capped, worst kept
+    sev = [f.severity for f in res.findings]
+    assert sev == sorted(sev, key=['action', 'warning', 'info'].index)                          # rules and LLM merged in order
+    assert res.summary == 'Fix the catalyst first.' and res.priority == 'fix_first'
+
+
+def test_rank_results_puts_the_most_urgent_first():
+    def R(key, priority, actions=0, warnings=0, score=0.5):
+        return QAResult(reaction_key=key, verdict='needs_work', priority=priority, score=score,
+                        findings=[F('action')] * actions + [F('warning')] * warnings)
+    ranked = rank_results([R('ok', 'ok'), R('review', 'review', warnings=2), R('fix1', 'fix', 1),
+                           R('fix2', 'fix', 2), R('top', 'fix_first', 3), R('top_lowscore', 'fix_first', 3, score=0.1)])
+    assert [r.reaction_key for r in ranked] == ['top_lowscore', 'top', 'fix2', 'fix1', 'review', 'ok']
+
+
+def test_check_all_reactions_returns_them_ranked_and_records_issues():
+    c, sid = env(Reviewer(json.dumps({'verdict': 'needs_work', 'score': 0.4, 'summary': 's',
+                                      'findings': [{'severity': 'action', 'message': 'a', 'field': None}]})))
+    r = c.post(f'/api/llm/sessions/{sid}/qa', headers=H())
+    assert r.status_code == 200
+    out = r.json()
+    assert {x['reaction_key'] for x in out} == {'good', *[k['key'] for k in c.get(f'/api/llm/sessions/{sid}', headers=H()).json()['reactions']]}
+    assert all(x['summary'] == 's' and x['priority'] in ('fix', 'fix_first') for x in out)
+    qa_issues = [i for i in c.get(f'/api/llm/sessions/{sid}/issues', headers=H()).json() if i['source'] == 'qa']
+    assert {i['reaction_key'] for i in qa_issues} == {x['reaction_key'] for x in out}
+    assert c.post(f'/api/llm/sessions/{sid}/qa', headers=H('bob')).status_code == 404
+    assert c.post(f'/api/llm/sessions/{sid}/qa').status_code == 401
+    rules_only = c.post(f'/api/llm/sessions/{sid}/qa?llm=false', headers=H()).json()
+    assert all(not x['llm_used'] for x in rules_only)
+
+
+def test_a_slow_model_call_does_not_hold_the_session_lock():
+    import threading
+    from curator_llm.ports.chat_model import ModelTurn
+    from curator_llm.ports.pipeline import PipelineInput
+    from curator_llm.services.session_service import SessionService
+    started, release = threading.Event(), threading.Event()
+
+    class Slow:
+        def turn(self, *a, **k):
+            started.set()
+            release.wait(10)
+            return ModelTurn('{"verdict": "ok", "score": 0.9, "summary": "No problems found", "findings": []}')
+    svc = SessionService(InMemorySessionStore(), SyncJobRunner(), Pipe())
+    sid, _ = svc.start('alice', PipelineInput(pmid='1'))
+    t = threading.Thread(target=lambda: svc.run_qa('alice', sid, 'good', Slow()))
+    t.start()
+    assert started.wait(5)
+    done = threading.Event()
+    threading.Thread(target=lambda: (svc.check_existing('alice', sid), done.set())).start()
+    assert done.wait(3), 'another operation on the session was blocked while QA waited for the model'
+    release.set()
+    t.join(5)

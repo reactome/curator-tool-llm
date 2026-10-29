@@ -1,6 +1,7 @@
 """The real Pipeline: paper -> (extract, merge, optional review) -> verified evidence -> typed draft
 -> resolved identifiers. Extraction/merge/review still run as the existing scripts (subprocesses);
 everything after them is in-process and returns objects."""
+import inspect
 import logging
 import os
 import time
@@ -39,8 +40,8 @@ class DefaultPipeline:
         if not spec.pmid and not spec.pdf_path:
             raise ValueError('need a pmid or a pdf')
         gene = spec.focus or 'paper'
-        report('extracting and merging reactions (several minutes)')
-        res = self.extractor.extract(spec.pmid, spec.pdf_path, gene)
+        report('extracting reactions')
+        res = self._extract(spec, gene, report)
         reactions: List[dict] = res.reactions
         if not res.ok or not reactions:
             raise RuntimeError('no reactions could be extracted from this paper '
@@ -52,6 +53,16 @@ class DefaultPipeline:
         result.usage = [entry_from_counts(step, counts) for step, counts in res.step_usage.items()
                         if any(counts.values())] + result.usage
         return result
+
+    def _extract(self, spec: PipelineInput, gene: str, report: Callable[[str], None]):
+        """Run the extractor, passing `report` along when it takes one (a custom Extractor may not)."""
+        try:
+            takes_report = 'report' in inspect.signature(self.extractor.extract).parameters
+        except (TypeError, ValueError):
+            takes_report = False
+        if takes_report:
+            return self.extractor.extract(spec.pmid, spec.pdf_path, gene, report=report)
+        return self.extractor.extract(spec.pmid, spec.pdf_path, gene)
 
     @staticmethod
     def _paper_loader(spec: PipelineInput):

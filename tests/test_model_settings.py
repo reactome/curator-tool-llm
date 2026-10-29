@@ -48,3 +48,10 @@ def test_thinking_off_syntax_depends_on_the_model(monkeypatch):
     assert ms.thinking_off('claude-sonnet-5-5') == {'type': 'between_tools'}
     monkeypatch.setenv('LLM_MODEL_EXTRACTION', 'claude-sonnet-5-5')
     assert ms.anthropic_kwargs('extraction')['thinking'] == {'type': 'between_tools'}
+
+
+def test_qa_has_its_own_role_with_thinking_off_and_the_model_takes_it_from_there():
+    assert ms.anthropic_kwargs('qa') == {'model': 'claude-sonnet-5-5', 'thinking': {'type': 'between_tools'}}
+    from curator_llm.adapters.chat_anthropic import AnthropicChatModel
+    assert AnthropicChatModel(client=object(), role='qa').thinking == {'type': 'between_tools'}
+    assert AnthropicChatModel(client=object()).thinking is None          # chat is unchanged

@@ -2,8 +2,11 @@
 become identifiers here, from gk_central first (so references reuse what already exists) and
 external services second (UniProt, OLS). Anything that cannot be resolved with confidence is left
 empty and listed in `needs_resolution` / the returned notes for the curator."""
+import os
 import re
-from typing import List, Optional
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, List, Optional
 
 from curator_llm.models.reactome import (EwasSpec, ExistingRef, ModifiedResidueSpec, ReactomeDraft,
                                          SimpleEntitySpec)
@@ -37,6 +40,21 @@ class Resolver:
         self.lookup, self.uniprot, self.ontology = lookup, uniprot, ontology
         self.notes: List[str] = []
         self._down: set = set()     # services that failed once: not retried for the rest of this run
+        self._tl = threading.local()    # per-task note buffer while lookups run in parallel
+        self.workers = max(1, int(os.getenv('RESOLVE_WORKERS', '8')))
+
+    def _note(self, msg: str):
+        buf = getattr(self._tl, 'buf', None)
+        (self.notes if buf is None else buf).append(msg)
+
+    def _task(self, fn: Callable, *args):
+        """Run one lookup task with its own note buffer; returns (result, notes). Notes are merged in task order by
+        the caller, so the output does not depend on which thread finished first."""
+        self._tl.buf = buf = []
+        try:
+            return fn(*args), buf
+        finally:
+            self._tl.buf = None
 
     def _call(self, service: str, fn, *args, default=None):
         """Call an external service. A failure becomes one note and `default`, never an exception:
@@ -47,7 +65,7 @@ class Resolver:
             return fn(*args)
         except Exception as e:
             self._down.add(service)
-            self.notes.append(f'{service} unavailable ({type(e).__name__}); identifiers it would supply '
+            self._note(f'{service} unavailable ({type(e).__name__}); identifiers it would supply '
                               f'were left unresolved')
             return default
 
@@ -99,33 +117,41 @@ class Resolver:
         return _ref(hits[0]) if len(hits) == 1 else None
 
     # ── whole draft ────────────────────────────────────────────────────────
+    def _resolve_participant(self, p):
+        if p.compartment is None and p.compartment_name:
+            p.compartment = self.compartment(p.compartment_name)
+            if p.compartment is None:
+                p.needs_resolution.append('compartment')
+                self._note(f'{p.name}: compartment "{p.compartment_name}" not found in gk_central')
+        if isinstance(p, EwasSpec):
+            self._ewas(p)
+        elif isinstance(p, SimpleEntitySpec):
+            self._simple(p)
+
+    def _resolve_catalyst(self, r):
+        a = r.catalyst.activity
+        a.identifier, a.ref = self.go_function(a.identifier, a.name)
+        if a.ref is None:
+            self._note(f'{r.name}: GO function "{a.name or a.identifier}" is not an existing GO_MolecularFunction')
+
     def resolve(self, draft: ReactomeDraft) -> List[str]:
-        for p in draft.participants.values():
-            if p.compartment is None and p.compartment_name:
-                p.compartment = self.compartment(p.compartment_name)
-                if p.compartment is None:
-                    p.needs_resolution.append('compartment')
-                    self.notes.append(f'{p.name}: compartment "{p.compartment_name}" not found in gk_central')
-            if isinstance(p, EwasSpec):
-                self._ewas(p)
-            elif isinstance(p, SimpleEntitySpec):
-                self._simple(p)
-        for r in draft.reactions:
-            if r.catalyst and r.catalyst.activity:
-                a = r.catalyst.activity
-                a.identifier, a.ref = self.go_function(a.identifier, a.name)
-                if a.ref is None:
-                    self.notes.append(f'{r.name}: GO function "{a.name or a.identifier}" is not an existing GO_MolecularFunction')
-            for pmid in r.pmids:
-                if pmid not in draft.publications:
-                    ref = self.publication(pmid)
-                    if ref:
-                        draft.publications[pmid] = ref
-        if draft.pathway:
-            for pmid in draft.pathway.pmids:
-                ref = self.publication(pmid)
+        """Every lookup is independent (one participant, one GO function, one publication), and each is a network
+        round trip, so they run `workers` at a time. Results and notes are applied in the original order."""
+        pmids = list(dict.fromkeys([m for r in draft.reactions for m in r.pmids] +
+                                   (draft.pathway.pmids if draft.pathway else [])))
+        pmids = [m for m in pmids if m not in draft.publications]
+        catalysts = [r for r in draft.reactions if r.catalyst and r.catalyst.activity]
+        with ThreadPoolExecutor(max_workers=self.workers) as pool:
+            parts = [pool.submit(self._task, self._resolve_participant, p) for p in draft.participants.values()]
+            cats = [pool.submit(self._task, self._resolve_catalyst, r) for r in catalysts]
+            pubs = [(m, pool.submit(self._task, self.publication, m)) for m in pmids]
+            for f in parts + cats:
+                self.notes += f.result()[1]
+            for m, f in pubs:
+                ref, notes = f.result()
+                self.notes += notes
                 if ref:
-                    draft.publications.setdefault(pmid, ref)
+                    draft.publications[m] = ref
         self.notes = list(dict.fromkeys(self.notes))     # the same finding for several entities reads once
         return self.notes
 
@@ -140,7 +166,7 @@ class Resolver:
         find = getattr(self.lookup, 'candidate_genes', None)
         genes = self._call('Reactome graph', find, p.name) if find else None
         if genes:
-            self.notes.append(f'{p.name}: no single UniProt accession; Reactome has a set of that name whose members '
+            self._note(f'{p.name}: no single UniProt accession; Reactome has a set of that name whose members '
                               f'come from {", ".join(genes)}. Choose the gene(s) or use that set')
 
     def _ewas(self, p: EwasSpec):
@@ -151,26 +177,26 @@ class Resolver:
             return
         if not p.uniprot and (acc := self._graph_accession(p.name)):
             p.uniprot = acc
-            self.notes.append(f'{p.name}: UniProt {acc} found in the Reactome graph by name; confirm')
+            self._note(f'{p.name}: UniProt {acc} found in the Reactome graph by name; confirm')
         if self.uniprot:
             if p.uniprot:
                 info = self._call('UniProt', self.uniprot.fetch, p.uniprot, default=False)
                 if info is False:
                     p.needs_resolution.append('uniprot-unchecked')
                 elif info is None:
-                    self.notes.append(f'{p.name}: UniProt accession {p.uniprot} does not exist or is obsolete; removed')
+                    self._note(f'{p.name}: UniProt accession {p.uniprot} does not exist or is obsolete; removed')
                     p.uniprot = None
                     p.needs_resolution.append('uniprot')
                 elif p.name.upper() not in {g.upper() for g in info['genes']} and not any(
                         p.name.lower() in n.lower() for n in info['names']):
-                    self.notes.append(f'{p.name}: UniProt {p.uniprot} is gene(s) {info["genes"]}, '
+                    self._note(f'{p.name}: UniProt {p.uniprot} is gene(s) {info["genes"]}, '
                                       f'which does not match the name; check it')
                     p.needs_resolution.append('uniprot-mismatch')
             elif _GENE_SYMBOL.match(p.name):
                 acc = self._call('UniProt', self.uniprot.search_gene, p.name)
                 if acc:
                     p.uniprot = acc
-                    self.notes.append(f'{p.name}: UniProt {acc} found by gene-name search; confirm')
+                    self._note(f'{p.name}: UniProt {acc} found by gene-name search; confirm')
                 else:
                     p.needs_resolution.append('uniprot')
                     self._note_candidates(p)
@@ -197,7 +223,7 @@ class Resolver:
             hits = self._call('OLS', self.ontology.search, p.name, 'chebi', default=[])
             if len(hits) == 1:
                 p.chebi = hits[0]['identifier']
-                self.notes.append(f'{p.name}: ChEBI {p.chebi} suggested by label search; confirm the right charge form')
+                self._note(f'{p.name}: ChEBI {p.chebi} suggested by label search; confirm the right charge form')
         if p.existing is None and p.compartment is not None:
             p.existing = _ref(self.lookup.find_by_display_name(
                 entity_display_name(p), ['SimpleEntity']))

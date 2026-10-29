@@ -64,7 +64,7 @@ def _safe_name(name: str) -> str:
 def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: Optional[JobRunner] = None,
                pipeline: Optional[Pipeline] = None, resolver_factory=None,
                upload_dir: Optional[str] = None, cors_origins: Optional[List[str]] = None,
-               chat_model=None, events=None) -> FastAPI:
+               chat_model=None, events=None, qa_model=None) -> FastAPI:
     app = FastAPI(title='curator-tool-llm')
     if cors_origins:
         app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=True,
@@ -206,13 +206,23 @@ def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: O
             raise HTTPException(409, str(e))
         return s.existing
 
+    @router.post('/sessions/{session_id}/qa')
+    def qa_all(session_id: str, llm: bool = True, user: AuthUser = Depends(current_user)):
+        """QA every reaction at once and return them most urgent first (priority fix > review > ok, then by number of
+        action findings). Findings also become issues (source 'qa'), replacing each reaction's earlier QA issues."""
+        load(session_id, user)
+        try:
+            return svc().run_qa_all(user.username, session_id, (qa_model or chat_model) if llm else None)
+        except ProposalError as e:
+            raise HTTPException(409, str(e))
+
     @router.post('/sessions/{session_id}/qa/{key}')
     def qa(session_id: str, key: str, llm: bool = True, user: AuthUser = Depends(current_user)):
         """QA one reaction: rule checks always, plus an LLM review when `llm` is true and chat is configured.
         Findings also become issues (source 'qa') on the session."""
         load(session_id, user)
         try:
-            return svc().run_qa(user.username, session_id, key, chat_model if llm else None)
+            return svc().run_qa(user.username, session_id, key, (qa_model or chat_model) if llm else None)
         except ProposalError as e:
             raise HTTPException(404 if 'no reaction' in str(e) else 409, str(e))
 

@@ -1,6 +1,6 @@
 """Saved results, so a paper that was annotated once need not be extracted again.
 
-Extraction and merging take 10-15 minutes of LLM calls. While developing the interface (or demonstrating it)
+Extraction and merging take a minute or two of LLM calls for a typical paper (10-15 minutes before the speed-up). While developing the interface (or demonstrating it)
 that wait is the whole problem, so every successful run is saved, and in replay mode a saved result is used
 instead of calling the models.
 

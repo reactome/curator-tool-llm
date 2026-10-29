@@ -49,7 +49,8 @@ def build_app():
                           os.getenv('SNAPSHOT_DIR', os.path.join(ROOT, 'data', 'snapshots'))), snapshot_mode),
                       resolver_factory=lambda: Resolver(lookup, uniprot, ols), events=lookup,
                       upload_dir=os.getenv('UPLOAD_DIR', os.path.join(ROOT, 'data', 'uploads')),
-                      cors_origins=origins, chat_model=AnthropicChatModel())
+                      cors_origins=origins, chat_model=AnthropicChatModel(),
+                      qa_model=AnthropicChatModel(role='qa'))
 
 
 app = build_app() if os.getenv('CURATOR_LLM_AUTOSTART', '1') == '1' else None

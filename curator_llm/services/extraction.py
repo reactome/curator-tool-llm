@@ -8,6 +8,7 @@ boundary is the isolation. What callers get is a plain object, not CLIs and file
 import json
 import logging
 import os
+import os
 import re
 import subprocess
 import sys
@@ -58,8 +59,79 @@ def _add(a: Dict[str, int], b: Dict[str, int]) -> Dict[str, int]:
     return {k: a.get(k, 0) + b.get(k, 0) for k in set(a) | set(b)}
 
 
-def _subprocess_run(cmd: List[str], cwd: str, timeout: int):
-    return subprocess.run(cmd, cwd=cwd, timeout=timeout, capture_output=True, text=True)
+def _subprocess_run(cmd: List[str], cwd: str, timeout: int, on_line: Optional[Callable[[str], None]] = None):
+    """Run a step, handing each output line to `on_line` as it appears (so progress can be reported while the step
+    runs). stderr is merged into stdout. Raises TimeoutExpired after `timeout` seconds, like subprocess.run."""
+    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            env=dict(os.environ, PYTHONUNBUFFERED='1'))
+    timed_out = []
+
+    def kill():
+        timed_out.append(True)
+        proc.kill()
+    timer = threading.Timer(timeout, kill)
+    timer.start()
+    lines: List[str] = []
+    try:
+        for line in proc.stdout:
+            lines.append(line)
+            if on_line:
+                try:
+                    on_line(line.rstrip('\n'))
+                except Exception:                      # progress is cosmetic: never let it break a step
+                    logger.debug('progress callback failed', exc_info=True)
+        proc.wait()
+    finally:
+        timer.cancel()
+        proc.stdout.close()
+    if timed_out:
+        raise subprocess.TimeoutExpired(cmd, timeout)
+    return subprocess.CompletedProcess(cmd, proc.returncode, ''.join(lines), '')
+
+
+_CHUNKS = re.compile(r'->\s*(\d+) chunks')
+_CHUNK_DONE = re.compile(r'^\s*chunk \d+/(\d+):')
+_UNIQUE = re.compile(r'->\s*(\d+) unique signatures')
+_PREFILTER = re.compile(r'pre-filter:\s*(\d+)/(\d+) pairs')
+_JUDGED = re.compile(r'judged ~(\d+)/(\d+) pairs')
+
+
+class StepProgress:
+    """Turns the lines a step prints into short messages for the user ("extracting reactions: 7/20 chunks").
+    Returns the new message from feed(), or None when the line changes nothing."""
+
+    def __init__(self, step: str):
+        self.step, self.done, self.total, self.last = step, 0, 0, None
+
+    def _say(self, msg: str) -> Optional[str]:
+        if msg == self.last:
+            return None
+        self.last = msg
+        return msg
+
+    def feed(self, line: str) -> Optional[str]:
+        if self.step == 'extraction':
+            if m := _CHUNKS.search(line):
+                self.total = int(m.group(1))
+                return self._say(f'extracting reactions: 0/{self.total} chunks')
+            if _CHUNK_DONE.match(line):
+                self.done += 1
+                return self._say(f'extracting reactions: {self.done}/{self.total or "?"} chunks')
+        elif self.step == 'merge':
+            if m := _UNIQUE.search(line):
+                return self._say(f'merging reactions: {m.group(1)} distinct reactions to compare')
+            if m := _PREFILTER.search(line):
+                self.total = int(m.group(1))
+                return self._say(f'merging reactions: comparing {self.total} candidate pairs')
+            if m := _JUDGED.search(line):
+                return self._say(f'merging reactions: compared {m.group(1)}/{m.group(2)} pairs')
+            for marker, msg in (('[revote]', 're-checking uncertain pairs'), ('[cluster]', 'grouping duplicates'),
+                                ('[validate]', 'checking the groups'), ('[consolidate]', 'combining duplicate details')):
+                if line.startswith(marker):
+                    return self._say(f'merging reactions: {msg}')
+        elif self.step == 'review' and self.last is None:
+            return self._say('reviewing the reactions with a second model')
+        return None
 
 
 class SubprocessExtractor:
@@ -84,10 +156,19 @@ class SubprocessExtractor:
         except (OSError, ValueError):
             return []
 
-    def _step(self, name: str, cmd: List[str], res: ExtractionResult) -> Optional[subprocess.CompletedProcess]:
+    def _step(self, name: str, cmd: List[str], res: ExtractionResult,
+              report: Optional[Callable[[str], None]] = None) -> Optional[subprocess.CompletedProcess]:
         t0 = time.time()
         try:
-            proc = self._run(cmd, self.root, self.timeout)
+            if report:
+                progress = StepProgress(name)
+
+                def on_line(line: str):
+                    if msg := progress.feed(line):
+                        report(msg)
+                proc = self._run(cmd, self.root, self.timeout, on_line=on_line)
+            else:
+                proc = self._run(cmd, self.root, self.timeout)
             logger.info('%s step took %.0fs', name, time.time() - t0)
         except subprocess.TimeoutExpired:
             res.error = f'{name} timed out after {self.timeout}s'
@@ -101,7 +182,8 @@ class SubprocessExtractor:
             return None
         return proc
 
-    def extract(self, pmid: Optional[str], pdf_path: Optional[str], gene: str) -> ExtractionResult:
+    def extract(self, pmid: Optional[str], pdf_path: Optional[str], gene: str,
+                report: Optional[Callable[[str], None]] = None) -> ExtractionResult:
         res = ExtractionResult()
         if not pmid and not pdf_path:
             res.error = 'need a pmid or a pdf'
@@ -114,7 +196,7 @@ class SubprocessExtractor:
         py = sys.executable
         with _lock_for(label):
             cmd = [py, 'run_extraction.py', spec, '--gene', gene, '--overwrite'] + (['--tag', tag] if tag else [])
-            if self._step('extraction', cmd, res) is None:
+            if self._step('extraction', cmd, res, report) is None:
                 return res
             extracted = self._read(res.extraction_path)
             res.n_extracted = len(extracted)
@@ -124,7 +206,7 @@ class SubprocessExtractor:
             res.reactions = extracted                      # fallback if merge fails
             res.merged_path = os.path.join(self.results_dir, f'{label}_merged.json')   # what run_merge writes
             err_before = res.error
-            if self._step('merge', [py, 'run_merge.py', res.extraction_path], res) is None:
+            if self._step('merge', [py, 'run_merge.py', res.extraction_path], res, report) is None:
                 res.warnings.append(f'{res.error}; using unmerged reactions')
                 res.error, res.merged_path = err_before, None
             else:
@@ -135,7 +217,7 @@ class SubprocessExtractor:
                     res.warnings.append('merge wrote no reactions; using unmerged reactions')
                     res.merged_path = None
             if self.review and res.merged_path:
-                if self._step('review', [py, 'run_review.py', res.merged_path], res) is None:
+                if self._step('review', [py, 'run_review.py', res.merged_path], res, report) is None:
                     res.warnings.append(res.error)
                     res.error = err_before
                 else:

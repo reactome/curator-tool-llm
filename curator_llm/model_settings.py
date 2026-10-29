@@ -19,6 +19,9 @@ Notes from measuring on PINK1 (Kane et al. 2014):
   * Confirmed on two more papers (clock_nature, clock_science): 5.5 extraction found 10-14 and 8-11 reactions against
     22 and 21 for sonnet-5 thinking off; the 5.5 draft was 2x faster than 4-6 with the same coverage (plain 5 failed
     schema validation on one draft).
+  * QA review (35 reactions, 3 papers): thinking off gave the same verdicts (35/35) and scores within run-to-run noise
+    (mean diff 0.037 vs 0.023 between two identical runs); latency 7.1 s vs 7.4 s, i.e. no speed-up, because 5.5 does not
+    think by default. Set off anyway, so the output stays the same if that default changes.
   * Haiku was not a safe duplicate judge (missed 10 of 24 merges).
   * claude-sonnet-5-5 turns thinking off with {"type": "between_tools"}, not "disabled" (see thinking_off).
 """
@@ -40,7 +43,8 @@ DEFAULTS: Dict[str, ModelSpec] = {
     'sections':    ModelSpec('claude-sonnet-5', thinking=False),   # section-title checks (FullTextPDFSections always sends thinking off: max_tokens is 100-300)
     'merge':       ModelSpec('claude-sonnet-5', thinking=False),   # run_merge.py duplicate judge / consolidate / validate
     'draft':       ModelSpec('claude-sonnet-5-5', thinking=False),   # services/draft_builder.py (LangChain)
-    'chat':        ModelSpec('claude-sonnet-5-5'),                 # chat agent and per-reaction review
+    'chat':        ModelSpec('claude-sonnet-5-5'),                 # chat agent
+    'qa':          ModelSpec('claude-sonnet-5-5', thinking=False),  # per-reaction QA review (one short JSON reply)
     # --- gene-first pipeline (run_curator.py, LangChain) ---
     'gene':        ModelSpec('claude-sonnet-4-6', temperature=1.0),  # curator, reviewer, QA
     'convert':     ModelSpec('claude-sonnet-4-6', temperature=0.1),  # reaction_to_instances.py

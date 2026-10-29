@@ -25,7 +25,10 @@ class QAFinding(BaseModel):
 
 class QAResult(BaseModel):
     reaction_key: str
-    verdict: str                        # ok | needs_work
+    reaction_name: Optional[str] = None  # for lists: the reaction's name
+    verdict: str                        # ok | needs_work (kept for older callers; see `priority`)
+    priority: str = 'ok'                # fix_first (3+ action findings) | fix | review (warnings only) | ok
+    summary: Optional[str] = None       # one sentence: the most important thing to do, from the reviewer
     score: Optional[float] = None       # LLM's 0-1 confidence in the reaction, if it reviewed
     findings: List[QAFinding] = Field(default_factory=list)
     llm_used: bool = False
@@ -96,13 +99,31 @@ def rule_findings(draft: ReactomeDraft, r: ReactionSpec, evidence: Dict[str, Evi
     return out
 
 
-QA_SYSTEM = """You are a senior Reactome curator reviewing ONE reaction of a draft annotation. Judge only what the
-reaction and its quotes support. Check: is the catalyst really the enzyme that performs the reaction (others are
-regulators); are consumed and produced entities in the right modification state; does the summation claim more than
-the quotes show; is a regulator's condition recorded; is ortholog or cited evidence presented as if shown here.
-Reply with ONLY a JSON object: {"verdict": "ok" | "needs_work", "score": <0-1 confidence the reaction is correct and
-well supported>, "findings": [{"severity": "info" | "warning" | "action", "message": "...", "field": "<field or null>"}]}.
-Do not repeat the rule findings you are given. Say nothing about identifiers or formatting."""
+QA_SYSTEM = """You are a senior Reactome curator reviewing ONE reaction of a draft annotation, to tell a human curator
+what to fix. Judge only what the reaction and its quotes support. Check: is the catalyst really the enzyme that performs
+the reaction (others are regulators); are consumed and produced entities in the right modification state; does the
+summation claim more than the quotes show; is a regulator's condition recorded; is ortholog or cited evidence presented
+as if shown here.
+Reply with ONLY a JSON object: {"verdict": "ok" | "needs_work", "score": <0-1>, "summary": "<one sentence>",
+"findings": [{"severity": "info" | "warning" | "action", "message": "...", "field": "<field or null>"}]}.
+
+Report PROBLEMS only. Never say what is correct, reasonable or acceptable, and do not restate the reaction: if nothing is
+wrong, return no findings. Each message says what is wrong and what to change, in one or two sentences. At most 5
+findings, the most important first. Do not repeat the rule findings you are given. Say nothing about identifiers or
+formatting.
+
+Severity. "action": an error that makes the reaction wrong or unsupported as written (the wrong catalyst, a wrong consumed
+or produced entity or state, a claim no quote supports, a regulator in the wrong direction). "warning": a real weakness
+that does not make the reaction wrong. "info": a minor note or polish.
+Verdict: "needs_work" only when at least one finding is an "action"; otherwise "ok", however many warnings or notes.
+Score: 0.9 or more when sound with at most notes; 0.7-0.9 sound with warnings; 0.4-0.7 an easily fixed action; below 0.4
+mostly unsupported or wrong.
+Summary: the single most important thing for the curator to do about this reaction, or "No problems found"."""
+
+MAX_LLM_FINDINGS = 5
+_SEVERITY_RANK = {'action': 0, 'warning': 1, 'info': 2}
+_PRIORITY_RANK = {'fix_first': 0, 'fix': 1, 'review': 2, 'ok': 3}
+FIX_FIRST_ACTIONS = 3        # this many errors in one reaction and it goes to the top of the list
 
 
 def _llm_prompt(draft: ReactomeDraft, r: ReactionSpec, evidence: Dict[str, Evidence], rules: List[QAFinding]) -> str:
@@ -128,9 +149,33 @@ def parse_llm_review(text: str) -> Dict[str, Any]:
             findings.append(QAFinding(severity=sev, code='qa_llm', message=str(f['message'])[:500],
                                       field=f.get('field') or None, source='llm'))
     score = d.get('score')
+    summary = d.get('summary')
     return {'verdict': d.get('verdict') if d.get('verdict') in ('ok', 'needs_work') else None,
             'score': float(score) if isinstance(score, (int, float)) and 0 <= score <= 1 else None,
+            'summary': str(summary).strip()[:300] if isinstance(summary, str) and summary.strip() else None,
             'findings': findings}
+
+
+def priority_of(findings: List[QAFinding], llm_verdict: Optional[str]) -> str:
+    """Where this reaction goes in the curator's list. A binary verdict was "needs_work" for every reaction on real
+    drafts (an automatic first draft nearly always has something wrong), so rank by how much is wrong: fix_first (several
+    errors), fix (one or two), review (warnings only, or the reviewer said needs_work without naming an action), ok."""
+    actions = sum(1 for f in findings if f.severity == 'action')
+    if actions >= FIX_FIRST_ACTIONS:
+        return 'fix_first'
+    if actions:
+        return 'fix'
+    if llm_verdict == 'needs_work' or any(f.severity == 'warning' for f in findings):
+        return 'review'
+    return 'ok'
+
+
+def rank_results(results: List['QAResult']) -> List['QAResult']:
+    """Most urgent first: by priority, then more action findings, then more warnings, then lower score."""
+    def key(r: 'QAResult'):
+        n = lambda sev: sum(1 for f in r.findings if f.severity == sev)
+        return (_PRIORITY_RANK.get(r.priority, 3), -n('action'), -n('warning'), r.score if r.score is not None else 1.0)
+    return sorted(results, key=key)
 
 
 def qa_reaction(draft: ReactomeDraft, reaction_key: str, evidence: List[Evidence], model=None) -> QAResult:
@@ -139,7 +184,7 @@ def qa_reaction(draft: ReactomeDraft, reaction_key: str, evidence: List[Evidence
         raise KeyError(reaction_key)
     ev = {e.id: e for e in evidence}
     findings = rule_findings(draft, r, ev)
-    score, verdict_llm, used, spent = None, None, False, None
+    score, verdict_llm, summary, used, spent = None, None, None, False, None
     if model is not None:
         try:
             turn = model.turn(QA_SYSTEM, [{'role': 'user', 'content': _llm_prompt(draft, r, ev, findings)}], [], lambda t: None)
@@ -148,11 +193,12 @@ def qa_reaction(draft: ReactomeDraft, reaction_key: str, evidence: List[Evidence
                 spent = {'input_tokens': u.input_tokens, 'output_tokens': u.output_tokens,
                          'cache_read_tokens': u.cache_read_tokens, 'cache_write_tokens': u.cache_write_tokens}
             rev = parse_llm_review(turn.text)
-            findings += rev['findings']
-            score, verdict_llm, used = rev['score'], rev['verdict'], True
+            findings += sorted(rev['findings'], key=lambda f: _SEVERITY_RANK[f.severity])[:MAX_LLM_FINDINGS]
+            score, verdict_llm, summary, used = rev['score'], rev['verdict'], rev['summary'], True
         except Exception as e:                                   # the rule findings still stand
             findings.append(QAFinding(severity='info', code='qa_llm_unavailable',
                                       message=f'the LLM review could not be completed ({type(e).__name__})'))
     needs = any(f.severity == 'action' for f in findings) or verdict_llm == 'needs_work'
-    return QAResult(reaction_key=reaction_key, verdict='needs_work' if needs else 'ok', score=score,
-                    findings=findings, llm_used=used, usage=spent)
+    findings.sort(key=lambda f: _SEVERITY_RANK[f.severity])             # stable: most serious first, rules before the LLM
+    return QAResult(reaction_key=reaction_key, reaction_name=r.name, verdict='needs_work' if needs else 'ok', score=score, summary=summary,
+                    priority=priority_of(findings, verdict_llm), findings=findings, llm_used=used, usage=spent)

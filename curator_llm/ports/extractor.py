@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Protocol
+from typing import Callable, Dict, List, Optional, Protocol
 
 
 @dataclass
@@ -19,6 +19,8 @@ class ExtractionResult:
 
 
 class Extractor(Protocol):
-    def extract(self, pmid: Optional[str], pdf_path: Optional[str], gene: str) -> ExtractionResult:
-        """One paper -> reactions (extract, merge, optional review). Never raises: failures are in `error`."""
+    def extract(self, pmid: Optional[str], pdf_path: Optional[str], gene: str,
+                report: Optional[Callable[[str], None]] = None) -> ExtractionResult:
+        """One paper -> reactions (extract, merge, optional review). Never raises: failures are in `error`.
+        `report` (optional) is called with a short progress message as the work advances."""
         ...

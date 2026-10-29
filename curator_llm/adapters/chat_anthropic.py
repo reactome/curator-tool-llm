@@ -2,23 +2,26 @@
 import os
 from typing import Any, Callable, Dict, List
 
-from curator_llm.model_settings import model_name
+from curator_llm.model_settings import anthropic_kwargs
 from curator_llm.ports.chat_model import ModelTurn, TokenUsage, ToolCall
 
 
 class AnthropicChatModel:
-    def __init__(self, client=None, model: str = None, max_tokens: int = 4096):
+    def __init__(self, client=None, model: str = None, max_tokens: int = 4096, role: str = 'chat'):
         if client is None:
             import anthropic
             client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'), timeout=120.0)
         self.client = client
-        self.model = model or model_name('chat')
+        kw = anthropic_kwargs(role)                  # the role's model, and its thinking setting when it has one
+        self.model = model or kw['model']
+        self.thinking = kw.get('thinking')
         self.max_tokens = max_tokens
 
     def turn(self, system: str, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]],
              on_text: Callable[[str], None]) -> ModelTurn:
+        extra = {'thinking': self.thinking} if self.thinking else {}
         with self.client.messages.stream(model=self.model, max_tokens=self.max_tokens, system=system,
-                                         messages=messages, tools=tools) as stream:
+                                         messages=messages, tools=tools, **extra) as stream:
             for delta in stream.text_stream:
                 on_text(delta)
             final = stream.get_final_message()

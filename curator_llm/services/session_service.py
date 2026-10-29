@@ -2,6 +2,7 @@
 (re)emit instances and issues whenever the draft changes. All writes to the store go through here."""
 import functools
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -17,7 +18,7 @@ from curator_llm.services.evidence_store import EvidenceStore
 from curator_llm.services.existing_events import find_existing
 from curator_llm.services.paper_text import PaperText
 from curator_llm.services.patching import PatchError, apply_patch, describe_changes, touched_reactions
-from curator_llm.services.qa import qa_reaction
+from curator_llm.services.qa import qa_reaction, rank_results
 
 
 class ProposalError(ValueError):
@@ -222,13 +223,37 @@ class SessionService:
         return s
 
     # ── checks that produce issues ─────────────────────────────────────────
-    @_locked
     def run_qa(self, owner: str, session_id: str, reaction_key: str, model=None):
-        """QA one reaction. Its previous QA issues are replaced (ids and statuses of recurring ones kept)."""
+        """QA one reaction. Its previous QA issues are replaced (ids and statuses of recurring ones kept).
+        The model call runs outside the session lock, so chat and the UI are not held up while it waits."""
         s = self._ready(owner, session_id)
         try:
             result = qa_reaction(s.draft, reaction_key, s.evidence, model)
         except KeyError:
+            raise ProposalError(f'no reaction with key {reaction_key!r}')
+        return self._apply_qa(owner, session_id, result, model)
+
+    def run_qa_all(self, owner: str, session_id: str, model=None, workers: int = 8):
+        """QA every reaction (the model calls run concurrently), record the findings as issues, and return the
+        results most urgent first."""
+        s = self._ready(owner, session_id)
+        draft, evidence = s.draft, s.evidence
+        keys = [r.key for r in draft.reactions]
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(keys) or 1))) as pool:
+            results = list(pool.map(lambda k: qa_reaction(draft, k, evidence, model), keys))
+        applied = []
+        for res in results:
+            try:
+                applied.append(self._apply_qa(owner, session_id, res, model))
+            except ProposalError:                # the reaction was removed by an edit while the checks ran
+                continue
+        return rank_results(applied)
+
+    @_locked
+    def _apply_qa(self, owner: str, session_id: str, result, model=None):
+        s = self._ready(owner, session_id)
+        reaction_key = result.reaction_key
+        if not any(r.key == reaction_key for r in s.draft.reactions):
             raise ProposalError(f'no reaction with key {reaction_key!r}')
         mine = lambda i: i.source == 'qa' and i.reaction_key == reaction_key
         fresh = [Issue(source='qa', severity=f.severity, code=f.code, message=f.message, reaction_key=reaction_key,

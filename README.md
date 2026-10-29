@@ -363,9 +363,9 @@ curl -s -X POST $API/sessions -H "$AUTH" -H 'Content-Type: application/json' \
 #    ... or upload a PDF (up to 50 MB):
 curl -s -X POST $API/sessions/upload -H "$AUTH" -F file=@paper.pdf -F focus=PINK1
 
-# 2. Poll the job. It runs in the background: about 10-15 minutes the first time.
+# 2. Poll the job. It runs in the background: about 2-3 minutes for a typical paper, longer for a long one.
 curl -s $API/jobs/JOB_ID -H "$AUTH"
-#    {"id":"a81d...","status":"running","progress":"extracting and merging reactions (several minutes)","error":null}
+#    {"id":"a81d...","status":"running","progress":"extracting reactions: 7/20 chunks","error":null}
 #    status goes queued -> running -> done (or failed, with the reason in "error")
 
 # 3. What needs a curator's attention
@@ -427,7 +427,8 @@ Every route is under `/api/llm` and needs the bearer token.
 | `GET /sessions/{id}/usage` | Language-model tokens spent, per step (extraction, merge, review, draft, reaction checks, chat) with totals. |
 | `GET /sessions/{id}/network` | The reactions and their entities as nodes and edges, for drawing a network. |
 | `GET /sessions/{id}/existing`, `POST /sessions/{id}/existing/check` | Draft reactions Reactome already seems to have; recheck. |
-| `POST /sessions/{id}/qa/{key}` | Check one reaction (`?llm=false` for the rule checks only). |
+| `POST /sessions/{id}/qa/{key}` | Check one reaction (`?llm=false` for the rule checks only). Returns a `priority` (`fix_first`, `fix`, `review`, `ok`), a one-sentence `summary`, and the findings most serious first. |
+| `POST /sessions/{id}/qa` | Check every reaction at once (about 15 s for 11 reactions) and return them most urgent first, with the findings recorded as issues. |
 | `GET`, `POST /sessions/{id}/proposals` | List, or submit your own edit as an RFC 6902 patch. |
 | `POST /sessions/{id}/proposals/{pid}/accept` , `/reject` | Decide a proposed edit. |
 | `GET`, `POST /sessions/{id}/chat` | Read the conversation; send a message (streams). |
@@ -437,7 +438,7 @@ The machine-readable contract is [`docs/openapi.json`](docs/openapi.json); regen
 
 ### Fast iteration without calling the models
 
-Extraction and merging take 10-15 minutes of LLM calls. Every successful run is saved under `data/snapshots/`, and
+Extraction and merging take a minute or two of LLM calls for a typical paper (more for a long one). Every successful run is saved under `data/snapshots/`, and
 with `SNAPSHOT_MODE=replay` the service serves a saved result instead of running the pipeline, so a ready session
 appears in about a second:
 
