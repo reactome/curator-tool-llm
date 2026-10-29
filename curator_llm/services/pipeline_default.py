@@ -3,6 +3,7 @@
 everything after them is in-process and returns objects."""
 import logging
 import os
+import time
 from typing import Callable, Dict, List, Optional
 
 from curator_llm.models.session import Issue
@@ -73,6 +74,12 @@ class DefaultPipeline:
         """Everything after extraction: verify quotes, build the typed draft, resolve identifiers, look for
         existing reactions. Pass `draft` to skip the one LLM call that builds it (used to rebuild a saved result
         from files without calling any model)."""
+        t = [time.time()]
+
+        def lap(label):
+            now = time.time()
+            logger.info('%s took %.1fs', label, now - t[0])
+            t[0] = now
         report('verifying quotes against the paper')
         usage: List[UsageEntry] = []
         store = EvidenceStore()
@@ -92,12 +99,15 @@ class DefaultPipeline:
             draft, notes = build_draft(spec.focus or 'the paper', reactions, accession, self.model, usage=usage)
             issues += iss.issues_from_notes('builder', notes)
 
+        lap('quote verification + draft build')
         report('resolving identifiers')
         issues += iss.issues_from_notes('resolver', Resolver(self.lookup, self.uniprot, self.ontology).resolve(draft))
+        lap('identifier resolution')
         existing = []
         if self.events is not None:
             report('checking Reactome for existing reactions')
             existing, ex_issues = find_existing(draft, spec.pmid, self.events)
             issues += ex_issues
+            lap('existing-reaction check')
         main = papers.get('main')
         return PipelineResult(draft, store.all(), issues, main.to_dict() if main else None, existing, usage)

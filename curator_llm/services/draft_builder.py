@@ -32,7 +32,7 @@ class LlmModification(BaseModel):
 
 class LlmEntity(BaseModel):
     key: str = Field(..., description="Short unique handle, e.g. pink1, ub, p_ub_s65")
-    kind: Literal['protein', 'small_molecule', 'complex', 'set']
+    kind: Literal['protein', 'gene', 'rna', 'small_molecule', 'complex', 'set']
     name: str = Field(..., description="Plain entity name (gene symbol for proteins), no tags, no modification text")
     uniprot: Optional[str] = Field(None, description="UniProt accession ONLY if it was given to you; otherwise null")
     chebi: Optional[str] = Field(None, description="ChEBI id ONLY if certain; otherwise null")
@@ -97,7 +97,22 @@ re-derive reactions: return exactly one output reaction per input reaction, with
 {acc}
 
 PARTICIPANTS (entities)
-- kind: protein | small_molecule | complex | set. One entity per DISTINCT molecular species, reused across reactions.
+- kind: protein | gene | rna | small_molecule | complex | set. One entity per DISTINCT molecular species, reused
+  across reactions.
+- small_molecule is ONLY for a chemical compound (ATP, NAD+, nicotinamide, a drug such as FK866 or resveratrol).
+  A gene, a transcript or a protein is never a small_molecule, whatever the paper calls it.
+- gene is the DNA of a gene, named "<SYMBOL> gene" (e.g. "PER2 gene"). Use it when a reaction acts ON the gene: a
+  transcription factor binding it, chromatin or DNA modification at it, or the template of transcription. A
+  promoter, enhancer, E-box, response element or intron is a region OF a gene, not an entity of its own: use the gene
+  entity and say which element in the reaction name and summation. Never create "Per2 promoter E-box" or "Nampt
+  promoter/first intron" entities.
+- rna is a transcript of a gene, named "<SYMBOL> mRNA" (e.g. "PER2 mRNA"); other RNAs keep their own name
+  (e.g. "miR-34a"). Use it for what transcription produces and for "expression"/"mRNA level" of a gene: an increase
+  in Per2 expression is the "PER2 mRNA" entity, not a new entity. The protein is a separate protein entity.
+- gene and rna entities never get uniprot or chebi. Keep the "gene"/"mRNA" suffix in the name so they stay distinct
+  from the protein of the same symbol.
+- Processes, phenotypes and measurements are NOT entities: "Per2 oscillation", "suppressed expression", "NAD+
+  biosynthesis". They belong in the reaction name and summation.
 - A MODIFIED protein is the base protein plus modifications, not a new name: "phospho-Ub (Ser65)" is
   entity name "UB" with modification MOD:00046, residue S, coordinate 65. The unmodified form is a separate
   entity (same name, no modifications). Use only these PSI-MOD ids, and only when the input states the
@@ -124,7 +139,7 @@ INPUT REACTIONS (JSON):
 
 
 # ── assembly ───────────────────────────────────────────────────────────────
-_KIND = {'protein': EwasSpec, 'small_molecule': SimpleEntitySpec, 'complex': ComplexSpec, 'set': DefinedSetSpec}
+_KIND = {'protein': EwasSpec, 'gene': EwasSpec, 'rna': EwasSpec, 'small_molecule': SimpleEntitySpec, 'complex': ComplexSpec, 'set': DefinedSetSpec}
 
 
 def assemble(gene: str, reactions: List[dict], ex: DraftExtraction,
@@ -136,7 +151,9 @@ def assemble(gene: str, reactions: List[dict], ex: DraftExtraction,
             notes.append(f'duplicate entity key {e.key}: the later one was ignored')
             continue
         common = {'key': e.key, 'name': e.name, 'compartment_name': e.compartment}
-        if e.kind == 'protein':
+        if e.kind in ('gene', 'rna'):
+            d.participants[e.key] = EwasSpec(**common, molecule='dna' if e.kind == 'gene' else 'rna')
+        elif e.kind == 'protein':
             mods = []
             for m in e.modifications:
                 if m.psi_mod not in PSI_MOD:
@@ -222,8 +239,8 @@ def build_draft(gene: str, reactions: List[dict], accession: Optional[str] = Non
     if model is None:
         import sys, os
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'reactome_llm'))
-        from ModelConfig import create_reactome_chat_model
-        model = create_reactome_chat_model()
+        from ModelConfig import create_chat_model
+        model = create_chat_model('draft')
     counter = UsageMetadataCallbackHandler()          # the structured-output wrapper hides the raw reply's usage
     ex = model.with_structured_output(DraftExtraction).invoke(build_prompt(gene, reactions, accession),
                                                               config={'callbacks': [counter]})

@@ -37,7 +37,7 @@ if _REACTOME_LLM not in sys.path:
 
 from langchain_anthropic import ChatAnthropic
 import token_profiler
-from ModelConfig import REACTOME_MODEL_NAME
+from curator_llm.model_settings import langchain_kwargs
 from ReactomeModels import ReactomeDataModel
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,7 @@ _CONVERT_MAX_TOKENS = 64000
 
 def _model():
     """A token-profiled sonnet model at low temperature for deterministic schema conversion."""
-    return ChatAnthropic(model=REACTOME_MODEL_NAME, temperature=0.1, max_tokens=_CONVERT_MAX_TOKENS,
+    return ChatAnthropic(**langchain_kwargs('convert'), max_tokens=_CONVERT_MAX_TOKENS,
                          callbacks=token_profiler.langchain_callbacks())
 
 

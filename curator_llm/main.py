@@ -5,7 +5,7 @@ Settings (.env is loaded):
   SESSION_STORE    memory (default) or mongo
   SNAPSHOT_MODE    record (default: save each successful run), replay (reuse a saved result instead of calling the
                    models; for interface development and demos) or off. SNAPSHOT_DIR defaults to data/snapshots.
-  CHAT_MODEL       default claude-sonnet-5-5
+  LLM_MODEL_<ROLE> which model a step uses (all defaults are in curator_llm/model_settings.py; CHAT_MODEL still works)
   CORS_ORIGINS     default http://localhost:4200
   UPLOAD_DIR       default data/uploads
   LLM_REVIEW=1     also run the OpenAI cross-model review

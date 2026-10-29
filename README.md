@@ -320,10 +320,20 @@ Read from `.env` (the keys in [Configuration](#configuration-env) apply too):
 | `SESSION_STORE` | `memory` | `memory`, or `mongo` to keep sessions across restarts (uses `PUBMED_MONGO_URI`). |
 | `SNAPSHOT_MODE` | `record` | `record` saves every successful run, `replay` reuses a saved result instead of calling the models, `off` does neither. See [Fast iteration](#fast-iteration-without-calling-the-models). |
 | `SNAPSHOT_DIR` | `data/snapshots` | Where saved results go. |
-| `CHAT_MODEL` | `claude-sonnet-5-5` | Model used by the chat and the per-reaction review. |
+| `LLM_MODEL_<ROLE>` | see below | Model for one step, e.g. `LLM_MODEL_CHAT`. `CHAT_MODEL` still works. |
+| `LLM_THINKING_<ROLE>` | per role | `on` or `off`: extended thinking. Off is much faster. |
 | `CORS_ORIGINS` | `http://localhost:4200` | Comma-separated browser origins allowed to call the API. |
 | `UPLOAD_DIR` | `data/uploads` | Where uploaded PDFs are kept, per user. |
 | `LLM_REVIEW` | off | `1` also runs the OpenAI cross-model review (needs `OPENAI_API_KEY`). |
+
+### Which model each step uses
+
+All models are configured in one file, [`curator_llm/model_settings.py`](curator_llm/model_settings.py): edit its
+`DEFAULTS`, or override a role with the variables above (roles `extraction`, `sections`, `merge`, `draft`, `chat`,
+`gene`, `convert`, `review`). The file's header records what was measured: thinking off is ~4x faster for extraction
+with the same quotes verified, Haiku is not a safe duplicate judge, extraction stays on `claude-sonnet-5` because
+`claude-sonnet-5-5` finds fewer reactions, and the draft step uses `claude-sonnet-5-5` (about 2.7x faster than 4.6). (The embedding and cross-encoder models for retrieval,
+and the scripts under `dense_retrieval/`, are not covered.)
 
 ### Authenticate
 

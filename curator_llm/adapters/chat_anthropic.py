@@ -2,6 +2,7 @@
 import os
 from typing import Any, Callable, Dict, List
 
+from curator_llm.model_settings import model_name
 from curator_llm.ports.chat_model import ModelTurn, TokenUsage, ToolCall
 
 
@@ -11,7 +12,7 @@ class AnthropicChatModel:
             import anthropic
             client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'), timeout=120.0)
         self.client = client
-        self.model = model or os.getenv('CHAT_MODEL', 'claude-sonnet-5-5')
+        self.model = model or model_name('chat')
         self.max_tokens = max_tokens
 
     def turn(self, system: str, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]],

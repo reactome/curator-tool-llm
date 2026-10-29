@@ -19,7 +19,8 @@ Usage:
 Writes results/<stem>[_<tag>]_extraction.json per paper (incremental, per
 chunk). Refuses to overwrite an existing extraction unless --overwrite is given.
 """
-import os, sys, json, time, glob, argparse, importlib.util
+import os, sys, json, time, glob, argparse, importlib.util, threading
+from concurrent.futures import ThreadPoolExecutor
 PROJECT_ROOT = os.environ.get('CURATOR_LLM_ROOT') or os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, 'reactome_llm'))
 from dotenv import load_dotenv
@@ -41,24 +42,30 @@ RESULTS_DIR = os.path.join(PROJECT_ROOT, 'results')
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
 client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'), timeout=120.0)
-MODEL_NAME = 'claude-sonnet-5'
+from curator_llm.model_settings import anthropic_kwargs, model_name
+MODEL_NAME = model_name('sections')       # also what the Results-section lookup in load_source() uses
+MODEL_KW = anthropic_kwargs('extraction')  # model + thinking for the extraction calls (curator_llm/model_settings.py)
 PREV_WINDOW = 2   # previous chunks' reaction-notes kept as backward context
 
 # Token accounting across every API call this run makes, so a pipeline run can be
 # costed. Note a Results-section LLM fallback inside FullTextPDFSections is not
 # counted here — only the extraction calls made below.
 USAGE = {'calls': 0, 'in': 0, 'out': 0, 'cache_read': 0, 'cache_write': 0}
+_usage_lock = threading.Lock()
+# Chunks extracted concurrently (1 = the original serial mode, each chunk seeing notes on the previous two).
+WORKERS = int(os.getenv('EXTRACT_WORKERS', '16'))
 
 
 def track_usage(msg):
     u = getattr(msg, 'usage', None)
     if not u:
         return
-    USAGE['calls'] += 1
-    USAGE['in'] += getattr(u, 'input_tokens', 0) or 0
-    USAGE['out'] += getattr(u, 'output_tokens', 0) or 0
-    USAGE['cache_read'] += getattr(u, 'cache_read_input_tokens', 0) or 0
-    USAGE['cache_write'] += getattr(u, 'cache_creation_input_tokens', 0) or 0
+    with _usage_lock:
+        USAGE['calls'] += 1
+        USAGE['in'] += getattr(u, 'input_tokens', 0) or 0
+        USAGE['out'] += getattr(u, 'output_tokens', 0) or 0
+        USAGE['cache_read'] += getattr(u, 'cache_read_input_tokens', 0) or 0
+        USAGE['cache_write'] += getattr(u, 'cache_creation_input_tokens', 0) or 0
 
 
 def usage_line():
@@ -74,11 +81,14 @@ pm = importlib.util.module_from_spec(spec); spec.loader.exec_module(pm)
 splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=0, length_function=len,
                                           separators=['\n\n', '\n', '. ', ' ', ''])
 
-def extract_reactions(current_chunk, prev_contexts, next_context):
-    prompt = pm.build_extraction_prompt(current_chunk, prev_contexts=prev_contexts, next_context=next_context)
+def extract_reactions(current_chunk, prev_contexts, next_context, raw_prev=False):
+    head, tail = pm.build_extraction_prompt(current_chunk, prev_contexts=prev_contexts, next_context=next_context,
+                                            raw_prev=raw_prev, split=True)
     try:
-        msg = client.messages.create(model=MODEL_NAME, max_tokens=16000,
-                                     messages=[{'role': 'user', 'content': prompt}])
+        # the head (instructions) is the same for every chunk: mark it for prompt caching
+        msg = client.messages.create(**MODEL_KW, max_tokens=16000, messages=[{'role': 'user', 'content': [
+            {'type': 'text', 'text': head, 'cache_control': {'type': 'ephemeral'}},
+            {'type': 'text', 'text': tail}]}])
     except Exception as e:
         print(f'    API call failed: {type(e).__name__}: {e}', flush=True); return None
     track_usage(msg)
@@ -134,6 +144,34 @@ def process_chunk(state: PipelineState) -> PipelineState:
     return {**state, 'current_chunk_index': idx + 1,
             'reactions_found': all_reactions, 'recent_notes': recent}
 
+def extract_concurrently(source_id, out, chunks, workers):
+    """Every chunk independently, `workers` at a time. Backward context is the RAW text of the previous two
+    chunks (known up front) rather than notes on their reactions, which would make chunk N wait for N-1.
+    The first chunk goes alone so its call writes the prompt cache that the rest then read."""
+    done = {}
+    lock = threading.Lock()
+
+    def work(idx):
+        prev = [chunks[k] for k in (idx - 1, idx - 2) if k >= 0]
+        nxt = chunks[idx + 1] if idx + 1 < len(chunks) else None
+        result = extract_reactions(chunks[idx], prev, nxt, raw_prev=True)
+        new = [split_evidence(r) for r in (result.get('reactions', []) if result else [])]
+        with lock:
+            done[idx] = new
+            flat = [{'source': source_id, 'chunk_index': i, 'word_count': len(chunks[i].split()),
+                     'annotation_result': r} for i in sorted(done) for r in done[i]]
+            with open(out, 'w') as f:
+                json.dump(flat, f, indent=2)
+            status = 'FAILED' if result is None else f'{len(new)} reaction(s)'
+            print(f"  chunk {idx+1}/{len(chunks)}: {status}  |  {usage_line()}", flush=True)
+
+    if chunks:
+        work(0)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(work, range(1, len(chunks))))
+    return [{'source': source_id, 'chunk_index': i, 'word_count': len(chunks[i].split()), 'annotation_result': r}
+            for i in sorted(done) for r in done[i]]
+
 def should_continue(state):
     return 'done' if state['current_chunk_index'] >= len(state['chunks']) else 'continue'
 
@@ -153,19 +191,24 @@ def extract_paper(paper, gene=None, tag=None, overwrite=False, pmcid=None):
         raise FileExistsError(f'{out} exists — pass --tag <name> to write a separate '
                               f'file, or --overwrite to replace it')
     # pmcid comes from the up-front triage, so PMC is not asked to resolve it twice
-    source_id, results_text, how = fetcher.load_source(paper, client=client, model=MODEL_NAME,
+    source_id, results_text, how = fetcher.load_source(paper, client=client, model=MODEL_NAME, whole_paper_fallback=True,
                                                        pmcid=pmcid)
     chunks = splitter.split_text(results_text)
     print(f"[setup] {source_id}: Results={len(results_text.split()):,}w "
           f"(via {how}) -> {len(chunks)} chunks", flush=True)
 
-    config = {'configurable': {'thread_id': label}, 'recursion_limit': len(chunks) + 5}
-    init = {'source': source_id, 'out': out, 'chunks': chunks, 'current_chunk_index': 0,
-            'reactions_found': [], 'recent_notes': []}
     t0 = time.time()
-    final = graph.invoke(init, config=config)
-    print(f"[done] {source_id}: {final['current_chunk_index']} chunks, {len(final['reactions_found'])} reaction(s), "
-          f"{time.time()-t0:.0f}s -> {out}", flush=True)
+    if WORKERS > 1:
+        found = extract_concurrently(source_id, out, chunks, WORKERS)
+        n_chunks = len(chunks)
+    else:
+        config = {'configurable': {'thread_id': label}, 'recursion_limit': len(chunks) + 5}
+        init = {'source': source_id, 'out': out, 'chunks': chunks, 'current_chunk_index': 0,
+                'reactions_found': [], 'recent_notes': []}
+        final = graph.invoke(init, config=config)
+        found, n_chunks = final['reactions_found'], final['current_chunk_index']
+    print(f"[done] {source_id}: {n_chunks} chunks, {len(found)} reaction(s), "
+          f"{time.time()-t0:.0f}s ({WORKERS} worker(s)) -> {out}", flush=True)
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description='Extract reactions from PDFs or PubMed IDs.')
@@ -179,7 +222,11 @@ if __name__ == '__main__':
                                  'separate from an earlier extraction)')
     ap.add_argument('--overwrite', action='store_true',
                     help='allow replacing an existing extraction file (refused by default)')
+    ap.add_argument('--workers', type=int, help='chunks extracted concurrently (default $EXTRACT_WORKERS or 16; '
+                    '1 = the original serial mode, where each chunk sees notes on the previous two)')
     a = ap.parse_args()
+    if a.workers:
+        WORKERS = a.workers
 
     papers = list(a.sources)
     if a.pmid_file:

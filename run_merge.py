@@ -32,9 +32,13 @@ load_dotenv(os.path.join(PROJECT_ROOT, '.env'), override=True)
 import anthropic
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from curator_llm.services.evidence_attach import merge_details
+from curator_llm.services.dedup_prefilter import candidate_pairs
 
 client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
-MODEL_NAME = 'claude-sonnet-5'
+from curator_llm.model_settings import anthropic_kwargs
+MODEL_KW = anthropic_kwargs('merge')     # model + thinking (curator_llm/model_settings.py)
+# Judge / consolidate / validate calls use the 'merge' role: thinking is off by default (same merges, ~1.7x faster)
+# and Haiku is not a safe judge; see curator_llm/model_settings.py. Override with LLM_MODEL_MERGE / LLM_THINKING_MERGE.
 
 # Token accounting over every judge/consolidate call, so a run can be costed. The
 # judge fans out over ThreadPoolExecutor, so the counters are lock-guarded.
@@ -89,6 +93,8 @@ parser.add_argument('--validate-min-size', type=int, default=3,
                     help='run stage-3 cluster validation on clusters of at least this many '
                          'variants; a 2-variant cluster rests on one direct verdict and has no '
                          'transitivity to check (default: 3)')
+parser.add_argument('--no-prefilter', action='store_true',
+                    help='judge every pair, even those whose inputs or outputs share no entity')
 parser.add_argument('--no-validate', action='store_true',
                     help='skip stage-3 cluster-level validation')
 parser.add_argument('--revote-below', type=float, default=0.9,
@@ -231,8 +237,11 @@ Return ONLY JSON: {{"same": <true|false>, "confidence": <0-1>, "reason": "<short
             # than by a budget of its own, so too low a ceiling gets spent entirely on thinking
             # and the reply comes back with no text block at all. 1000 was enough for all 990
             # ZNFX1 pairs, but a hard pair would silently return "not duplicate", so leave room.
-            msg = client.messages.create(model=MODEL_NAME, max_tokens=4000,
-                                         messages=[{'role': 'user', 'content': prompt}])
+            # the rules come before "Reaction A:" and are identical for every pair: cache them
+            cut = prompt.index('Reaction A:')
+            msg = client.messages.create(**MODEL_KW, max_tokens=4000, messages=[{'role': 'user', 'content': [
+                {'type': 'text', 'text': prompt[:cut], 'cache_control': {'type': 'ephemeral'}},
+                {'type': 'text', 'text': prompt[cut:]}]}])
             # Skip thinking/other blocks; take the first text block. With extended
             # thinking on, content[0] is a ThinkingBlock (no .text) and would crash.
             track_usage(msg)
@@ -436,7 +445,7 @@ Return ONLY JSON with exactly these keys:
         try:
             # 8000 was not enough: on ZNFX1's 7-variant cluster thinking consumed the whole
             # ceiling and the reply carried no answer, leaving that reaction unconsolidated
-            msg = client.messages.create(model=MODEL_NAME, max_tokens=16000,
+            msg = client.messages.create(**MODEL_KW, max_tokens=16000,
                                          messages=[{'role': 'user', 'content': prompt}])
             track_usage(msg)
             txt = next((b.text for b in msg.content if getattr(b, 'type', None) == 'text'), '')
@@ -540,7 +549,7 @@ Return ONLY JSON: {{"valid_single_cluster": <true|false>, "groups": [[1, 2], [3]
             # in the pipeline: 11 ZNFX1 records took 3854 thinking tokens against a 230-character
             # answer. A ceiling of 2000 was spent entirely on thinking and returned no answer,
             # which silently meant "do not split" on the very clusters most in need of splitting.
-            msg = client.messages.create(model=MODEL_NAME, max_tokens=16000,
+            msg = client.messages.create(**MODEL_KW, max_tokens=16000,
                                          messages=[{'role': 'user', 'content': prompt}])
             track_usage(msg)
             txt = next((b.text for b in msg.content if getattr(b, 'type', None) == 'text'), '')
@@ -592,7 +601,13 @@ n = len(unique)
 
 pairs = [(i, j) for i in range(n) for j in range(i + 1, n)
          if unique[i]['source'] == unique[j]['source']]
-print(f"[merge] exhaustive judge over {n} reactions ({len(pairs)} pairs), {MAX_WORKERS} concurrent...", flush=True)
+n_all_pairs = len(pairs)
+if not args.no_prefilter:
+    # pairs whose inputs (or outputs) share no entity cannot be duplicates: do not spend a call on them
+    pairs = candidate_pairs([e['annotation_result'] for e in unique], pairs)
+    print(f"[merge] pre-filter: {len(pairs)}/{n_all_pairs} pairs can be duplicates; "
+          f"{n_all_pairs - len(pairs)} skipped without a call", flush=True)
+print(f"[merge] judge over {n} reactions ({len(pairs)} pairs), {MAX_WORKERS} concurrent...", flush=True)
 t0 = time.time(); done = [0]; total = [len(pairs)]   # total grows when shaky pairs are re-voted
 
 def judge(pair):
@@ -605,8 +620,11 @@ def judge(pair):
               f"| {usage_line()}", flush=True)
     return (i, j, same, conf)
 
-with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-    verdicts = list(pool.map(judge, pairs))
+verdicts = []
+if pairs:
+    verdicts.append(judge(pairs[0]))      # alone first: its call writes the prompt cache the rest read
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        verdicts += list(pool.map(judge, pairs[1:]))
 
 # Verdicts keyed by (lower, higher) index, because clustering now QUERIES arbitrary pairs
 # repeatedly — "may these two groups join, i.e. is every pair across them same?" — instead of

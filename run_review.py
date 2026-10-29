@@ -35,7 +35,8 @@ load_dotenv(os.path.join(PROJECT_ROOT, '.env'), override=True)
 import PubMedFetcher as fetcher
 
 RESULTS_DIR = os.path.join(PROJECT_ROOT, 'results')
-MODEL = 'gpt-5.6-luna'
+from curator_llm.model_settings import model_name
+MODEL = model_name('review')
 
 parser = argparse.ArgumentParser(description='Get a second opinion on a merged run.')
 parser.add_argument('target', nargs='?', default='pink1',
@@ -125,7 +126,8 @@ if not chunks:
     # with run_extraction.py. Its CLI is behind an __main__ guard, so importing is cheap.
     import run_extraction as pipeline
     _sid, results_text, route = fetcher.load_source(spec, client=pipeline.client,
-                                                    model=pipeline.MODEL_NAME)
+                                                    model=pipeline.MODEL_NAME,
+                                                    whole_paper_fallback=True)
     chunks = pipeline.splitter.split_text(results_text)
     how = f're-derived from source (via {route})'
     print(f"[chunks] {len(results_text.split()):,} words (via {route}) -> {len(chunks)} chunks")

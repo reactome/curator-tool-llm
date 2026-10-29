@@ -25,6 +25,17 @@ _NEXT_HEADING = re.compile(
     r')[ \t]*$', re.I | re.M)
 
 
+
+def _no_thinking(model):
+    """Keyword args that turn extended thinking off. These calls have a tiny max_tokens (100-300) and thinking
+    spends it all, leaving no text block at all (seen on papers with no 'Results' heading, whose section lookup
+    falls back to these calls)."""
+    try:
+        from curator_llm.model_settings import thinking_off
+    except ImportError:                       # run from a directory without the project root on sys.path
+        return {'thinking': {'type': 'disabled'}}
+    return {'thinking': thinking_off(model or '')}
+
 def _heuristic(full_text):
     """Return the Results-section text via heading detection, or None if not confident."""
     m = _RESULTS_HEADING.search(full_text)
@@ -82,7 +93,7 @@ If there is no identifiable Results section, return {{"start_marker": null, "end
 --- PAPER END ---
 {tail}"""
     try:
-        msg = client.messages.create(model=model, max_tokens=300,
+        msg = client.messages.create(model=model, max_tokens=300, **_no_thinking(model),
                                      messages=[{'role': 'user', 'content': prompt}])
         raw = ''.join(b.text for b in msg.content if getattr(b, 'type', None) == 'text').strip()
         obj = _parse_json(raw)
@@ -114,19 +125,47 @@ If there is no identifiable Results section, return {{"start_marker": null, "end
     return section if len(section.split()) >= 100 else None
 
 
-def extract_results_section(full_text, client=None, model=None):
-    """Return (results_text, method). method in {'llm','heuristic'}.
+_REFS_HEADING = re.compile(r'^\s*(references|bibliography|literature cited|references and notes)\s*$', re.I | re.M)
+_ABSTRACT_HEADING = re.compile(r'^\s*abstract\s*$', re.I | re.M)
+
+
+def whole_paper(full_text):
+    """The paper's running text for a paper with no Results section (a short communication, a review): from the
+    Abstract heading (dropping title, authors and affiliations) to the References heading (dropping the
+    bibliography). Each cut is made only when it leaves most of the text, so a stray 'References' line cannot
+    throw the paper away."""
+    text = full_text
+    m = _ABSTRACT_HEADING.search(text)
+    if m and m.start() < len(text) * 0.25:
+        text = text[m.start():]
+    refs = [r for r in _REFS_HEADING.finditer(text)]
+    if refs and refs[-1].start() > len(text) * 0.5:
+        text = text[:refs[-1].start()]
+    return text.strip()
+
+
+def extract_results_section(full_text, client=None, model=None, whole_paper_fallback=False):
+    """Return (results_text, method). method in {'llm','heuristic','whole-paper'}.
 
     Pass 1: deterministic heading match — AUTHORITATIVE when it succeeds (it scans the raw
             text, so it reliably catches a mid-line "Results" heading).
     Pass 2: ONLY if the heuristic finds no Results heading, let the LLM decide start/end
             (with a guard that a missed end marker never slices to end of document).
-    Raises ValueError if no Results section is found, so the pipeline stops instead of
-    wasting tokens extracting from the full paper text.
+    With no Results heading: raises ValueError (so the pipeline stops instead of wasting tokens on the full text),
+    or, with whole_paper_fallback=True, returns the whole paper (see whole_paper) as method 'whole-paper' without
+    asking the LLM to guess.
     """
     heur = _heuristic(full_text)
     if heur:
         return heur, 'heuristic'
+    if whole_paper_fallback:
+        # No Results heading means a short communication, a review or a manuscript: analyse the whole paper. The LLM
+        # boundary guess is skipped here because it is not repeatable on such papers (one run returned a span of
+        # 1,266 of 1,669 words, the next none) and a wrong guess silently drops part of the paper.
+        text = whole_paper(full_text)
+        if len(text.split()) >= 100:
+            print('    [sections] no Results section: using the whole paper', flush=True)
+            return text, 'whole-paper'
     if client is not None and model is not None:
         llm = _llm_boundaries(full_text, client, model, hint=None)
         if llm:
@@ -156,7 +195,7 @@ Return ONLY JSON, no markdown:
 Text chunk:
 {chunk_text[:800]}"""
     try:
-        msg = client.messages.create(model=model, max_tokens=100,
+        msg = client.messages.create(model=model, max_tokens=100, **_no_thinking(model),
                                      messages=[{'role': 'user', 'content': prompt}])
         raw = ''.join(b.text for b in msg.content if getattr(b, 'type', None) == 'text').strip()
         obj = _parse_json(raw)

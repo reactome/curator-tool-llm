@@ -11,6 +11,7 @@ Evidence is NOT written into the instances. The frontend rebuilds instances on p
 and drops fields it does not know, so evidence is returned separately as `evidence_links`
 (evidence id -> instance dbId + field) for the session store to serve by dbId.
 """
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -126,9 +127,21 @@ class Emitter:
     def _display(name: str, p, prefix: str = '') -> str:
         return entity_display_name(p, name, prefix)
 
+    _SEQUENCE_CLASS = {'dna': 'ReferenceDNASequence', 'rna': 'ReferenceRNASequence'}
+
     def _ewas(self, p: EwasSpec) -> dict:
         ref = None
-        if p.reference_entity is not None:
+        if p.molecule != 'protein':
+            symbol = re.sub(r'\s+(gene|mRNA|RNA|transcript)$', '', p.name, flags=re.I)
+            cls = self._SEQUENCE_CLASS[p.molecule]
+            memo = f'{p.molecule}:{symbol}'
+            if memo not in self._refs:
+                self._refs[memo] = self._add(cls, f'{symbol} {"gene" if p.molecule == "dna" else "mRNA"}', {
+                    'geneName': [symbol], 'species': self._shell_of(HUMAN)})
+                self.warnings.append(f'{p.name}: new {cls}; its identifier (e.g. Ensembl) and referenceDatabase '
+                                     f'must be set by the curator')
+            ref = self._refs[memo]
+        elif p.reference_entity is not None:
             ref = self._shell_of(p.reference_entity)
         elif p.uniprot:
             memo = f'uniprot:{p.uniprot}'

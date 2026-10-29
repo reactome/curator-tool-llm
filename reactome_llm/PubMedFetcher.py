@@ -307,7 +307,7 @@ def _results_sections(body):
     return [], None
 
 
-def results_from_jats(xml, client=None, model=None):
+def results_from_jats(xml, client=None, model=None, whole_paper_fallback=False):
     """Return (results_text, how) for a JATS document.
 
     Three tiers: sec-type match, <title> match, then the existing text-based
@@ -330,7 +330,8 @@ def results_from_jats(xml, client=None, model=None):
     sys.path.insert(0, os.path.join(PROJECT_ROOT, 'reactome_llm'))
     from FullTextPDFSections import extract_results_section
     body_text = _text_of(body)
-    text, sub = extract_results_section(body_text, client=client, model=model)
+    text, sub = extract_results_section(body_text, client=client, model=model,
+                                        whole_paper_fallback=whole_paper_fallback)
     return text, f'jats-body:{sub}'
 
 
@@ -387,7 +388,7 @@ def flatten_jats_text(text):
     return re.sub(r'[ \t]{2,}', ' ', text).strip()
 
 
-def load_source(spec, client=None, model=None, pmcid=None, unwrap_pdf=False):
+def load_source(spec, client=None, model=None, pmcid=None, unwrap_pdf=False, whole_paper_fallback=False):
     """Load one paper from a PMID, a PMCID, or a local PDF filename.
 
     Returns (source_id, results_text, how). Raises ValueError when the paper has
@@ -423,7 +424,7 @@ def load_source(spec, client=None, model=None, pmcid=None, unwrap_pdf=False):
             pmcid = (pmcid or spec).upper()
             source_id = pmcid
             xml = fetch_jats(pmcid)
-        text, how = results_from_jats(xml, client=client, model=model)
+        text, how = results_from_jats(xml, client=client, model=model, whole_paper_fallback=whole_paper_fallback)
         # flatten AFTER section detection, which uses the element/line structure
         return source_id, flatten_jats_text(text), how
 
@@ -437,7 +438,8 @@ def load_source(spec, client=None, model=None, pmcid=None, unwrap_pdf=False):
     doc.close()
     sys.path.insert(0, os.path.join(PROJECT_ROOT, 'reactome_llm'))
     from FullTextPDFSections import extract_results_section
-    text, how = extract_results_section(full_text, client=client, model=model)
+    text, how = extract_results_section(full_text, client=client, model=model,
+                                        whole_paper_fallback=whole_paper_fallback)
     # PDF path is gated OFF by default: unchanged from earlier runs unless asked.
     # Unwrap after section detection, which relies on the original line structure.
     return os.path.basename(path), (unwrap_pdf_text(text) if unwrap_pdf else text), how

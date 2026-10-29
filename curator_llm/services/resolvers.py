@@ -144,6 +144,11 @@ class Resolver:
                               f'come from {", ".join(genes)}. Choose the gene(s) or use that set')
 
     def _ewas(self, p: EwasSpec):
+        if p.molecule != 'protein':          # a gene or transcript has no UniProt entry; only look for an identical one
+            if p.existing is None and p.compartment is not None:
+                p.existing = _ref(self.lookup.find_by_display_name(
+                    entity_display_name(p), ['EntityWithAccessionedSequence']))
+            return
         if not p.uniprot and (acc := self._graph_accession(p.name)):
             p.uniprot = acc
             self.notes.append(f'{p.name}: UniProt {acc} found in the Reactome graph by name; confirm')

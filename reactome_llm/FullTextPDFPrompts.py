@@ -7,7 +7,7 @@ Claude prompt templates for the FullTextPDF pipeline.
 """
 
 
-def build_extraction_prompt(current_chunk, prev_contexts=None, next_context=None):
+def build_extraction_prompt(current_chunk, prev_contexts=None, next_context=None, raw_prev=False, split=False):
     """
     Prompt for extracting biochemical reactions from the CURRENT chunk of a paper.
 
@@ -54,6 +54,12 @@ def build_extraction_prompt(current_chunk, prev_contexts=None, next_context=None
                            reference OR to quote a boundary-spanning excerpt (["none"] if the
                            current chunk sufficed)
 
+    raw_prev : when True, prev_contexts are the RAW TEXT of the preceding chunks instead of notes on
+               the reactions extracted from them. That lets every chunk be extracted independently
+               (concurrently); the tail then carries a note saying how to treat CONTEXT A/B.
+    split    : when True, return (static_head, dynamic_tail). The head is identical for every chunk,
+               so it can be marked for prompt caching; only the tail changes per call.
+
     NOTE: confidence is Claude's SELF-ASSESSED rating (subjective, 0-1).
     Objective accuracy is measured separately via cosine similarity vs Neo4j.
     """
@@ -63,16 +69,28 @@ def build_extraction_prompt(current_chunk, prev_contexts=None, next_context=None
 
     ctx = ""
     if prev1:
-        ctx += ("=== CONTEXT A — previous chunk (most recent), reactions already extracted "
-                "[reference only, do NOT re-extract] ===\n" + prev1 + "\n\n")
+        ctx += (("=== CONTEXT A — previous chunk (most recent), RAW text [reference only] ===\n" if raw_prev else
+                 "=== CONTEXT A — previous chunk (most recent), reactions already extracted "
+                 "[reference only, do NOT re-extract] ===\n") + prev1 + "\n\n")
     if prev2:
-        ctx += ("=== CONTEXT B — two chunks back, reactions already extracted "
-                "[reference only, do NOT re-extract] ===\n" + prev2 + "\n\n")
+        ctx += (("=== CONTEXT B — two chunks back, RAW text [reference only] ===\n" if raw_prev else
+                 "=== CONTEXT B — two chunks back, reactions already extracted "
+                 "[reference only, do NOT re-extract] ===\n") + prev2 + "\n\n")
     if next_context:
         ctx += ("=== CONTEXT C — next chunk (RAW text), look-ahead [reference only] ===\n"
                 + next_context + "\n\n")
 
-    return f"""You are an expert Reactome biocurator. Extract the biochemical reactions
+    if raw_prev and (prev1 or prev2):
+        ctx = ("NOTE FOR THIS CALL: CONTEXT A and B below are the RAW TEXT of the preceding chunks, not notes on "
+               "extracted reactions (every chunk is extracted separately). A reaction stated only in CONTEXT A/B "
+               "belongs to that chunk: do NOT extract it. A reaction that begins in the previous chunk and is "
+               "completed in the current chunk IS extracted here; quote the current chunk's part and any "
+               "continuing text you need. This note overrides any statement above about what CONTEXT A lists.\n\n"
+               + ctx)
+
+    tail = f"""{ctx}=== CURRENT CHUNK — extract reactions from THIS text only ===
+{current_chunk}"""
+    head = f"""You are an expert Reactome biocurator. Extract the biochemical reactions
 described in the CURRENT CHUNK below.
 
 A biochemical reaction requires:
@@ -296,5 +314,5 @@ Return ONLY a JSON object, no markdown:
 If no biochemical reaction is present in the CURRENT CHUNK, return {{"reactions": []}}.
 Don't speculate or just list interacting genes if there is no information.
 
-{ctx}=== CURRENT CHUNK — extract reactions from THIS text only ===
-{current_chunk}"""
+"""
+    return (head, tail) if split else head + tail

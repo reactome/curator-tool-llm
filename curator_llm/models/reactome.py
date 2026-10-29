@@ -36,6 +36,9 @@ class _Participant(BaseModel):
 
 class EwasSpec(_Participant):
     kind: Literal['ewas'] = 'ewas'
+    # protein: UniProt reference. dna (a gene) / rna (a transcript, e.g. an mRNA): the entity is still an
+    # EntityWithAccessionedSequence, but it points at a ReferenceDNASequence / ReferenceRNASequence instead.
+    molecule: Literal['protein', 'dna', 'rna'] = 'protein'
     uniprot: Optional[str] = None
     reference_entity: Optional[ExistingRef] = None   # existing ReferenceGeneProduct
     species: str = 'Homo sapiens'

@@ -34,3 +34,5 @@ test/vectorstores/db/62ce7c50-29d5-49f8-a77c-168d095920cd/link_lists.bin
 notebooks/.chainlit/config.toml
 notebooks/.chainlit/translations/en-US.json
 notebooks/.chainlit/translations/pt-BR.json
+Review curator-tool-llm for paper-level annotation and chat.md
+chainlit.md

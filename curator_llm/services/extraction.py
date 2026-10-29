@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from typing import Callable, Dict, List, Optional
 
 from curator_llm.ports.extractor import ExtractionResult
@@ -84,8 +85,10 @@ class SubprocessExtractor:
             return []
 
     def _step(self, name: str, cmd: List[str], res: ExtractionResult) -> Optional[subprocess.CompletedProcess]:
+        t0 = time.time()
         try:
             proc = self._run(cmd, self.root, self.timeout)
+            logger.info('%s step took %.0fs', name, time.time() - t0)
         except subprocess.TimeoutExpired:
             res.error = f'{name} timed out after {self.timeout}s'
             return None

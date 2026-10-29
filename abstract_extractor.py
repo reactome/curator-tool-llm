@@ -36,15 +36,15 @@ from PubMedFetcher import fetch_abstract
 
 logger = logging.getLogger(__name__)
 
-# Match run_extraction.py's model so abstract and full-text extractions are judged by the same
-# model. (The partner's scripts hardcode this; the user confirmed it's valid.)
-MODEL_NAME = "claude-sonnet-5"
+# The same role as run_extraction.py, so abstract and full-text extractions use the same model.
+from curator_llm.model_settings import anthropic_kwargs, model_name
+MODEL_NAME = model_name("extraction")
 _MAX_TOKENS = 16000
 
 # Cross-model OpenAI reviewer, mirroring run_review.py so an abstract-derived reaction set gets a
 # score comparable to a full-text one. run_review.py itself can't be reused here: it re-derives the
 # source chunks by calling load_source on the PMID, which fails for a MISS paper (no full text).
-MODEL_REVIEW = "gpt-5.6-luna"
+MODEL_REVIEW = model_name("review")
 
 _client = None
 _oai = None
@@ -317,7 +317,7 @@ def extract_abstract(pmid, gene, fallback_text=None, review=True):
     prompt = build_abstract_extraction_prompt(text, gene=gene)
     try:
         msg = _get_client().messages.create(
-            model=MODEL_NAME, max_tokens=_MAX_TOKENS,
+            **anthropic_kwargs("extraction"), max_tokens=_MAX_TOKENS,
             messages=[{"role": "user", "content": prompt}])
     except Exception as e:
         logger.warning("abstract extraction API call failed for %s: %s", pmid, e)
