@@ -483,6 +483,31 @@ call (see the script's header; `--usage extraction=LOG --usage merge=LOG` record
 - Keep it on the same network as curator-tool-ws; every call depends on ws being reachable and fails closed if it is not.
 - Use a process manager (systemd, Docker) so it restarts if it stops.
 
+### Deploying to a Linux server
+
+[`scripts/deploy.sh`](scripts/deploy.sh) packages the REST service, copies it with `scp`, and (re)starts it over `ssh`:
+
+```bash
+scripts/deploy.sh user@server --dry-run     # build and check the package, change nothing
+scripts/deploy.sh user@server               # package, upload, install if needed, restart, health check
+scripts/deploy.sh user@server --path /srv/curator-llm --port 8000
+```
+
+It sends only what the service uses (`curator_llm/`, the six `reactome_llm` modules it loads, `run_extraction.py`,
+`run_merge.py`, `run_review.py`, the domain schema, `scripts/run_api.sh`, `requirements-service.txt`, `.env.example`),
+never your `.env`, `data/`, `results/` or tests, and it aborts if anything looks like a secret key. Before uploading it
+unpacks the archive and imports everything from the unpacked copy, so a missing file fails on your machine, not on the
+server. `--full` adds the gene-first pipeline (it then needs `requirements.txt`), `--with-snapshots` adds saved results.
+
+On the server it keeps the previous code as `previous-code.tar.gz` (undo with `tar -xzf previous-code.tar.gz`), replaces
+the code, and leaves `.env`, `data/`, `logs/` and `venv/` alone. The first time it creates `.env` from `.env.example`:
+**edit it** (`ANTHROPIC_API_KEY`, `WS_BASE_URL`, `REACTOME_NEO4J_*`, `CORS_ORIGINS`). It builds a venv and installs
+`requirements-service.txt` only when that file changed, then runs `scripts/run_api.sh --daemon` and checks the service
+answers (HTTP 401 means it is up and asking for a token). Log: `logs/api.log` in the install directory.
+
+The server needs Python 3.10 or newer with the `venv` module, `curl`, and network access to curator-tool-ws, the Reactome
+Neo4j graph and the Anthropic API. It is not set up as a system service: for restarts on reboot use systemd (see above).
+
 ### Tests
 
 ```bash

@@ -1,0 +1,27 @@
+# Dependencies of the REST service only (curator_llm/ plus the scripts it runs: run_extraction.py, run_merge.py,
+# run_review.py). requirements.txt is the much larger list for the gene-first pipeline (torch, scanpy, ...).
+# Python 3.10. Versions are the ones the service was tested with; loosen them if the server needs to.
+# scripts/deploy.sh installs this file into a venv on the server.
+
+# LLM clients and orchestration
+anthropic==1.10.0
+langchain-core==1.6.6
+langchain-anthropic==1.7.5
+langchain-text-splitters==1.1.2
+langgraph==1.2.12
+openai==1.109.1            # only run_review.py (LLM_REVIEW=1)
+
+# Web service
+fastapi==0.142.2
+uvicorn==0.54.0
+python-multipart==0.0.32   # file upload (POST /sessions/upload)
+pydantic==2.13.5
+jsonpatch==1.33
+
+# Data, parsing, lookups
+neo4j==6.3.1
+pymongo==4.18.2            # only SESSION_STORE=mongo
+PyMuPDF==1.28.2
+rapidfuzz==3.14.5
+requests==2.34.2
+python-dotenv==1.2.3
