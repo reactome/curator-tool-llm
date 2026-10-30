@@ -490,7 +490,7 @@ call (see the script's header; `--usage extraction=LOG --usage merge=LOG` record
 ```bash
 scripts/deploy.sh user@server --dry-run     # build and check the package, change nothing
 scripts/deploy.sh user@server               # package, upload, install if needed, restart, health check
-scripts/deploy.sh user@server --path /srv/curator-llm --port 8000
+scripts/deploy.sh user@server --path /srv/curator-llm --port 8000   # the default path is /usr/local/reactomes/Reactome/production/webbench/curator-tool-llm
 ```
 
 It sends only what the service uses (`curator_llm/`, the six `reactome_llm` modules it loads, `run_extraction.py`,
@@ -505,8 +505,22 @@ the code, and leaves `.env`, `data/`, `logs/` and `venv/` alone. The first time 
 `requirements-service.txt` only when that file changed, then runs `scripts/run_api.sh --daemon` and checks the service
 answers (HTTP 401 means it is up and asking for a token). Log: `logs/api.log` in the install directory.
 
-The server needs Python 3.10 or newer with the `venv` module, `curl`, and network access to curator-tool-ws, the Reactome
-Neo4j graph and the Anthropic API. It is not set up as a system service: for restarts on reboot use systemd (see above).
+**Python on the server.** The script does not install Python. Before it changes anything it checks that it can build an
+environment, and stops with a clear message (leaving the running service alone) if it cannot. It uses a venv when the
+server has Python 3.10+ with the `venv` module (`--python CMD` to choose the interpreter). Otherwise, or with
+`--conda NAME`, it uses conda: it finds `conda` on the PATH or in a usual place (`~/miniconda3`, `~/miniforge3`,
+`~/anaconda3`, ...; `--conda-bin PATH` if elsewhere), creates the environment `NAME` (default `curator-llm`, Python 3.10
+from conda-forge) if missing, and installs `requirements-service.txt` into it. No root access is needed.
+
+**A server that already has its own setup.** Use the existing venv and the server's own start/stop commands instead:
+`--use-venv .venv` (nothing is created or installed; it only checks the venv has what the service imports and names what is
+missing), `--stop-cmd` / `--start-cmd` (for example `'../manage-apps.sh stop llm'`), `--port` (for the health check) and
+`--group-writable` when several users deploy to the same folder. [`scripts/deploy-production.sh`](scripts/deploy-production.sh)
+wraps this for the production webbench server. Before changing anything it also refuses, and says why, when existing files
+are not writable by you, when a service you did not start is running from the folder, when the port is taken, or when the
+server's `.env` lacks `ANTHROPIC_API_KEY`, `WS_BASE_URL` or `REACTOME_NEO4J_*`.
+
+The server also needs `curl`, and network access to curator-tool-ws, the Reactome Neo4j graph and the Anthropic API. It is not set up as a system service: for restarts on reboot use systemd (see above).
 
 ### Tests
 

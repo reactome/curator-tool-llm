@@ -36,3 +36,6 @@ notebooks/.chainlit/translations/en-US.json
 notebooks/.chainlit/translations/pt-BR.json
 Review curator-tool-llm for paper-level annotation and chat.md
 chainlit.md
+
+# deploy.sh --keep-archive
+dist/
