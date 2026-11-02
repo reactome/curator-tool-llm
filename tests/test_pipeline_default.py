@@ -13,7 +13,7 @@ PAGES = [f'Results\n{QUOTE} (Fig. 3 B).\n']
 
 
 class Model:
-    def with_structured_output(self, schema):
+    def with_structured_output(self, schema, **kw):
         return self
 
     def invoke(self, prompt, config=None):

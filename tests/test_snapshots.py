@@ -160,7 +160,7 @@ class TestPipeline:
 class TestAssemble:
     def test_a_supplied_draft_means_no_model_is_called(self):
         class Boom:
-            def with_structured_output(self, *a):
+            def with_structured_output(self, *a, **kw):
                 raise AssertionError('the draft builder must not be called')
         pipe = DefaultPipeline(FakeInstanceLookup([]), model=Boom())
         paper = PaperText.from_pages('1', ['Results\nTcPINK1 phosphorylates Ub.\n'])

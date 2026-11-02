@@ -242,7 +242,7 @@ def build_draft(gene: str, reactions: List[dict], accession: Optional[str] = Non
         from ModelConfig import create_chat_model
         model = create_chat_model('draft')
     counter = UsageMetadataCallbackHandler()          # the structured-output wrapper hides the raw reply's usage
-    ex = model.with_structured_output(DraftExtraction).invoke(build_prompt(gene, reactions, accession),
+    ex = model.with_structured_output(DraftExtraction, method='json_schema').invoke(build_prompt(gene, reactions, accession),
                                                               config={'callbacks': [counter]})
     if usage is not None:
         for name, u in counter.usage_metadata.items():

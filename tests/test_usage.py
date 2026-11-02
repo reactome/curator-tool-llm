@@ -96,7 +96,7 @@ class TestDraftStep:
                               reactions=[LlmReaction(source_index=0, name='r', inputs=['a'])])
 
         class M:
-            def with_structured_output(self, schema):
+            def with_structured_output(self, schema, **kw):
                 return self
 
             def invoke(self, prompt, config=None):
@@ -127,7 +127,7 @@ class TestDraftStep:
         out = DraftExtraction(entities=[LlmEntity(key='a', kind='protein', name='PINK1')], reactions=[LlmReaction(source_index=0, name='r', inputs=['a'])])
 
         class M:
-            def with_structured_output(self, schema):
+            def with_structured_output(self, schema, **kw):
                 return self
 
             def invoke(self, prompt, config=None):

@@ -38,7 +38,7 @@ class FakeModel:
     def __init__(self, out):
         self.out, self.prompt = out, None
 
-    def with_structured_output(self, schema):
+    def with_structured_output(self, schema, **kw):
         self.schema = schema
         return self
 
