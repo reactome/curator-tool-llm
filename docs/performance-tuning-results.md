@@ -374,7 +374,7 @@ model, including the cross-paper stage, and fails if that mistake comes back.
 
 ### Several papers in one REST session (2026-11-02)
 
-`POST /sessions` takes `pmids`, `POST /sessions/upload` takes `files` and `pmids`; `scripts/annotate_papers.sh` drives it.
+`POST /sessions` takes `pmids`, `POST /sessions/upload` takes `files` and `pmids`; `scripts/annotate_papers.sh` does not use it: that script runs the pipeline in-process (`curator_llm/cli.py`) with no service, login or paper cap.
 The pipeline extracts each paper on its own (`PAPER_WORKERS`, default 2 at a time), runs ONE `run_merge.py` over all
 the extraction files (within each paper, then across papers), attaches each quote to its own paper, and keeps every
 paper's text in the session (search, quote checks for edits). A paper that cannot be read is skipped and reported.
@@ -392,7 +392,54 @@ completely) plus PMID 32448362 (an open-access research paper):
 
 Quote-level attribution undercounts overlap for duplicate copies: evidence is keyed by the quote text, so a sentence
 found in both copies is attributed to the first. The reaction's `sources` list is right. Not tested: papers on different
-topics through the service; sessions near `MAX_PAPERS`; the front-end (it does not send several papers yet).
+topics through the service; sessions near `MAX_PAPERS`. The front-end's start form now takes several PubMed IDs and PDFs (unit-tested and built, not looked at in a browser).
+
+### Command-line runner and the front-end start form (2026-11-02)
+
+**Command-line runner** (`curator_llm/cli.py`, started by `scripts/annotate_papers.sh`). It runs the pipeline in this process,
+with no service, login, upload or polling, and has no cap on the number of papers (`MAX_PAPERS` is the service's).
+It writes `<name>.staged_instances.json`, `.issues.json`, `.session.json` and `.evidence.json`. The evidence file exists
+because a local run has no session to ask for the quotes afterwards, and the staged-instances file does not hold them
+(the curator tool drops fields it does not know, so the emitter returns them separately as `evidence_links`). It is
+not loadable in the front-end's evidence viewer, which reads quotes from a service session.
+
+Real model and real services, run from another folder: the clock Science PDF plus PMID 32448362, merged into one draft.
+
+| | |
+|---|---|
+| Wall time | 2 min 4 s |
+| Reactions in the draft | 22, from 2 papers |
+| Open issues | 88 (evidence 1, resolver 18, existing-reaction check 38, emitter 31) |
+| Quotes | 35 from the PDF, 11 from the PubMed paper, each tagged with its paper |
+| Staged instances | 169 new instances |
+| Model use | 155 calls, 142k tokens in, 36k out (178k in total), 272k read from the cache |
+
+`tests/test_cli.py` (10 tests, fake pipeline): one merged draft vs `--separate`; the result files; progress is not printed
+for every chunk; a finished result is skipped unless `--force`; one failing session does not stop the others and the exit
+code says so; a skipped paper is reported; 40 papers at once are accepted; bad input (no papers, a non-number, a missing
+file, an empty folder, a file that is not a PDF, two PDFs with the same name) is refused before anything runs.
+The earlier version of the script talked to the service over HTTP and was tested against a stand-in service (merged,
+separate, PubMed IDs only, error paths, the old wrapper, macOS bash 3.2); that script was then removed, so those runs
+no longer describe anything that exists. Not tested: the runner with more than two papers on the real model.
+
+**Front-end** (`curator-tool-frontend`, Paper annotation page): one "Papers to annotate" form takes one or more PubMed IDs
+and several PDFs (listed, each removable); the session list shows "3 papers: ..."; the workspace header shows the
+number and names of the papers; each quote in the reaction detail and the evidence dialog says which paper it is from
+(only when the annotation has several). `LlmApiService.startPapers` replaces `start` and `upload`.
+
+| Front-end check | Result |
+|---|---|
+| Paper-annotation specs | 144 pass (132 before; new ones cover the form, PMID parsing, PDF list, service calls, paper labels, evidence chips, workspace title, evidence dialog) |
+| Development build (templates compiled) | clean |
+| Whole suite | 1,206 pass, **2 fail**: `NLQueryPanelComponent` "emits the dbId when a dbId cell is clicked" and "switches to the raw rows and back" |
+
+The 2 failures are in code this work did not touch, they fail every time (also when only that spec is run), and they
+concern the instance-list view that recent `nl-query` commits changed, so they are very probably older than this work;
+no clean baseline run was made (it would have meant stashing uncommitted changes), so that is not proven. One earlier
+full run also failed in `InstanceEffects` once, and did not recur. The form has not been looked at in a browser.
+
+**Test suites at the end of this work:** service repo 296 passed, 1 skipped (the skipped test needs a real
+curator-tool-ws); front-end as above. Nothing is deployed to the server and nothing is committed.
 
 ## 11. How to reproduce
 

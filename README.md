@@ -405,6 +405,8 @@ instances" takes), `<name>.issues.json`, `<name>.session.json` (papers, counts, 
 everything. What the script does not give you is the interactive side (chat, proposed edits, QA, the evidence viewer),
 which lives in the service and the front-end.
 
+**In the front-end**, the Paper annotation page has one "Papers to annotate" form: type one or more PubMed IDs and/or add PDFs, then Annotate. Several papers start ONE annotation; its page lists the papers, and each quote says which paper it is from.
+
 **Over the API** (what the front-end sends):
 
 ```bash
