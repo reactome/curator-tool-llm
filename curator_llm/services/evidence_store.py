@@ -34,7 +34,7 @@ class EvidenceStore:
             ev = paper.verify(draft)
             if ev.verified == Verification.FAILED:
                 return ev, False
-        key = (ev.pmid or '') + '|' + normalize_with_map(ev.quote)[0]
+        key = (ev.pmid or ev.source or '') + '|' + normalize_with_map(ev.quote)[0]
         if key in self._by_quote:
             existing = self._by_id[self._by_quote[key]]
             merged = list(dict.fromkeys(existing.supports + ev.supports))
@@ -53,7 +53,7 @@ class EvidenceStore:
         st = cls(paper)
         for e in evidence:
             st._by_id[e.id] = e
-            st._by_quote[(e.pmid or '') + '|' + normalize_with_map(e.quote)[0]] = e.id
+            st._by_quote[(e.pmid or e.source or '') + '|' + normalize_with_map(e.quote)[0]] = e.id
         return st
 
     def to_json(self) -> List[dict]:

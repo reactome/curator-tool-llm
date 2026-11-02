@@ -10,11 +10,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from curator_llm.models.session import Issue, Session, SessionSummary
+from curator_llm.models.session import Issue, PaperInfo, Session, SessionSummary
 from curator_llm.models.usage import summarize
 from curator_llm.ports.auth import AuthError, AuthProvider, AuthUser, ForbiddenError
 from curator_llm.ports.jobs import JobRunner
-from curator_llm.ports.pipeline import Pipeline, PipelineInput
+from curator_llm.ports.pipeline import PaperRef, Pipeline, PipelineInput
 from curator_llm.ports.sessions import SessionStore
 from curator_llm.services.network import build_network
 from curator_llm.services.session_service import ProposalError, SessionService
@@ -33,7 +33,8 @@ def current_user(request: Request) -> AuthUser:
 
 
 class StartRequest(BaseModel):
-    pmid: str
+    pmid: Optional[str] = None                       # one paper ...
+    pmids: List[str] = Field(default_factory=list)   # ... or several: merged into ONE draft, across papers
     focus: Optional[str] = None
 
 
@@ -48,12 +49,29 @@ class ProposalRequest(BaseModel):
     curator_assertion: bool = False
 
 
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024           # per PDF
+MAX_PAPERS = 10                                # per session, unless create_app is given another limit
 
 
 class ChatRequest(BaseModel):
     message: str
     selectedDbIds: List[int] = Field(default_factory=list)
+
+
+def parse_pmids(*groups) -> List[str]:
+    """PubMed IDs from lists and/or strings (separated by commas or spaces), without repeats, in order. 422 on anything
+    that is not a number."""
+    out: List[str] = []
+    for g in groups:
+        for item in ([g] if isinstance(g, str) else (g or [])):
+            for tok in re.split(r'[\s,;]+', str(item or '').strip()):
+                if not tok:
+                    continue
+                if not tok.isdigit():
+                    raise HTTPException(422, f'pmid must be numeric: {tok!r}')
+                if tok not in out:
+                    out.append(tok)
+    return out
 
 
 def _safe_name(name: str) -> str:
@@ -64,7 +82,7 @@ def _safe_name(name: str) -> str:
 def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: Optional[JobRunner] = None,
                pipeline: Optional[Pipeline] = None, resolver_factory=None,
                upload_dir: Optional[str] = None, cors_origins: Optional[List[str]] = None,
-               chat_model=None, events=None, qa_model=None) -> FastAPI:
+               chat_model=None, events=None, qa_model=None, max_papers: int = MAX_PAPERS) -> FastAPI:
     app = FastAPI(title='curator-tool-llm')
     if cors_origins:
         app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=True,
@@ -91,30 +109,63 @@ def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: O
 
     @router.post('/sessions', status_code=202)
     def start(req: StartRequest, user: AuthUser = Depends(current_user)):
-        if not req.pmid.strip().isdigit():
-            raise HTTPException(422, 'pmid must be numeric')
-        sid, jid = svc().start(user.username, PipelineInput(pmid=req.pmid.strip(), focus=req.focus))
+        """Annotate one paper by PubMed ID (`pmid`), or several (`pmids`) as one session: their reactions are merged into
+        a single draft, and a reaction several papers describe cites all of them."""
+        pmids = parse_pmids(req.pmid, req.pmids)
+        if not pmids:
+            raise HTTPException(422, 'give a pmid, or a list of pmids')
+        if len(pmids) > max_papers:
+            raise HTTPException(422, f'at most {max_papers} papers per session')
+        spec = (PipelineInput(pmid=pmids[0], focus=req.focus) if len(pmids) == 1 else
+                PipelineInput(papers=[PaperRef(pmid=p) for p in pmids], focus=req.focus))
+        sid, jid = svc().start(user.username, spec)
         return {'sessionId': sid, 'jobId': jid}
 
     @router.post('/sessions/upload', status_code=202)
-    async def upload(file: UploadFile = File(...), focus: Optional[str] = Form(None),
+    async def upload(file: Optional[UploadFile] = File(None), files: Optional[List[UploadFile]] = File(None),
+                     pmids: Optional[str] = Form(None), focus: Optional[str] = Form(None),
                      user: AuthUser = Depends(current_user)):
-        """Annotate a paper that is not in PubMed Central: upload its PDF."""
+        """Annotate papers that are not (all) in PubMed Central: upload PDFs. Send one in `file` (as before), or several
+        in `files`, and optionally add PubMed IDs in `pmids` (comma or space separated). With more than one paper in all,
+        they are merged into ONE draft, across papers."""
         if not upload_dir:
             raise HTTPException(503, 'uploads are not configured')
-        data = await file.read(MAX_UPLOAD_BYTES + 1)
-        if len(data) > MAX_UPLOAD_BYTES:
-            raise HTTPException(413, f'PDF is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB')
-        if not data.startswith(b'%PDF-'):
-            raise HTTPException(422, 'the file is not a PDF')
-        label = _safe_name(file.filename)
+        sent = [f for f in ([file] if file else []) + list(files or []) if f is not None and (f.filename or f.size)]
+        ids = parse_pmids(pmids)
+        if not sent and not ids:
+            raise HTTPException(422, 'upload at least one PDF, or give pmids')
+        if len(sent) + len(ids) > max_papers:
+            raise HTTPException(422, f'at most {max_papers} papers per session')
         folder = os.path.join(upload_dir, _safe_name(user.username))
         os.makedirs(folder, exist_ok=True)
-        path = os.path.join(folder, f'{uuid.uuid4().hex[:12]}_{label}')
-        with open(path, 'wb') as f:
-            f.write(data)
-        sid, jid = svc().start(user.username, PipelineInput(pdf_path=path, focus=focus or None),
-                               source_label=label)
+        refs: List[PaperRef] = []
+        saved: List[str] = []
+        try:
+            for f in sent:
+                data = await f.read(MAX_UPLOAD_BYTES + 1)
+                label = _safe_name(f.filename)
+                if len(data) > MAX_UPLOAD_BYTES:
+                    raise HTTPException(413, f'{label}: the PDF is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB')
+                if not data.startswith(b'%PDF-'):
+                    raise HTTPException(422, f'{label}: the file is not a PDF')
+                path = os.path.join(folder, f'{uuid.uuid4().hex[:12]}_{label}')
+                with open(path, 'wb') as out:
+                    out.write(data)
+                saved.append(path)
+                refs.append(PaperRef(pdf_path=path, label=label))
+        except HTTPException:
+            for p in saved:                                # a refused request leaves nothing behind
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+            raise
+        refs += [PaperRef(pmid=p) for p in ids]
+        if len(refs) == 1 and refs[0].pdf_path:            # one PDF: exactly as before
+            sid, jid = svc().start(user.username, PipelineInput(pdf_path=refs[0].pdf_path, focus=focus or None),
+                                   source_label=refs[0].label)
+        else:
+            sid, jid = svc().start(user.username, PipelineInput(papers=refs, focus=focus or None))
         return {'sessionId': sid, 'jobId': jid}
 
     @router.get('/sessions')
@@ -126,6 +177,8 @@ def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: O
         s = load(session_id, user)
         out = SessionSummary.of(s).model_dump()
         out.update({'focus': s.focus, 'error': s.error,
+                    'papers': [p.model_dump() for p in s.papers] or [
+                        PaperInfo(source=s.source, kind='pmid' if s.pmid else 'pdf', pmid=s.pmid, name=s.source).model_dump()],
                     'reactions': [{'key': r.key, 'name': r.name, 'dbId': s.key_to_db_id.get(r.key),
                                    'evidenceIds': r.evidence_ids} for r in (s.draft.reactions if s.draft else [])]})
         return out
@@ -227,15 +280,16 @@ def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: O
             raise HTTPException(404 if 'no reaction' in str(e) else 409, str(e))
 
     @router.get('/sessions/{session_id}/paper/search')
-    def search_paper(session_id: str, q: str, section: Optional[str] = None, limit: int = 5,
+    def search_paper(session_id: str, q: str, section: Optional[str] = None, limit: int = 5, source: Optional[str] = None,
                      user: AuthUser = Depends(current_user)):
-        from curator_llm.services.paper_text import PaperText
+        """Passages of the session's papers matching `q` (best first), each with the paper it is from (`source`).
+        Give `source` to search one paper only."""
         s = load(session_id, user)
-        if not s.paper:
+        if not svc().papers_of(s):
             raise HTTPException(409, 'this session has no paper text')
-        hits = PaperText.from_dict(s.paper).search(q, section, top_k=max(1, min(limit, 20)))
-        return [{'text': h.text, 'section': h.section, 'page': h.page, 'figure': h.figure,
-                 'charSpan': h.char_span, 'score': h.score} for h in hits]
+        if source and source not in svc().papers_of(s):
+            raise HTTPException(404, f'no such paper in this session: {source}')
+        return svc().search_papers(s, q, section, max(1, min(limit, 20)), source or None)
 
     @router.post('/sessions/{session_id}/proposals', status_code=201)
     def propose(session_id: str, body: ProposalRequest, user: AuthUser = Depends(current_user)):

@@ -68,6 +68,14 @@ class ChangeLogEntry(BaseModel):
     detail: str = ''
 
 
+class PaperInfo(BaseModel):
+    """One paper of a session. `source` is the tag its reactions and quotes carry ('PMID:24751536' or the PDF's file name)."""
+    source: str
+    kind: Literal['pmid', 'pdf'] = 'pmid'
+    pmid: Optional[str] = None
+    name: str = ''                              # what to show: the PMID or the uploaded file's name
+
+
 class Session(BaseModel):
     id: str = Field(default_factory=lambda: uuid.uuid4().hex)
     owner: str
@@ -86,7 +94,9 @@ class Session(BaseModel):
     evidence_links: List[dict] = Field(default_factory=list)
     key_to_db_id: Dict[str, int] = Field(default_factory=dict)
     change_log: List[ChangeLogEntry] = Field(default_factory=list)
-    paper: Optional[dict] = None                # PaperText.to_dict(): for search and quote checks
+    paper: Optional[dict] = None                # PaperText.to_dict() of the first paper (kept for older sessions)
+    papers: List[PaperInfo] = Field(default_factory=list)        # every paper of the session, in order
+    paper_texts: Dict[str, dict] = Field(default_factory=dict)   # PaperText.to_dict() of each, by source tag: search and quote checks
     proposals: List[Proposal] = Field(default_factory=list)
     existing: List[ExistingMatch] = Field(default_factory=list)
     usage: List[UsageEntry] = Field(default_factory=list)
@@ -105,10 +115,11 @@ class SessionSummary(BaseModel):
     updated: float
     n_reactions: int = 0
     n_open_issues: int = 0
+    n_papers: int = 1
 
     @classmethod
     def of(cls, s: Session) -> 'SessionSummary':
         return cls(id=s.id, pmid=s.pmid, source=s.source, status=s.status, progress=s.progress,
                    created=s.created, updated=s.updated,
                    n_reactions=len(s.draft.reactions) if s.draft else 0,
-                   n_open_issues=sum(i.status == 'open' for i in s.issues))
+                   n_open_issues=sum(i.status == 'open' for i in s.issues), n_papers=max(1, len(s.papers)))

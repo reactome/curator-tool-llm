@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Protocol
+from typing import Callable, Dict, List, Optional, Protocol, Sequence
 
 
 @dataclass
@@ -23,4 +23,10 @@ class Extractor(Protocol):
                 report: Optional[Callable[[str], None]] = None) -> ExtractionResult:
         """One paper -> reactions (extract, merge, optional review). Never raises: failures are in `error`.
         `report` (optional) is called with a short progress message as the work advances."""
+        ...
+
+    def extract_many(self, refs: Sequence, gene: str,
+                     report: Optional[Callable[[str], None]] = None) -> ExtractionResult:
+        """Several papers (PaperRef) -> ONE set of reactions, merged within each paper and then across papers. Optional:
+        an extractor that handles a single paper only may omit it."""
         ...

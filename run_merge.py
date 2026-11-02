@@ -24,15 +24,19 @@ Usage:
     python run_merge.py znfx1 --out results/znfx1_custom_merged.json
     python run_merge.py znfx1 --no-validate                 # skip stage 3
 """
-import os, sys, json, re, time, argparse, itertools
+import os, sys, json, re, time, argparse, itertools, hashlib
 from concurrent.futures import ThreadPoolExecutor
 PROJECT_ROOT = os.environ.get('CURATOR_LLM_ROOT') or os.path.dirname(os.path.abspath(__file__))
 from dotenv import load_dotenv
 load_dotenv(os.path.join(PROJECT_ROOT, '.env'), override=True)
 import anthropic
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from curator_llm.services.evidence_attach import merge_details
-from curator_llm.services.dedup_prefilter import candidate_pairs
+from curator_llm.services.evidence_attach import merge_details, stamp_sources
+from curator_llm.services.merge_support import (TfidfSimilarity, VerdictCache, collapse_exact_duplicates,
+                                                conflict_free_clusters as _clusters, merge_across_papers,
+                                                signature as _signature)
+from curator_llm.services.sources import record_sources
+from curator_llm.services.dedup_prefilter import candidate_pairs, may_be_duplicates
 
 client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
 from curator_llm.model_settings import anthropic_kwargs
@@ -86,8 +90,17 @@ def resolve_paths(target, out=None):
 
 
 parser = argparse.ArgumentParser(description='Semantically merge extracted reactions.')
-parser.add_argument('target', nargs='?', default='pink1',
-                    help='gene prefix (e.g. znfx1) or path to an *_extraction.json file (default: pink1)')
+parser.add_argument('target', nargs='*', default=['pink1'],
+                    help='gene prefix (e.g. znfx1) or path to an *_extraction.json file (default: pink1). Give several '
+                         'files (one per paper) to merge them together, with --out')
+parser.add_argument('--no-cross-paper', action='store_true',
+                    help='merge within each paper only: do not merge reactions across papers')
+parser.add_argument('--cross-all-pairs', action='store_true',
+                    help='across papers, judge EVERY candidate pair instead of adding papers one at a time: exact but '
+                         'quadratic in the number of reactions; for checking the incremental stage against')
+parser.add_argument('--cross-max-candidates', type=int, default=10,
+                    help='across papers, ask the judge about at most this many existing reactions per new reaction, '
+                         'best match first, stopping at the first "same" (default: 10)')
 parser.add_argument('--out', help='output path (default: input with _extraction -> _merged)')
 parser.add_argument('--validate-min-size', type=int, default=3,
                     help='run stage-3 cluster validation on clusters of at least this many '
@@ -95,6 +108,8 @@ parser.add_argument('--validate-min-size', type=int, default=3,
                          'transitivity to check (default: 3)')
 parser.add_argument('--no-prefilter', action='store_true',
                     help='judge every pair, even those whose inputs or outputs share no entity')
+parser.add_argument('--no-cache', action='store_true',
+                    help='do not read or write the duplicate-judge verdict cache (data/merge_cache/judge.jsonl)')
 parser.add_argument('--no-validate', action='store_true',
                     help='skip stage-3 cluster-level validation')
 parser.add_argument('--revote-below', type=float, default=0.9,
@@ -103,39 +118,32 @@ parser.add_argument('--revote-below', type=float, default=0.9,
                          'unstable verdict vetoes a whole group (default: 0.9, 0 disables)')
 args = parser.parse_args()
 
-IN, OUT = resolve_paths(args.target, args.out)
-if not os.path.isfile(IN):
-    sys.exit(f"[error] extraction file not found: {IN}")
+if len(args.target) > 1 and not args.out:
+    sys.exit("[error] merging several extraction files needs --out")
+IN_PATHS = [resolve_paths(t, None)[0] for t in args.target]
+IN, OUT = resolve_paths(args.target[0], args.out)
+
+# Verdicts the judge has already given are kept on disk, keyed by model, rules and the two reactions' text: re-running a
+# paper, or adding one to a set already merged, re-judges nothing it has seen. MERGE_CACHE=0 or --no-cache turns it off.
+_cache_dir = os.getenv('MERGE_CACHE_DIR') or os.path.join(PROJECT_ROOT, 'data', 'merge_cache')
+cache = VerdictCache(None if args.no_cache or os.getenv('MERGE_CACHE') == '0' else os.path.join(_cache_dir, 'judge.jsonl'))
+for _path in IN_PATHS:
+    if not os.path.isfile(_path):
+        sys.exit(f"[error] extraction file not found: {_path}")
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
-print(f"[setup] input : {IN}", flush=True)
+print(f"[setup] input : {', '.join(IN_PATHS)}", flush=True)
 print(f"[setup] output: {OUT}", flush=True)
 
-extraction_results = json.load(open(IN))
+extraction_results = [rec for _path in IN_PATHS for rec in json.load(open(_path))]
+for _e in extraction_results:
+    stamp_sources(_e)       # every quote says which paper it is from, before any records are combined
 
 def _norm(x): return (x or '').strip().lower()
-def _sig(a):
-    ins  = tuple(sorted(_norm(i) for i in (a.get('input')  or [])))
-    outs = tuple(sorted(_norm(o) for o in (a.get('output') or [])))
-    return (_norm(a.get('name')), ins, outs)
 
 # 1) collapse exact duplicates to unique signatures
-# The dropped copy's evidence is folded into the kept one: two extractions of the same reaction
-# usually quote different sentences, and discarding the copy would silently lose those quotes.
-_seen, unique = {}, []
-for e in extraction_results:
-    a = e.get('annotation_result') or {}
-    s = _sig(a)
-    if not s:
-        continue
-    kept = _seen.get(s)
-    if kept is None:
-        _seen[s] = e; unique.append(e)
-        continue
-    if kept.get('source') != e.get('source'):
-        continue            # unchanged behaviour: a same-signature record from another paper is dropped
-    ka = kept['annotation_result']
-    ka['evidence'] = list(dict.fromkeys((ka.get('evidence') or []) + (a.get('evidence') or [])))
-    ka['evidence_details'] = merge_details(ka.get('evidence_details'), a.get('evidence_details'))
+# An identical reaction found again in the SAME paper is folded into the kept one (quotes kept). One from ANOTHER paper stays
+# its own record (before, it was dropped with its quotes); the cross-paper stage below merges the two for free.
+unique = collapse_exact_duplicates(extraction_results)
 
 print(f"[setup] {len(extraction_results)} entries -> {len(unique)} unique signatures", flush=True)
 print("[setup] unique reactions BEFORE semantic merge:", flush=True)
@@ -173,10 +181,8 @@ def _conf(x):
         return None
 
 
-def reactions_are_duplicate(a1, a2):
-    """Return (is_duplicate, confidence). confidence is None when the judge gave no usable
-    number — including every failed verdict, which must not look like a confident 'no'."""
-    prompt = f"""You are a Reactome biocurator deduplicating extracted reactions.
+def _judge_prompt(a1, a2):
+    return f"""You are a Reactome biocurator deduplicating extracted reactions.
 Two records are DUPLICATES if they describe the SAME underlying biochemical event — the same
 molecular transformation of the same participants — EVEN IF they differ in:
   - wording or synonyms
@@ -230,6 +236,12 @@ Answer with the "same" key FIRST so the verdict survives truncation.
 Keep "reason" under 15 words. "confidence" is how sure you are OF THIS VERDICT, 0-1: high when
 the two records plainly describe one event, low when you had to weigh a judgement call.
 Return ONLY JSON: {{"same": <true|false>, "confidence": <0-1>, "reason": "<short phrase>"}}"""
+
+
+def reactions_are_duplicate(a1, a2):
+    """Return (is_duplicate, confidence). confidence is None when the judge gave no usable
+    number — including every failed verdict, which must not look like a confident 'no'."""
+    prompt = _judge_prompt(a1, a2)
     for attempt in (1, 2):
         try:
             # no temperature: claude-sonnet-5 rejects it ("`temperature` is deprecated for this model")
@@ -353,6 +365,7 @@ def merge_two(e1, e2):
         # combine the source-text excerpts from both copies so the merged reaction cites every place it was found
         'evidence': union(a1.get('evidence',[]), a2.get('evidence',[])),
         'evidence_details': merge_details(a1.get('evidence_details'), a2.get('evidence_details')),
+        'sources': union(a1.get('sources') or [e1.get('source')], a2.get('sources') or [e2.get('source')]),
         'confidence': round(((a1.get('confidence') or 0)+(a2.get('confidence') or 0))/2, 3),
         'merged_names': sorted(set(names1 + names2)),   # full cluster membership
         # which neighbouring chunks the variants had to consult — "none" only survives
@@ -488,16 +501,18 @@ Return ONLY JSON with exactly these keys:
 validate_failures = []
 
 
-def validate_cluster(idxs):
-    """Ask whether `idxs` is ONE Reactome reaction; return a list of index groups.
+def validate_annotations(annotations, same_paper=True):
+    """Ask whether these reactions (annotation dicts) are ONE Reactome reaction; return a list of groups of positions
+    (0-based) into `annotations`. same_paper=False tells the model the records come from different papers.
 
     Returns [idxs] unchanged when the cluster holds together, or two or more groups when it
     spans several reactions. Returns [idxs] on any failure or unusable response: this stage
     is a refinement, so a bad call must leave the cluster as the previous stage built it.
-    Every input index appears in exactly one returned group — never dropped, never repeated.
+    Every input position appears in exactly one returned group — never dropped, never repeated.
     """
-    listing = '\n\n'.join(f"[{k}]\n{_reaction_brief(unique[i]['annotation_result'])}"
-                          for k, i in enumerate(idxs, 1))
+    idxs = list(range(len(annotations)))
+    scope = 'the same protein and the same paper' if same_paper else 'the same proteins, reported by different papers'
+    listing = '\n\n'.join(f"[{k}]\n{_reaction_brief(annotations[i])}" for k, i in enumerate(idxs, 1))
     prompt = f"""You are a Reactome biocurator. The {len(idxs)} records below were grouped
 together as descriptions of ONE reaction, because each was judged a duplicate of another in
 the group. Judging them two at a time cannot reveal a group that has drifted across more than
@@ -509,7 +524,7 @@ each group is exactly one reaction.
 
 A Reactome reaction is ONE transformation: defined inputs converted to defined outputs, with
 at most one catalyst activity. Judge reaction IDENTITY, not topical similarity — these records
-all concern the same protein and the same paper, so similarity tells you nothing here.
+all concern {scope}, so similarity tells you nothing here.
 
 DIVIDE the group when it mixes:
   - successive steps of one mechanism. Each step is its own reaction: charging an E2, transfer
@@ -610,10 +625,27 @@ if not args.no_prefilter:
 print(f"[merge] judge over {n} reactions ({len(pairs)} pairs), {MAX_WORKERS} concurrent...", flush=True)
 t0 = time.time(); done = [0]; total = [len(pairs)]   # total grows when shaky pairs are re-voted
 
-def judge(pair):
+_RULES_FP = hashlib.sha256(_judge_prompt({}, {}).split('Reaction A:')[0].encode()).hexdigest()[:16]   # changes if the rules do
+_judge_key = {}                       # (i, j) -> cache key, for the pairs judged this run
+cached_final = set()                  # pairs whose cached verdict is already settled: no re-vote needed
+
+def judge(pair, fresh=False):
+    """First vote: cached if we have seen this pair before. fresh=True (a re-vote) always asks the model, since a
+    re-vote exists to sample again."""
     i, j = pair
-    same, conf = reactions_are_duplicate(unique[i]['annotation_result'],
-                                         unique[j]['annotation_result'])
+    a1, a2 = unique[i]['annotation_result'], unique[j]['annotation_result']
+    if not fresh:
+        key = _judge_key[pair] = VerdictCache.key(MODEL_KW['model'], 'thinking' in MODEL_KW, _RULES_FP,
+                                                  _reaction_brief(a1), _reaction_brief(a2))
+        hit = cache.get(key)
+        if hit is not None:
+            if hit['final']:
+                cached_final.add(pair)
+            done[0] += 1
+            return (i, j, hit['same'], hit['conf'])
+    same, conf = reactions_are_duplicate(a1, a2)
+    if not fresh:
+        cache.put(_judge_key[pair], same, conf)        # the first vote; made final below once any re-vote is settled
     done[0] += 1
     if done[0] % 100 == 0:
         print(f"  judged ~{done[0]}/{total[0]} pairs | {time.time()-t0:.0f}s "
@@ -637,7 +669,8 @@ SAME = {(i, j): bool(same) for i, j, same, conf in verdicts}
 CONF = {(i, j): conf for i, j, same, conf in verdicts}
 n_same = sum(1 for v in SAME.values() if v)
 print(f"[merge] judged {len(pairs)} pairs in {time.time()-t0:.0f}s "
-      f"| {n_same} same, {len(SAME) - n_same} different", flush=True)
+      f"| {n_same} same, {len(SAME) - n_same} different"
+      + (f" | {cache.hits} verdicts reused from the cache" if cache.hits else ""), flush=True)
 
 # 1c) re-vote the shaky verdicts. One verdict per pair decides a merge, and the conflict-free
 # rule needs EVERY pair across two groups to say "same" — so a single unstable verdict vetoes a
@@ -648,13 +681,13 @@ print(f"[merge] judged {len(pairs)} pairs in {time.time()-t0:.0f}s "
 # are re-judged, and the cost scales with how many pairs were actually borderline rather than
 # tripling the whole run. A pair whose call FAILED has conf None and is left alone — it is
 # already reported below, and a systemic failure would otherwise re-judge everything for nothing.
-shaky = [p for p in SAME if CONF.get(p) is not None and CONF[p] < args.revote_below]
+shaky = [p for p in SAME if CONF.get(p) is not None and CONF[p] < args.revote_below and p not in cached_final]
 if shaky:
     print(f"[revote] {len(shaky)} verdict(s) under confidence {args.revote_below}; "
           f"2 more votes each, majority wins, {MAX_WORKERS} concurrent...", flush=True)
     t1 = time.time(); total[0] += 2 * len(shaky)
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        extra = list(pool.map(judge, shaky * 2))
+        extra = list(pool.map(lambda p: judge(p, fresh=True), shaky * 2))
     votes = {p: [SAME[p]] for p in shaky}
     for i, j, same, conf in extra:
         votes[(i, j)].append(bool(same))
@@ -672,6 +705,10 @@ if shaky:
     print(f"[revote] done in {time.time()-t1:.0f}s | {flipped} verdict(s) flipped "
           f"| {n_same} same, {len(SAME) - n_same} different", flush=True)
 
+for _pair, _cache_key in _judge_key.items():   # every verdict is settled now: remember it (a failed call has conf None: skipped)
+    if _pair in SAME and _pair not in cached_final:
+        cache.put(_cache_key, SAME[_pair], CONF.get(_pair), final=True)
+
 if failures:
     from collections import Counter
     print(f"[warn] {len(failures)}/{len(pairs)} pair(s) never got a verdict and were treated as "
@@ -683,43 +720,17 @@ if failures:
               "the output below is not trustworthy", flush=True)
 
 
-# 2) conflict-aware clustering
-def conflict_free_clusters():
-    """Cluster the verdicts so that every cluster is a clique in the "same" graph: no pair
-    inside a cluster was judged different.
-
-    Transitive closure over the same edges would put A and C together on the strength of A~B
-    and B~C even when A-vs-C was judged different — on ZNFX1 that chained three distinct
-    mechanistic steps into one 11-variant reaction.
-
-    Agglomerative: repeatedly join the two groups that are FULLY connected to each other,
-    taking the join whose weakest connecting verdict is strongest, so the result does not
-    depend on the order pairs happen to be listed in. Joining stops when no two groups are
-    fully connected, which leaves conflicting variants in separate clusters.
-    """
-    groups = [[i] for i in range(n)]
-    while True:
-        best = None
-        for gi in range(len(groups)):
-            for gj in range(gi + 1, len(groups)):
-                cross = [(min(a, b), max(a, b)) for a in groups[gi] for b in groups[gj]]
-                if not all(SAME.get(p) for p in cross):
-                    continue
-                # a "same" the judge put no number on counts as 0.0 here: it can still join,
-                # but only after every join backed by an actual confidence
-                weakest = min(CONF.get(p) or 0.0 for p in cross)
-                if best is None or weakest > best[0]:
-                    best = (weakest, gi, gj)
-        if best is None:
-            return sorted(groups, key=lambda g: (-len(g), g))
-        _, gi, gj = best
-        groups[gi] = sorted(groups[gi] + groups[gj]); groups.pop(gj)
-
-
-groups = conflict_free_clusters()
+# 2) conflict-aware clustering (merge_support.conflict_free_clusters: per connected component, see its docstring)
+groups = _clusters(n, SAME, CONF)
 print(f"[cluster] {n} -> {len(groups)} conflict-free cluster(s)", flush=True)
 
 # 3) cluster-level validation — may only split a cluster, never join
+def validate_cluster(idxs):
+    """Stage-3 check of one within-paper cluster given as indices into `unique`; returns groups of those indices."""
+    parts = validate_annotations([unique[i]['annotation_result'] for i in idxs])
+    return [sorted(idxs[k] for k in part) for part in parts]
+
+
 if args.no_validate:
     print("[validate] skipped (--no-validate)", flush=True)
 else:
@@ -805,6 +816,105 @@ if to_fix:
               f"un-consolidated and may still contain duplicate entries:", flush=True)
         for (name, detail), count in Counter(consolidate_failures).most_common():
             print(f"         {count}x {name}: {detail}", flush=True)
+
+# 5) merge ACROSS papers. Everything above merged within one paper; here the per-paper results are merged into
+# reactions that cite several papers. Papers are added one at a time, and a new reaction is compared only with the
+# best-matching groups found so far, best first, stopping at the first "same" (see merge_support.merge_across_papers):
+# the number of judge calls grows with the number of papers, not with the square of the number of reactions.
+def judge_records(rep, rec):
+    """A verdict for (a group's record, a new reaction): cached if seen before, else judged, with the same re-vote of
+    a shaky verdict as within a paper."""
+    a1, a2 = rep['annotation_result'], rec['annotation_result']
+    key = VerdictCache.key(MODEL_KW['model'], 'thinking' in MODEL_KW, _RULES_FP, _reaction_brief(a1), _reaction_brief(a2))
+    hit = cache.get(key)
+    if hit is not None and hit['final']:
+        return hit['same'], hit['conf']
+    if hit is not None:
+        same, conf = hit['same'], hit['conf']
+    else:
+        same, conf = reactions_are_duplicate(a1, a2)
+        cache.put(key, same, conf)
+    if conf is not None and conf < args.revote_below:
+        votes = [same] + [reactions_are_duplicate(a1, a2)[0] for _ in range(2)]
+        same = sum(votes) * 2 > len(votes)
+    cache.put(key, same, conf, final=True)
+    return same, conf
+
+
+papers_seen = list(dict.fromkeys((record_sources(e) or [''])[0] for e in merged_results))
+if len(papers_seen) > 1 and not args.no_cross_paper:
+    import functools
+    t3 = time.time()
+    per_paper = merged_results
+    sim = TfidfSimilarity([e['annotation_result'] for e in per_paper])
+    can_match = (lambda r, g: True) if args.no_prefilter else \
+        (lambda r, g: may_be_duplicates(r['annotation_result'], g['annotation_result']))
+    print(f"[cross] merging {len(per_paper)} reactions from {len(papers_seen)} papers, one paper at a time "
+          f"(at most {args.cross_max_candidates} candidates each), {MAX_WORKERS} concurrent...", flush=True)
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        if args.cross_all_pairs:
+            first = lambda e: (record_sources(e) or [''])[0]
+            xpairs = [(i, j) for i in range(len(per_paper)) for j in range(i + 1, len(per_paper))
+                      if first(per_paper[i]) != first(per_paper[j]) and can_match(per_paper[i], per_paper[j])]
+            xv = list(pool.map(lambda pr: judge_records(per_paper[pr[0]], per_paper[pr[1]]), xpairs))
+            XS = {pr: bool(v[0]) for pr, v in zip(xpairs, xv)}
+            XC = {pr: v[1] for pr, v in zip(xpairs, xv)}
+            cgroups = []
+            for members in _clusters(len(per_paper), XS, XC):
+                cs = [XC[pr] for pr in itertools.combinations(members, 2) if XS.get(pr) and XC.get(pr) is not None]
+                rep = functools.reduce(merge_two, [per_paper[k] for k in members])
+                cgroups.append({'rep': rep, 'members': members, 'papers': set(record_sources(rep)),
+                                'conf': min(cs) if cs else None})
+            cstats = {'judged': len(xpairs), 'candidates': len(xpairs), 'exact': 0, 'reconciled': 0}
+        else:
+            cgroups, cstats = merge_across_papers(
+                per_paper, prefilter=can_match, similar=lambda r, g: sim(r['annotation_result'], g['annotation_result']),
+                judge=judge_records, combine=merge_two, signature=lambda e: _signature(e['annotation_result']),
+                max_candidates=args.cross_max_candidates, map_fn=pool.map)
+        # a group of three or more may have drifted across reactions: check it as stage 3 does within a paper
+        to_check = [g for g in cgroups if len(g['members']) >= args.validate_min_size] if not args.no_validate else []
+        if to_check:
+            checks = list(pool.map(lambda g: validate_annotations(
+                [per_paper[k]['annotation_result'] for k in g['members']], same_paper=False), to_check))
+            replaced = {}
+            for g, parts in zip(to_check, checks):
+                if len(parts) > 1:
+                    print(f"   SPLIT (across papers): {len(g['members'])} reactions -> {len(parts)}", flush=True)
+                    replaced[id(g)] = [[g['members'][k] for k in part] for part in parts]
+            rebuilt = []
+            for g in cgroups:
+                if id(g) not in replaced:
+                    rebuilt.append(g)
+                    continue
+                for members in replaced[id(g)]:
+                    rep = functools.reduce(merge_two, [per_paper[k] for k in members])
+                    rebuilt.append({'rep': rep, 'members': members, 'papers': set(record_sources(rep)), 'conf': g['conf']})
+            cgroups = rebuilt
+        merged_results, changed = [], []
+        for g in cgroups:
+            rec = g['rep']
+            a = rec['annotation_result']
+            if len(g['members']) > 1:
+                members = [per_paper[k]['annotation_result'] for k in g['members']]
+                vals = [m.get('confidence') for m in members if isinstance(m.get('confidence'), (int, float))]
+                a['confidence'] = round(sum(vals) / len(vals), 3) if vals else None
+                shaky = [m['merge_confidence'] for m in members if m.get('merge_confidence') is not None]
+                a['cross_paper_merge_confidence'] = g['conf']
+                a['merge_confidence'] = min(shaky + ([g['conf']] if g['conf'] is not None else [])) if (shaky or g['conf'] is not None) else None
+                changed.append(rec)
+            merged_results.append(rec)
+        if changed:
+            fixed = list(pool.map(lambda e: consolidate_sections(e['annotation_result']), changed))
+            for e, a in zip(changed, fixed):
+                e['annotation_result'] = a
+    n_cross = sum(1 for g in cgroups if len(g['members']) > 1)
+    print(f"[cross] {len(per_paper)} -> {len(merged_results)} reactions in {time.time()-t3:.0f}s | {n_cross} cite more than "
+          f"one paper | {cstats['judged']} judge calls ({cstats['exact']} identical reactions joined free, "
+          f"{cstats['reconciled']} groups reconciled; the cap of {args.cross_max_candidates} left candidates unasked for "
+          f"{cstats.get('capped', 0)} reactions/groups) for {cstats['candidates']} candidate pairs "
+          f"(all pairs across papers would be {sum(1 for i in range(len(per_paper)) for j in range(i + 1, len(per_paper)) if (record_sources(per_paper[i]) or [''])[0] != (record_sources(per_paper[j]) or [''])[0])})", flush=True)
+elif len(papers_seen) > 1:
+    print("[cross] skipped (--no-cross-paper)", flush=True)
 
 # finally, one summation section per reaction, uniformly shaped, whatever happened above
 for e in merged_results:

@@ -37,45 +37,58 @@ class DefaultPipeline:
         self.extractor = extractor or SubprocessExtractor(timeout=timeout, review=review)
 
     def run(self, spec: PipelineInput, report: Callable[[str], None]) -> PipelineResult:
-        if not spec.pmid and not spec.pdf_path:
+        refs = spec.refs()
+        if not refs:
             raise ValueError('need a pmid or a pdf')
         gene = spec.focus or 'paper'
         report('extracting reactions')
         res = self._extract(spec, gene, report)
         reactions: List[dict] = res.reactions
         if not res.ok or not reactions:
-            raise RuntimeError('no reactions could be extracted from this paper '
-                               f'(no open-access full text, or nothing reaction-like in it): {res.error or ""}'.strip())
+            raise RuntimeError(('no reactions could be extracted from these papers' if len(refs) > 1 else
+                                'no reactions could be extracted from this paper') +
+                               f' (no open-access full text, or nothing reaction-like in it): {res.error or ""}'.strip())
 
         paper_for, papers = self._paper_loader(spec)
         result = self.assemble(spec, reactions, paper_for, papers, report)
         # what the script steps spent comes first, then the draft call that assemble() recorded
         result.usage = [entry_from_counts(step, counts) for step, counts in res.step_usage.items()
                         if any(counts.values())] + result.usage
+        if res.warnings:                          # e.g. one of several papers could not be read: say so, keep the rest
+            result.issues += iss.issues_from_notes('pipeline', res.warnings)
         return result
 
     def _extract(self, spec: PipelineInput, gene: str, report: Callable[[str], None]):
         """Run the extractor, passing `report` along when it takes one (a custom Extractor may not)."""
+        refs = spec.refs()
+        method = self.extractor.extract if len(refs) == 1 else getattr(self.extractor, 'extract_many', None)
+        if method is None:
+            raise ValueError('this extractor handles one paper at a time')
         try:
-            takes_report = 'report' in inspect.signature(self.extractor.extract).parameters
+            takes_report = 'report' in inspect.signature(method).parameters
         except (TypeError, ValueError):
             takes_report = False
-        if takes_report:
-            return self.extractor.extract(spec.pmid, spec.pdf_path, gene, report=report)
-        return self.extractor.extract(spec.pmid, spec.pdf_path, gene)
+        args = (refs[0].pmid, refs[0].pdf_path, gene) if len(refs) == 1 else (refs, gene)
+        return method(*args, report=report) if takes_report else method(*args)
 
     @staticmethod
     def _paper_loader(spec: PipelineInput):
         """(source -> PaperText, cache of the papers loaded). A PDF is read once; a PMID through the PMC cache."""
         papers: Dict[str, Optional[PaperText]] = {}
-        if spec.pdf_path:
-            pdf = PaperText.from_pdf(None, spec.pdf_path)
+        refs = spec.refs()
+        if len(refs) == 1 and refs[0].pdf_path:
+            pdf = PaperText.from_pdf(None, refs[0].pdf_path)
             papers['main'] = pdf
             return (lambda src: pdf), papers
+        by_pdf = {r.source: r.pdf_path for r in refs if r.pdf_path}       # a PDF's reactions are tagged with its file name
 
         def paper_for(src):
             if src not in papers:
-                papers[src] = load_paper_text(src)
+                try:
+                    papers[src] = PaperText.from_pdf(None, by_pdf[src]) if src in by_pdf else load_paper_text(src)
+                except Exception as e:                                    # an unreadable PDF leaves its quotes unverified
+                    logger.warning('paper text unavailable for %s: %s', src, e)
+                    papers[src] = None
             papers.setdefault('main', papers[src])
             return papers[src]
         return paper_for, papers
@@ -117,8 +130,15 @@ class DefaultPipeline:
         existing = []
         if self.events is not None:
             report('checking Reactome for existing reactions')
-            existing, ex_issues = find_existing(draft, spec.pmid, self.events)
+            existing, ex_issues = find_existing(draft, [r.pmid for r in spec.refs() if r.pmid] or None, self.events)
             issues += ex_issues
             lap('existing-reaction check')
-        main = papers.get('main')
-        return PipelineResult(draft, store.all(), issues, main.to_dict() if main else None, existing, usage)
+        refs = spec.refs()
+        for ref in refs:                          # every paper's text goes with the session (search, quote checks for edits)
+            if ref.source not in papers:
+                paper_for(ref.source)
+        texts = {src: p.to_dict() for src, p in papers.items() if src != 'main' and p is not None}
+        main = (papers.get(refs[0].source) if refs else None) or papers.get('main')
+        if len(refs) == 1 and 'main' in papers and not texts:        # a single PDF: loaded under 'main', tagged with its file name
+            texts = {refs[0].source: papers['main'].to_dict()} if papers['main'] is not None else {}
+        return PipelineResult(draft, store.all(), issues, main.to_dict() if main else None, existing, usage, papers=texts)

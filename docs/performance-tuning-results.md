@@ -203,6 +203,9 @@ Reading it:
 - The PMC XML route end to end through the REST service, and a paper longer than about 20 pages at 16 workers.
 - Entity typing after the gene/rna change was checked on one paper only.
 - Only 8 papers were scored against curated reactions; that is enough to show no regression, not to rank close options.
+- **Fixed 2026-11-02 (was: a cross-paper exact duplicate was dropped with its quotes):** an identical reaction in another
+  paper is no longer dropped; it stays its own record with its own paper, and the cross-paper stage (below) merges it
+  for free. With `--no-cross-paper` the two simply stay separate reactions. Every quote carries its own `source`.
 - Papers with a PMC record may have no full-text body (3 of my first 5 candidates), so check before choosing test papers.
 
 ## 10. REST service: measured end to end, progress messages, parallel lookups
@@ -298,6 +301,98 @@ Number of action findings per real reaction: 1 for 7, 2 for 17, 3 for 10, 4 for 
 The cutoff of 3 is a judgement fitted to these 35 reactions, not a validated threshold. Scores still do not separate
 broken from real reactions (controls 0.2-0.5, real 0.2-0.6), so the list is ranked by action count first.
 End to end on the saved PINK1 session: all 11 reactions checked in 14.8 s, ranked, each with a summary.
+
+### Merging across papers (2026-11-02)
+
+**Step 1, per-quote source.** `stamp_sources` labels every quote with its paper before records are combined; each quote
+is verified against its own paper (`attach_evidence`); `Evidence.source` records it (a PDF has no PMID); the draft's
+`pmids` is the union over a merged reaction's papers. Identical reactions fold only within a paper.
+
+**Step 2, speed.** Clustering per connected component (`merge_support.conflict_free_clusters`): identical groups to the
+old all-pairs scan (checked against a copy of the old algorithm on 300 random inputs with conflicts and ties), but 600
+reactions cluster in well under a second instead of 13 s. A **verdict cache** (`data/merge_cache/judge.jsonl`,
+`--no-cache` or `MERGE_CACHE=0` to turn off), keyed by the model, its thinking setting, a fingerprint of the judge's
+rules and the two reactions' text; re-votes always ask the model; a failed call is never cached. On 64 reactions from
+two papers: judging 47 s cold, 0 s warm (390 verdicts reused); whole run 89 s and 608 calls cold, 18 s and 22 calls warm.
+
+**Step 3, the cross-paper stage** (`merge_support.merge_across_papers`, run by default when the input has more than one
+paper; `--no-cross-paper` to turn off; give `run_merge.py` several extraction files with `--out`):
+
+1. Within-paper merge, as before.
+2. Papers are added one at a time. A new reaction is compared only with the groups found so far, not with every
+   reaction of every paper: candidates must pass the pre-filter and share no paper with it, are asked best-match first
+   (TF-IDF over the entities named), at most 10 (`--cross-max-candidates`, default raised from 5, see below), stopping at the first "same". A group that
+   already holds a reaction with the same signature is joined with no model call.
+3. A group takes at most one reaction per paper (the more confident one wins a clash).
+4. A final reconcile pass compares the groups with each other (cheap: far fewer groups than reactions), because the same
+   reaction can start in two groups before either can see the other.
+5. Groups of 3 or more are checked for drift by the model, as within a paper (told the papers differ); merged groups are
+   cleaned up by the model; confidence is recomputed; `merge_confidence` is the weakest verdict; `cross_paper_merge_confidence`
+   is the weakest cross-paper one.
+
+Measured with the real model on 5 extraction runs of the PINK1 paper treated as 5 papers (the worst case: every
+reaction has true duplicates in the other four; 121 records, 63 after the per-paper merge), against `--cross-all-pairs`
+(judge every candidate pair, exact but quadratic, kept as a reference mode):
+
+| | All pairs (reference) | Incremental, first version | Incremental, as shipped |
+|---|---|---|---|
+| Judge calls across papers | 929 | 109 | **116** (5 identical reactions joined free) |
+| Reactions after the cross-paper merge | 22 | 25 | 20 |
+| Pairs merged that the reference also merged | – | 66% recall | **98% recall, 91% precision** |
+
+The first version lost recall (66%) for two reasons, both fixed: it folded identical reactions across papers up front,
+which gave a folded reaction several "papers" and wrongly barred a later reaction of one of them from matching it; and
+groups were never compared with each other. The reference is a proxy, not the truth: its clique rule (every pair in a group
+must have been judged the same) is stricter, and most of the 9 pairs only the incremental stage merged look like
+reasonable merges (`PINK1-dependent phosphorylation of Parkin` vs `... at S65`); one is arguable, the C431S
+trapping mutant merged with the wild-type reaction. An earlier comparison in this work was thrown away because the
+reference run had crashed and the file compared was a stale one; the numbers above are from a completed run.
+
+**Several papers in one REST session (built later the same day, see below):** the service now runs this stage for a
+session with several papers; `run_merge.py` also takes several extraction files directly. Not tested: many papers on different topics with the real
+model (the diverse set was only simulated: about 100 calls for 8 papers), papers with very large numbers of reactions,
+and papers with very large numbers of reactions.
+
+**The cap on candidates** (how many existing groups the model is asked about per new reaction, best match first). Same
+five-run PINK1 data (62 per-paper reactions), against the all-pairs reference (22 reactions, 90 merged pairs, 897 judge
+calls); one run each, so differences of a few points are within the model's run-to-run noise:
+
+| Cap | Reactions | Judge calls | Cap left candidates unasked for | Recall | Precision |
+|---|---|---|---|---|---|
+| 5 | 20 | 113 | 6 reactions/groups | 93% | 87% |
+| 10 | 20 | 136 | 2 | 96% | 86% |
+| 20 | 20 | 133 | 0 | 93% | 87% |
+
+Cap 20 never cut a candidate off and did no better than 5, so the cap is not what limits accuracy here. Raising it to 10
+costs about 20% more calls and cuts the cases where it mattered from 6 to 2; the default is now 10 as cheap insurance
+against the similarity ranking (a word match, so a true match can rank low), not because a gain was shown. The run
+prints how often the cap left candidates unasked (`[cross] ... left candidates unasked for N reactions/groups`).
+
+A bug the unit tests could not see (a loop variable overwrote the `_key` function in `run_merge.py`, crashing it after
+clustering) was caught by a real run. `tests/test_run_merge_script.py` now runs the actual script offline with a stub
+model, including the cross-paper stage, and fails if that mistake comes back.
+
+### Several papers in one REST session (2026-11-02)
+
+`POST /sessions` takes `pmids`, `POST /sessions/upload` takes `files` and `pmids`; `scripts/annotate_papers.sh` drives it.
+The pipeline extracts each paper on its own (`PAPER_WORKERS`, default 2 at a time), runs ONE `run_merge.py` over all
+the extraction files (within each paper, then across papers), attaches each quote to its own paper, and keeps every
+paper's text in the session (search, quote checks for edits). A paper that cannot be read is skipped and reported.
+
+Real model, production wiring over HTTP, a mixed session: two PDFs (the PINK1 paper and a renamed copy, so they overlap
+completely) plus PMID 32448362 (an open-access research paper):
+
+| | |
+|---|---|
+| Whole job | 238 s (paper 3 waited for a free slot: 2 papers at a time) |
+| Reactions in the draft | 20 (11 of them merged across the two PINK1 copies, `sources` lists both; 9 from one paper) |
+| Evidence by paper | 62 + 24 quotes from the two PDFs, 8 from the PMID paper, each verified against its own text |
+| Search | returns passages from the papers, each with its `source` |
+| Progress | per paper while extracting, then the merge stages, then the draft |
+
+Quote-level attribution undercounts overlap for duplicate copies: evidence is keyed by the quote text, so a sentence
+found in both copies is attributed to the first. The reaction's `sources` list is right. Not tested: papers on different
+topics through the service; sessions near `MAX_PAPERS`; the front-end (it does not send several papers yet).
 
 ## 11. How to reproduce
 

@@ -18,7 +18,7 @@ from curator_llm.models.reactome import (CatalystSpec, ComplexSpec, DefinedSetSp
                                          RegulationSpec, SimpleEntitySpec)
 from curator_llm.models.usage import UsageEntry
 from curator_llm.services.resolvers import PSI_MOD
-from curator_llm.services.sources import pmid_of as _pmid_of
+from curator_llm.services.sources import record_pmids as _record_pmids
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +81,8 @@ def _items(reactions: List[dict]) -> List[Dict[str, Any]]:
         summ = a.get('summation')
         keep['summation'] = (summ[0].get('text') if isinstance(summ, list) and summ and isinstance(summ[0], dict)
                              else summ.get('text') if isinstance(summ, dict) else summ) or ''
-        out.append({'index': i, 'pmid': _pmid_of(r.get('source', '')), 'reaction': keep})
+        pm = _record_pmids(r)
+        out.append({'index': i, 'pmid': pm[0] if pm else None, 'reaction': keep})
     return out
 
 
@@ -200,7 +201,6 @@ def assemble(gene: str, reactions: List[dict], ex: DraftExtraction,
         summ = a.get('summation')
         text = (summ[0].get('text') if isinstance(summ, list) and summ and isinstance(summ[0], dict)
                 else summ.get('text') if isinstance(summ, dict) else summ) or ''
-        pmid = _pmid_of(src.get('source', ''))
         key = f'r{lr.source_index}'
         covered.add(lr.source_index)
         key_of_index[lr.source_index] = key
@@ -211,7 +211,7 @@ def assemble(gene: str, reactions: List[dict], ex: DraftExtraction,
                                   activity=GoActivity(name=lr.catalyst.go_function) if lr.catalyst.go_function else None)
             if lr.catalyst else None,
             regulations=[RegulationSpec(kind=g.kind, regulator=g.regulator, note=g.note) for g in lr.regulations],
-            summation=text, pmids=[pmid] if pmid else [],
+            summation=text, pmids=_record_pmids(src),                 # every paper the (possibly merged) reaction draws on
             evidence_ids=list(a.get('evidence_ids') or [])))
     for lr in ex.reactions:           # second pass: preceding links, now that every key exists
         if lr.source_index in key_of_index:

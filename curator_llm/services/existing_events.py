@@ -17,7 +17,7 @@ Rank: because draft participants carry UniProt accessions, matching is on access
   similar  similarity >= 0.25, or the catalyst matches and the event cites this paper
 """
 import logging
-from typing import List, Optional, Set, Tuple
+from typing import List, Optional, Sequence, Set, Tuple, Union
 
 from curator_llm.models.reactome import ComplexSpec, DefinedSetSpec, EwasSpec, ReactomeDraft
 from curator_llm.models.session import ExistingMatch, Issue
@@ -78,12 +78,14 @@ def _score(cats: Set[str], allp: Set[str], ev: EventRow, cited: bool) -> Optiona
                          catalyst_match=cat_match, overlap=round(overlap, 3), reasons=reasons)
 
 
-def find_existing(draft: ReactomeDraft, pmid: Optional[str], events: EventLookup,
+def find_existing(draft: ReactomeDraft, pmid: Union[None, str, Sequence[str]], events: EventLookup,
                   only: Optional[List[str]] = None) -> Tuple[List[ExistingMatch], List[Issue]]:
-    """Matches (best first per reaction, at most 3 each) and the issues to show the curator."""
+    """Matches (best first per reaction, at most 3 each) and the issues to show the curator. `pmid` is the paper's
+    PMID, or the PMIDs of several papers."""
     issues: List[Issue] = []
+    pmids = [pmid] if isinstance(pmid, str) else list(pmid or [])
     try:
-        citing = events.events_citing(pmid) if pmid else []
+        citing = list({e.db_id: e for p in pmids for e in events.events_citing(p)}.values())
     except Exception as e:
         logger.warning('existing-event lookup failed: %s', e)
         return [], [Issue(source='existing', severity='warning', code='existing_check_unavailable',
@@ -92,7 +94,8 @@ def find_existing(draft: ReactomeDraft, pmid: Optional[str], events: EventLookup
     if citing and only is None:                       # paper-level, so only a full check reports it
         names = '; '.join(f'"{e.display_name}" ({e.st_id})' for e in citing[:5])
         issues.append(Issue(source='existing', severity='info', code='paper_already_curated',
-                            message=f'Reactome already has {len(citing)} event(s) citing PMID {pmid}: {names}'))
+                            message=f'Reactome already has {len(citing)} event(s) citing '
+                                    f'{"PMID " + pmids[0] if len(pmids) == 1 else "these papers (PMID " + ", ".join(pmids) + ")"}: {names}'))
     matches: List[ExistingMatch] = []
     for r in draft.reactions:
         if only is not None and r.key not in only:

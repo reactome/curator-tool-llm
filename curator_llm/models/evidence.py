@@ -27,6 +27,7 @@ class Evidence(BaseModel):
     id: str = ''
     quote: str
     pmid: Optional[str] = None
+    source: Optional[str] = None        # the paper the quote is from: a PMID tag or a PDF name (a PDF has no PMID)
     section: Optional[str] = None
     page: Optional[int] = None
     figure: Optional[str] = None

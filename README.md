@@ -380,6 +380,53 @@ curl -s $API/sessions/SESSION_ID/instances/-5/evidence -H "$AUTH"
 
 Piping the output through `jq` makes it readable.
 
+### Several papers in one session
+
+A session can take several papers (PubMed IDs and/or PDFs, up to `MAX_PAPERS`, default 10). Each paper is extracted on
+its own (`PAPER_WORKERS` at a time, default 2), then the results are merged **within each paper and then across
+papers**: a reaction that two papers describe becomes one reaction that cites both (see `run_merge.py` and
+`docs/performance-tuning-results.md` for how the cross-paper stage works and what it costs).
+
+**From the command line** no service is needed. `scripts/annotate_papers.sh` runs the same pipeline directly on your
+machine (it needs the same `.env`, and Neo4j, as the service) and writes the results as files; there is no login, upload
+or polling, and **no limit on the number of papers** (`MAX_PAPERS` belongs to the REST service; `PAPER_WORKERS` still
+sets how many papers are read at once):
+
+```bash
+scripts/annotate_papers.sh paper1.pdf paper2.pdf --pmid 24751536 --focus PINK1     # one merged draft
+scripts/annotate_papers.sh /path/to/pdf_folder --pmids "24751536 29168502"           # a folder plus PubMed IDs
+scripts/annotate_papers.sh --pmid-file pmids.txt --name pink1_papers --out results
+scripts/annotate_papers.sh /path/to/pdf_folder --separate                           # each paper on its own
+```
+
+Per draft, in `--out` (default `./annotations`): `<name>.staged_instances.json` (what the curator tool's "load staged
+instances" takes), `<name>.issues.json`, `<name>.session.json` (papers, counts, tokens used) and `<name>.evidence.json`
+(every quote with its paper, page and section). Finished results are skipped unless you pass `--force`; `--help` lists
+everything. What the script does not give you is the interactive side (chat, proposed edits, QA, the evidence viewer),
+which lives in the service and the front-end.
+
+**Over the API** (what the front-end sends):
+
+```bash
+# several PubMed IDs
+curl -s -X POST $API/sessions -H "$AUTH" -H 'Content-Type: application/json' -d '{"pmids":["24751536","29168502"],"focus":"PINK1"}'
+# several PDFs, optionally with PubMed IDs
+curl -s -X POST $API/sessions/upload -H "$AUTH" -F files=@a.pdf -F files=@b.pdf -F pmids="24751536 29168502" -F focus=PINK1
+```
+
+What a multi-paper session looks like:
+- `GET /sessions/{id}` has `papers`: each paper's `source` tag (`PMID:24751536`, or the PDF's stored file name), `kind`,
+  `pmid` and the `name` to show. `GET /sessions` has `n_papers`.
+- Every quote (`evidence`) has `source`, the paper it is from, and `pmid` when the paper has one. A quote that appears
+  word for word in two papers is attributed to the first (rare, except for duplicate copies of one paper).
+- A reaction's `pmids` list every PubMed paper behind it. A PDF has no PMID, so a PDF-only reaction has none.
+- Edits (proposals) may quote any of the session's papers; search and the chat's `search_paper` cover all of them.
+- A paper that cannot be read (no open-access text, nothing reaction-like in it) is skipped, and listed in the issues
+  (source `pipeline`); the rest still go through. If none can be read the job fails.
+- Progress names each paper: `extracting reactions: paper 1: 7/20 chunks · paper 2: waiting`, then the merge stages.
+- The per-paper model review (`LLM_REVIEW=1`) is not run for several papers. A request over `MAX_PAPERS` gets `422`;
+  a refused upload (not a PDF, too large) leaves nothing saved.
+
 ### Example: chat and edits
 
 ```bash
@@ -413,8 +460,8 @@ Every route is under `/api/llm` and needs the bearer token.
 | Method and path | Purpose |
 |---|---|
 | `GET /whoami` | Who the token belongs to. |
-| `POST /sessions` | Start from a PMID: `{"pmid": "...", "focus": "GENE"}` → `202 {sessionId, jobId}`. |
-| `POST /sessions/upload` | Start from a PDF (multipart `file`, optional `focus`) → `202`. |
+| `POST /sessions` | Start from a PMID, `{"pmid": "...", "focus": "GENE"}`, or from several, `{"pmids": ["...", "..."]}`, merged into ONE draft → `202 {sessionId, jobId}`. |
+| `POST /sessions/upload` | Start from PDFs: multipart `file` (one) or `files` (several), optional `pmids` (comma or space separated, to add PubMed papers) and `focus` → `202`. See [Several papers in one session](#several-papers-in-one-session). |
 | `GET /sessions` | Your sessions. |
 | `GET /sessions/{id}` | One session: status, progress, reactions, counts. |
 | `GET /jobs/{jobId}` | Progress of the background job. |
@@ -423,7 +470,7 @@ Every route is under `/api/llm` and needs the bearer token.
 | `GET /sessions/{id}/export` | The draft as staged-instances JSON. |
 | `GET /sessions/{id}/instances/{dbId}/evidence` | The quotes behind one instance. |
 | `GET /sessions/{id}/reactions/{key}` | One reaction with its participants and evidence. |
-| `GET /sessions/{id}/paper/search` | Search the paper (`?q=`, `&section=`, `&limit=`). |
+| `GET /sessions/{id}/paper/search` | Search the session's papers (`?q=`, `&section=`, `&limit=`, `&source=` for one paper); each hit says which paper it is from. |
 | `GET /sessions/{id}/usage` | Language-model tokens spent, per step (extraction, merge, review, draft, reaction checks, chat) with totals. |
 | `GET /sessions/{id}/network` | The reactions and their entities as nodes and edges, for drawing a network. |
 | `GET /sessions/{id}/existing`, `POST /sessions/{id}/existing/check` | Draft reactions Reactome already seems to have; recheck. |

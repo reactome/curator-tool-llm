@@ -7,10 +7,10 @@ import time
 from typing import Callable, Dict, List, Optional, Tuple
 
 from curator_llm.models.evidence import ClaimOrigin, Evidence, Verification
-from curator_llm.models.session import ChangeLogEntry, Issue, Proposal, Session
+from curator_llm.models.session import ChangeLogEntry, Issue, PaperInfo, Proposal, Session
 from curator_llm.models.usage import UsageEntry
 from curator_llm.ports.jobs import JobRunner
-from curator_llm.ports.pipeline import Pipeline, PipelineInput
+from curator_llm.ports.pipeline import PaperRef, Pipeline, PipelineInput
 from curator_llm.ports.sessions import SessionStore
 from curator_llm.services import issues as iss
 from curator_llm.services.emitter import emit_user_instances
@@ -79,11 +79,23 @@ class SessionService:
     # ── lifecycle ──────────────────────────────────────────────────────────
     def start(self, owner: str, spec: PipelineInput, source_label: Optional[str] = None) -> Tuple[str, str]:
         """Create the session, queue the pipeline, return (session_id, job_id)."""
-        s = Session(owner=owner, pmid=spec.pmid, focus=spec.focus,
-                    source=source_label or spec.pmid or (spec.pdf_path or '').rsplit('/', 1)[-1])
+        refs = spec.refs()
+        papers = [PaperInfo(source=r.source, kind='pmid' if r.pmid else 'pdf', pmid=r.pmid,
+                            name=r.label or (r.pmid if r.pmid else r.source)) for r in refs]
+        first_pmid = next((r.pmid for r in refs if r.pmid), None)
+        s = Session(owner=owner, pmid=first_pmid, focus=spec.focus, papers=papers,
+                    source=source_label or self._source_label(papers))
         self.store.save(s)
         job_id = self.jobs.submit(owner, lambda report: self._run(s.id, owner, spec, report))
         return s.id, job_id
+
+    @staticmethod
+    def _source_label(papers: List[PaperInfo]) -> str:
+        """What the session list shows: the paper itself, or the first few of several."""
+        if len(papers) == 1:
+            return papers[0].name
+        shown = ', '.join(p.name for p in papers[:3])
+        return f'{len(papers)} papers: {shown}' + (', ...' if len(papers) > 3 else '')
 
     def _run(self, session_id: str, owner: str, spec: PipelineInput, report: Callable[[str], None]) -> str:
         def progress(msg: str):
@@ -96,6 +108,7 @@ class SessionService:
             result = self.pipeline.run(spec, progress)
             s = self.store.get(session_id, owner)
             s.draft, s.evidence, s.paper = result.draft, result.evidence, result.paper
+            s.paper_texts = dict(result.papers)
             s.existing, s.issues = list(result.existing), list(result.issues)
             s.usage, s.usage_source = list(result.usage), 'saved' if result.replayed else 'run'
             self.refresh(s)
@@ -128,24 +141,59 @@ class SessionService:
     # ── proposals ──────────────────────────────────────────────────────────
     @staticmethod
     def _paper(s: Session) -> Optional[PaperText]:
+        """The session's first paper."""
         return PaperText.from_dict(s.paper) if s.paper else None
 
+    @staticmethod
+    def papers_of(s: Session) -> Dict[str, PaperText]:
+        """Every paper of the session by source tag, in order. A session made before several papers were supported
+        has only `paper`; it is returned under its source label."""
+        if s.paper_texts:
+            return {src: PaperText.from_dict(d) for src, d in s.paper_texts.items()}
+        if s.paper:
+            return {(s.papers[0].source if s.papers else (s.source or 'paper')): PaperText.from_dict(s.paper)}
+        return {}
+
+    @staticmethod
+    def pmids_of(s: Session) -> List[str]:
+        return [p.pmid for p in s.papers if p.pmid] or ([s.pmid] if s.pmid else [])
+
+    def search_papers(self, s: Session, query: str, section: Optional[str] = None, limit: int = 5,
+                      source: Optional[str] = None) -> List[dict]:
+        """Passages matching `query` in the session's papers (one paper if `source` is given), best first, each with the
+        paper it is from."""
+        hits = []
+        for src, paper in self.papers_of(s).items():
+            if source and src != source:
+                continue
+            for h in paper.search(query, section, top_k=limit):
+                hits.append({'text': h.text, 'section': h.section, 'page': h.page, 'figure': h.figure,
+                             'charSpan': h.char_span, 'score': h.score, 'source': src})
+        hits.sort(key=lambda h: -(h['score'] or 0))
+        return hits[:limit]
+
     def _verify_evidence(self, s: Session, drafts: List[dict]) -> List[Evidence]:
-        """Quotes checked against the paper; a curator assertion needs no paper. Raises on any quote not found."""
-        paper, verified, failed = self._paper(s), [], []
+        """Quotes checked against the session's papers; a curator assertion needs no paper. A quote is found in whichever
+        paper has it (`source` on the quote names one to try first). Raises on any quote not found."""
+        papers, verified, failed = self.papers_of(s), [], []
         for raw in drafts:
             ev = Evidence(**raw)
             if ev.claim_origin == ClaimOrigin.CURATOR_ASSERTION:
                 verified.append(ev)
-            elif paper is None:
+            elif not papers:
                 raise ProposalError('this session has no paper text to verify quotes against')
             else:
-                checked = paper.verify(ev)
-                (failed if checked.verified == Verification.FAILED else verified).append(
-                    ev if checked.verified == Verification.FAILED else checked)
+                order = ([ev.source] if ev.source in papers else []) + [k for k in papers if k != ev.source]
+                found = None
+                for src in order:
+                    checked = papers[src].verify(ev)
+                    if checked.verified != Verification.FAILED:
+                        found = checked.model_copy(update={'source': src})
+                        break
+                (verified if found is not None else failed).append(found if found is not None else ev)
         if failed:
-            raise ProposalError('these quotes were not found in the paper (quote exactly, or use '
-                                'curator_assertion): ' + ' | '.join(f'"{f.quote[:100]}"' for f in failed))
+            raise ProposalError('these quotes were not found in the paper' + ('s' if len(papers) > 1 else '') +
+                                ' (quote exactly, or use curator_assertion): ' + ' | '.join(f'"{f.quote[:100]}"' for f in failed))
         return verified
 
     @_locked
@@ -196,7 +244,7 @@ class SessionService:
             p.status, p.decided_by, p.decided_at = 'stale', owner, time.time()
             self.store.save(s)
             raise ProposalError(f'proposal no longer applies to the current draft: {e}') from e
-        evidence = EvidenceStore.load(s.evidence, self._paper(s))
+        evidence = EvidenceStore.load(s.evidence)         # already verified, against whichever paper each quote is from
         ids = [evidence.add(e)[0].id for e in p.evidence]
         keys = [r.key for r in new.reactions if r.key in p.reaction_keys]
         for r in new.reactions:
@@ -279,7 +327,7 @@ class SessionService:
     def _recheck_existing(self, s: Session, only: Optional[List[str]] = None) -> None:
         if self.events is None or s.draft is None:
             return
-        matches, fresh = find_existing(s.draft, s.pmid, self.events, only)
+        matches, fresh = find_existing(s.draft, self.pmids_of(s) or None, self.events, only)
         in_scope = lambda i: only is None or i.reaction_key in only
         stale = [i for i in s.issues if i.source == 'existing' and in_scope(i)]
         _carry_over(stale, fresh, lambda i: (i.code, i.message, i.reaction_key, i.participant_key))

@@ -44,6 +44,22 @@ def split_evidence(reaction: dict) -> dict:
     return reaction
 
 
+def stamp_sources(record: dict) -> dict:
+    """Record, on every quote, the paper it came from. Once reactions from several papers are merged into one, the
+    record's own `source` no longer says which paper a given quote is from, so each quote carries its own. Idempotent:
+    a quote that already has a source keeps it. Works on the wrapped extractor dict ({source, annotation_result})."""
+    a = record.get('annotation_result', record)
+    src = record.get('source')
+    if not src:
+        return record
+    details = a.setdefault('evidence_details', {})
+    for q in a.get('evidence') or []:
+        details.setdefault(q, {}).setdefault('source', src)
+    if not a.get('sources'):
+        a['sources'] = [src]
+    return record
+
+
 def merge_details(d1: Optional[dict], d2: Optional[dict]) -> dict:
     """Union two {quote: metadata} maps; `supports` lists are unioned, other fields keep the first value."""
     out = {q: dict(m) for q, m in (d1 or {}).items()}
@@ -84,17 +100,18 @@ def attach_evidence(reactions: List[dict], store: EvidenceStore,
     for r in reactions:
         a = r.get('annotation_result', r)
         split_evidence(a)
-        src = r.get('source', '')
-        if src not in papers:
-            papers[src] = paper_for_source(src)
-        paper = papers[src]
         details = a.get('evidence_details') or {}
         # the details map is keyed by the exact quote; consolidation may have re-cased/trimmed quotes
         norm_details = {normalize_with_map(q)[0]: m for q, m in details.items()}
         ids, kept_quotes, rejected = [], [], []
         for q in a.get('evidence', []):
             meta = details.get(q) or norm_details.get(normalize_with_map(q)[0]) or {}
-            draft = _draft(q, meta)
+            # the quote's own paper (a merge across papers keeps them apart); a single-paper record's source otherwise
+            src = meta.get('source') or r.get('source', '')
+            if src not in papers:
+                papers[src] = paper_for_source(src)
+            paper = papers[src]
+            draft = _draft(q, meta).model_copy(update={'source': src or None})
             if paper is None:
                 draft = draft.model_copy(update={'pmid': pmid_of(src)})
             ev, kept = store.add(draft, paper)

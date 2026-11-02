@@ -8,13 +8,15 @@ boundary is the isolation. What callers get is a plain object, not CLIs and file
 import json
 import logging
 import os
+import hashlib
 import os
 import re
 import subprocess
 import sys
 import threading
 import time
-from typing import Callable, Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, Dict, List, Optional, Sequence
 
 from curator_llm.ports.extractor import ExtractionResult
 
@@ -126,7 +128,8 @@ class StepProgress:
             if m := _JUDGED.search(line):
                 return self._say(f'merging reactions: compared {m.group(1)}/{m.group(2)} pairs')
             for marker, msg in (('[revote]', 're-checking uncertain pairs'), ('[cluster]', 'grouping duplicates'),
-                                ('[validate]', 'checking the groups'), ('[consolidate]', 'combining duplicate details')):
+                                ('[validate]', 'checking the groups'), ('[consolidate]', 'combining duplicate details'),
+                                ('[cross] merging', 'merging across papers'), ('[cross] ', 'merged across papers')):
                 if line.startswith(marker):
                     return self._say(f'merging reactions: {msg}')
         elif self.step == 'review' and self.last is None:
@@ -136,8 +139,11 @@ class StepProgress:
 
 class SubprocessExtractor:
     def __init__(self, root: str = ROOT, results_dir: Optional[str] = None, timeout: int = 1800,
-                 review: bool = False, run: Callable = _subprocess_run, stem: Optional[Callable] = None):
+                 review: bool = False, run: Callable = _subprocess_run, stem: Optional[Callable] = None,
+                 paper_workers: Optional[int] = None):
         self.root, self.timeout, self.review, self._run = root, timeout, review, run
+        # papers extracted at the same time (each extraction already runs its chunks 16 at a time)
+        self.paper_workers = max(1, paper_workers if paper_workers is not None else int(os.getenv('PAPER_WORKERS', '2')))
         self.results_dir = results_dir or os.path.join(root, 'results')
         self._stem = stem
 
@@ -226,5 +232,82 @@ class SubprocessExtractor:
                         res.review_path = rp
                         m = _SCORE.search(open(rp).read())
                         res.review_score = float(m.group(1)) if m else None
+        res.ok = True
+        return res
+
+    def extract_many(self, refs: Sequence, gene: str,
+                     report: Optional[Callable[[str], None]] = None) -> ExtractionResult:
+        """Several papers -> one set of reactions. Each paper is extracted on its own (`paper_workers` at a time); then ONE
+        run_merge.py merges them: within each paper first, then across papers (reactions that several papers describe
+        become one reaction citing them all). A paper that cannot be extracted (no open-access text, nothing
+        reaction-like in it) is skipped with a warning, so one bad paper does not lose the others; if none works,
+        the result carries the error. The per-paper review step is not run here."""
+        res = ExtractionResult()
+        refs = list(refs)
+        if not refs:
+            res.error = 'need at least one paper'
+            return res
+        n = len(refs)
+        state = ['waiting'] * n
+
+        def say(k: int, msg: str):
+            state[k] = msg.replace('extracting reactions: ', '')
+            if report:
+                report('extracting reactions: ' + ' · '.join(f'paper {i + 1}: {m}' for i, m in enumerate(state)))
+
+        def one(k: int):
+            ref = refs[k]
+            sub = ExtractionResult()
+            if not ref.pmid and not ref.pdf_path:
+                sub.error = 'need a pmid or a pdf'
+                return sub
+            spec = str(ref.pmid) if ref.pmid else ref.pdf_path
+            tag = None if ref.pmid else 'localpdf'
+            label = f'{self._output_stem(spec, gene)}_{tag}' if tag else self._output_stem(spec, gene)
+            sub.extraction_path = os.path.join(self.results_dir, f'{label}_extraction.json')
+            with _lock_for(label):
+                cmd = [sys.executable, 'run_extraction.py', spec, '--gene', gene, '--overwrite'] + (['--tag', tag] if tag else [])
+                if self._step('extraction', cmd, sub, lambda m, k=k: say(k, m)) is None:
+                    return sub
+                sub.reactions = self._read(sub.extraction_path)
+                sub.n_extracted = len(sub.reactions)
+                if not sub.reactions:
+                    sub.error = 'extraction found no reactions'
+            return sub
+
+        with ThreadPoolExecutor(max_workers=min(self.paper_workers, n)) as pool:
+            parts = list(pool.map(one, range(n)))
+
+        usable = []
+        for ref, sub in zip(refs, parts):
+            res.usage = _add(res.usage, sub.usage)
+            for step, counts in sub.step_usage.items():
+                res.step_usage[step] = _add(res.step_usage.get(step, {}), counts)
+            res.n_extracted += sub.n_extracted
+            if sub.error or not sub.reactions:
+                res.warnings.append(f'{ref.label or ref.source}: skipped, {sub.error or "no reactions"}')
+            else:
+                usable.append(sub)
+        if not usable:
+            res.error = 'no paper gave any reactions: ' + '; '.join(res.warnings)
+            return res
+
+        res.reactions = [r for sub in usable for r in sub.reactions]       # fallback if the merge fails
+        key = hashlib.sha1('|'.join(sorted(sub.extraction_path for sub in usable)).encode()).hexdigest()[:12]
+        res.extraction_path = usable[0].extraction_path
+        res.merged_path = os.path.join(self.results_dir, f'{gene}_multi_{key}_merged.json')
+        with _lock_for(res.merged_path):
+            err_before = res.error
+            cmd = [sys.executable, 'run_merge.py'] + [sub.extraction_path for sub in usable] + ['--out', res.merged_path]
+            if self._step('merge', cmd, res, report) is None:
+                res.warnings.append(f'{res.error}; using unmerged reactions')
+                res.error, res.merged_path = err_before, None
+            else:
+                merged = self._read(res.merged_path)
+                if merged:
+                    res.reactions, res.n_merged = merged, len(merged)
+                else:
+                    res.warnings.append('merge wrote no reactions; using unmerged reactions')
+                    res.merged_path = None
         res.ok = True
         return res

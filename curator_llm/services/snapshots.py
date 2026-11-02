@@ -23,25 +23,32 @@ from curator_llm.models.evidence import Evidence
 from curator_llm.models.reactome import ReactomeDraft
 from curator_llm.models.session import ExistingMatch, Issue
 from curator_llm.models.usage import UsageEntry
-from curator_llm.ports.pipeline import Pipeline, PipelineInput, PipelineResult
+from curator_llm.ports.pipeline import PaperRef, Pipeline, PipelineInput, PipelineResult
 
 logger = logging.getLogger(__name__)
 VERSION = 1
 MODES = ('record', 'replay', 'off')
 
 
-def snapshot_key(spec: PipelineInput) -> str:
-    """pmid-24751536__PINK1, or pdf-<hash of the file>__PINK1. The focus changes what the draft is about."""
-    if spec.pmid:
-        base = f'pmid-{spec.pmid.strip()}'
-    elif spec.pdf_path:
+def _paper_key(ref: PaperRef) -> str:
+    if ref.pmid:
+        return f'pmid-{ref.pmid.strip()}'
+    if ref.pdf_path:
         h = hashlib.sha256()
-        with open(spec.pdf_path, 'rb') as f:
+        with open(ref.pdf_path, 'rb') as f:
             for block in iter(lambda: f.read(1 << 20), b''):
                 h.update(block)
-        base = f'pdf-{h.hexdigest()[:16]}'
-    else:
+        return f'pdf-{h.hexdigest()[:16]}'
+    raise ValueError('need a pmid or a pdf')
+
+
+def snapshot_key(spec: PipelineInput) -> str:
+    """pmid-24751536__PINK1, or pdf-<hash of the file>__PINK1; for several papers multi-<hash of their keys, in any order>.
+    The focus changes what the draft is about."""
+    keys = [_paper_key(r) for r in spec.refs()]
+    if not keys:
         raise ValueError('need a pmid or a pdf')
+    base = keys[0] if len(keys) == 1 else 'multi-' + hashlib.sha256('|'.join(sorted(keys)).encode()).hexdigest()[:16]
     focus = ''.join(c for c in (spec.focus or '').strip().upper() if c.isalnum() or c in '-_')
     return f'{base}__{focus}' if focus else base
 
@@ -60,6 +67,7 @@ class SnapshotStore:
                'evidence': [e.model_dump(mode='json') for e in result.evidence],
                'issues': [i.model_dump(mode='json') for i in result.issues],
                'paper': result.paper,
+               'papers': result.papers,
                'existing': [m.model_dump(mode='json') for m in result.existing],
                'usage': [u.model_dump(mode='json') for u in result.usage]}
         path = self.path(key)
@@ -85,6 +93,7 @@ class SnapshotStore:
                 evidence=[Evidence.model_validate(e) for e in doc['evidence']],
                 issues=[Issue.model_validate(i) for i in doc['issues']],
                 paper=doc.get('paper'),
+                papers=doc.get('papers', {}),                                               # absent in older snapshots
                 existing=[ExistingMatch.model_validate(m) for m in doc.get('existing', [])],
                 usage=[UsageEntry.model_validate(u) for u in doc.get('usage', [])])       # absent in older snapshots
         except Exception as e:

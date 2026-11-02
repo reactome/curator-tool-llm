@@ -13,7 +13,6 @@ from typing import Any, Callable, Dict, Iterator, List, Optional
 from curator_llm.models.session import ChatMessage, Session
 from curator_llm.models.usage import UsageEntry
 from curator_llm.ports.chat_model import ChatModel
-from curator_llm.services.paper_text import PaperText
 from curator_llm.services.session_service import ProposalError, SessionService
 
 logger = logging.getLogger(__name__)
@@ -63,8 +62,8 @@ TOOLS: List[Dict[str, Any]] = [
      'input_schema': {'type': 'object', 'properties': {}}},
     {'name': 'get_reaction', 'description': 'Full detail of one reaction: fields, the participants it uses, and its evidence quotes with page and section.',
      'input_schema': {'type': 'object', 'properties': {'key': {'type': 'string'}}, 'required': ['key']}},
-    {'name': 'search_paper', 'description': 'Search the paper text. Returns passages with section, page and figure. Quote from these verbatim when you attach evidence.',
-     'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string'}, 'section': {'type': 'string', 'description': 'optional: Abstract, Results And Discussion, Materials And Methods, ...'}},
+    {'name': 'search_paper', 'description': 'Search the paper text (all of the session\'s papers when there are several). Returns passages with the paper (source), section, page and figure. Quote from these verbatim when you attach evidence.',
+     'input_schema': {'type': 'object', 'properties': {'query': {'type': 'string'}, 'source': {'type': 'string', 'description': 'optional: search only this paper (its source tag, e.g. PMID:24751536)'}, 'section': {'type': 'string', 'description': 'optional: Abstract, Results And Discussion, Materials And Methods, ...'}},
                       'required': ['query']}},
     {'name': 'find_existing_reactome', 'description': 'Check whether Reactome already has a draft reaction (matched on UniProt accessions). Omit key to check every reaction. Returns matches with level same | similar, the existing reaction name, stable id and why.',
      'input_schema': {'type': 'object', 'properties': {'key': {'type': 'string'}}}},
@@ -129,14 +128,16 @@ class ChatAgent:
             by_id = {e.id: e for e in s.evidence}
             return {'reaction': r.model_dump(mode='json'),
                     'participants': {k: d.participants[k].model_dump(mode='json') for k in used},
-                    'evidence': [{'id': e.id, 'quote': e.quote, 'page': e.page, 'section': e.section,
+                    'evidence': [{'id': e.id, 'quote': e.quote, 'source': e.source, 'page': e.page, 'section': e.section,
                                   'figure': e.figure, 'supports': e.supports}
                                  for e in (by_id[i] for i in r.evidence_ids if i in by_id)]}
         if name == 'search_paper':
-            if not s.paper:
+            if not self.service.papers_of(s):
                 return {'error': 'this session has no paper text'}
-            hits = PaperText.from_dict(s.paper).search(args.get('query', ''), args.get('section') or None, top_k=5)
-            return [{'text': h.text[:700], 'section': h.section, 'page': h.page, 'figure': h.figure} for h in hits]
+            hits = self.service.search_papers(s, args.get('query', ''), args.get('section') or None, limit=5,
+                                              source=args.get('source') or None)
+            return [{'text': h['text'][:700], 'source': h['source'], 'section': h['section'], 'page': h['page'],
+                     'figure': h['figure']} for h in hits]
         if name == 'find_existing_reactome':
             if self.service.events is None:
                 return {'error': 'the existing-event check is not configured'}
