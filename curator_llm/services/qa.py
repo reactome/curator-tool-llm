@@ -7,7 +7,7 @@ overstate the evidence) and sees the same facts plus the quotes.
 """
 import json
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -60,6 +60,9 @@ def rule_findings(draft: ReactomeDraft, r: ReactionSpec, evidence: Dict[str, Evi
               f'a regulator or cofactor', 'catalyst')
         if r.catalyst.entity in r.outputs and r.catalyst.entity not in r.inputs:
             F('warning', 'qa_catalyst_is_output', f'"{cat.name}" is both catalyst and a produced entity', 'catalyst')
+        if r.catalyst.entity in r.inputs and r.catalyst.entity not in r.outputs:
+            F('warning', 'qa_catalyst_is_consumed', f'"{cat.name}" is the catalyst but is listed as an input and not '
+              f'as an output, so the reaction consumes its own enzyme; an enzyme is not consumed', 'inputs')
     ins = set(r.inputs)
     for i, g in enumerate(r.regulations):
         name = draft.participants[g.regulator].name
@@ -97,6 +100,18 @@ def rule_findings(draft: ReactomeDraft, r: ReactionSpec, evidence: Dict[str, Evi
     if not r.pmids:
         F('warning', 'qa_no_literature_reference', 'no literature reference', 'pmids')
     return out
+
+
+# The rules that need no quote and no model: they read the draft's structure only, so they run on every refresh and
+# appear in the issue list without the curator asking for a QA run.
+AUTO_RULE_CODES = frozenset({'qa_no_inputs', 'qa_no_outputs', 'qa_no_change', 'qa_catalyst_not_protein',
+                             'qa_catalyst_is_output', 'qa_catalyst_is_consumed', 'qa_regulator_is_input',
+                             'qa_conflicting_regulation'})
+
+
+def auto_findings(draft: ReactomeDraft) -> List[Tuple[str, QAFinding]]:
+    """(reaction key, finding) for every structural rule that fires, in reaction order."""
+    return [(r.key, f) for r in draft.reactions for f in rule_findings(draft, r, {}) if f.code in AUTO_RULE_CODES]
 
 
 QA_SYSTEM = """You are a senior Reactome curator reviewing ONE reaction of a draft annotation, to tell a human curator

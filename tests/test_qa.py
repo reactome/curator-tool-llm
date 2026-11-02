@@ -254,3 +254,29 @@ def test_a_slow_model_call_does_not_hold_the_session_lock():
     assert done.wait(3), 'another operation on the session was blocked while QA waited for the model'
     release.set()
     t.join(5)
+
+
+def test_a_catalyst_that_is_also_an_input_but_not_an_output_is_flagged_as_consumed():
+    d = draft()
+    d.reactions[0].inputs = ['ub', 'pink1']
+    assert 'qa_catalyst_is_consumed' in codes(rule_findings(d, d.reactions[0], {e.id: e for e in EV}))
+    d.reactions[0].outputs = ['pub', 'pink1']                  # regenerated enzyme: fine
+    assert 'qa_catalyst_is_consumed' not in codes(rule_findings(d, d.reactions[0], {e.id: e for e in EV}))
+
+
+def test_structural_rules_become_issues_on_refresh_without_a_qa_run_and_keep_a_dismissal():
+    from curator_llm.models.session import Session
+    from curator_llm.services.session_service import SessionService
+    d = draft()
+    d.reactions[0].inputs = ['ub', 'pink1']
+    s = Session(owner='o', draft=d, evidence=list(EV))
+    SessionService.refresh(s)
+    mine = [i for i in s.issues if i.source == 'checks']
+    assert [i.code for i in mine] == ['qa_catalyst_is_consumed'] and mine[0].reaction_key == 'good'
+    assert not [i for i in s.issues if i.code in ('qa_no_evidence', 'qa_no_summation')]    # evidence rules stay on demand
+    mine[0].status = 'dismissed'
+    SessionService.refresh(s)
+    assert [i.status for i in s.issues if i.source == 'checks'] == ['dismissed']
+    d.reactions[0].inputs = ['ub']                             # fixed: the issue goes away
+    SessionService.refresh(s)
+    assert not [i for i in s.issues if i.source == 'checks']

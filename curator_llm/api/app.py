@@ -305,6 +305,17 @@ def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: O
         s = load(session_id, user)
         return [p for p in s.proposals if status is None or p.status == status]
 
+    @router.post('/sessions/{session_id}/suggestions')
+    def suggestions(session_id: str, user: AuthUser = Depends(current_user)):
+        """Make the suggested fixes for the draft as it is now and return the pending ones. They are proposals (actor
+        'suggestions') like any other: nothing changes until one is accepted. A fix the curator already decided on is
+        not made again. They are also made when a session is created and after each accepted proposal."""
+        load(session_id, user)
+        try:
+            return svc().suggest_fixes(user.username, session_id)
+        except ProposalError as e:
+            raise HTTPException(409, str(e))
+
     @router.post('/sessions/{session_id}/proposals/{proposal_id}/accept')
     def accept(session_id: str, proposal_id: str, user: AuthUser = Depends(current_user)):
         load(session_id, user)

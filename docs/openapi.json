@@ -44,6 +44,7 @@
       },
       "post": {
         "summary": "Start",
+        "description": "Annotate one paper by PubMed ID (`pmid`), or several (`pmids`) as one session: their reactions are merged into\na single draft, and a reaction several papers describe cites all of them.",
         "operationId": "start_api_llm_sessions_post",
         "requestBody": {
           "content": {
@@ -80,7 +81,7 @@
     "/api/llm/sessions/upload": {
       "post": {
         "summary": "Upload",
-        "description": "Annotate a paper that is not in PubMed Central: upload its PDF.",
+        "description": "Annotate papers that are not (all) in PubMed Central: upload PDFs. Send one in `file` (as before), or several\nin `files`, and optionally add PubMed IDs in `pmids` (comma or space separated). With more than one paper in all,\nthey are merged into ONE draft, across papers.",
         "operationId": "upload_api_llm_sessions_upload_post",
         "requestBody": {
           "content": {
@@ -89,8 +90,7 @@
                 "$ref": "#/components/schemas/Body_upload_api_llm_sessions_upload_post"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "202": {
@@ -546,6 +546,54 @@
         }
       }
     },
+    "/api/llm/sessions/{session_id}/qa": {
+      "post": {
+        "summary": "Qa All",
+        "description": "QA every reaction at once and return them most urgent first (priority fix > review > ok, then by number of\naction findings). Findings also become issues (source 'qa'), replacing each reaction's earlier QA issues.",
+        "operationId": "qa_all_api_llm_sessions__session_id__qa_post",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "llm",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true,
+              "title": "Llm"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/llm/sessions/{session_id}/qa/{key}": {
       "post": {
         "summary": "Qa",
@@ -606,6 +654,7 @@
     "/api/llm/sessions/{session_id}/paper/search": {
       "get": {
         "summary": "Search Paper",
+        "description": "Passages of the session's papers matching `q` (best first), each with the paper it is from (`source`).\nGive `source` to search one paper only.",
         "operationId": "search_paper_api_llm_sessions__session_id__paper_search_get",
         "parameters": [
           {
@@ -650,6 +699,22 @@
               "type": "integer",
               "default": 5,
               "title": "Limit"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source"
             }
           }
         ],
@@ -748,6 +813,44 @@
                 }
               ],
               "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/llm/sessions/{session_id}/suggestions": {
+      "post": {
+        "summary": "Suggestions",
+        "description": "Make the suggested fixes for the draft as it is now and return the pending ones. They are proposals (actor\n'suggestions') like any other: nothing changes until one is accepted. A fix the curator already decided on is\nnot made again. They are also made when a session is created and after each accepted proposal.",
+        "operationId": "suggestions_api_llm_sessions__session_id__suggestions_post",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
             }
           }
         ],
@@ -992,9 +1095,42 @@
       "Body_upload_api_llm_sessions_upload_post": {
         "properties": {
           "file": {
-            "type": "string",
-            "contentMediaType": "application/octet-stream",
+            "anyOf": [
+              {
+                "type": "string",
+                "contentMediaType": "application/octet-stream"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "File"
+          },
+          "files": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string",
+                  "contentMediaType": "application/octet-stream"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Files"
+          },
+          "pmids": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pmids"
           },
           "focus": {
             "anyOf": [
@@ -1009,9 +1145,6 @@
           }
         },
         "type": "object",
-        "required": [
-          "file"
-        ],
         "title": "Body_upload_api_llm_sessions_upload_post"
       },
       "ChatRequest": {
@@ -1063,7 +1196,8 @@
               "emitter",
               "pipeline",
               "existing",
-              "qa"
+              "qa",
+              "checks"
             ],
             "title": "Source"
           },
@@ -1232,6 +1366,11 @@
             "type": "integer",
             "title": "N Open Issues",
             "default": 0
+          },
+          "n_papers": {
+            "type": "integer",
+            "title": "N Papers",
+            "default": 1
           }
         },
         "type": "object",
@@ -1249,8 +1388,22 @@
       "StartRequest": {
         "properties": {
           "pmid": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Pmid"
+          },
+          "pmids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Pmids"
           },
           "focus": {
             "anyOf": [
@@ -1265,9 +1418,6 @@
           }
         },
         "type": "object",
-        "required": [
-          "pmid"
-        ],
         "title": "StartRequest"
       },
       "ValidationError": {

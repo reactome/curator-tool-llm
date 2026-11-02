@@ -28,6 +28,11 @@ _REG_LABEL = {'positive': 'Positive regulation', 'negative': 'Negative regulatio
               'requirement': 'Requirement'}
 
 
+def sequence_symbol(name: str) -> str:
+    """The gene symbol in the name of a gene or transcript entity: "PER2 gene" and "PER2 mRNA" are both "PER2"."""
+    return re.sub(r'\s+(gene|mRNA|RNA|transcript)$', '', name, flags=re.I)
+
+
 def entity_display_name(p, name: Optional[str] = None, prefix: str = '') -> str:
     """Reactome-style entity display name: "<mods>NAME [compartment]". Also used by resolvers to
     look for an identical existing entity."""
@@ -131,8 +136,10 @@ class Emitter:
 
     def _ewas(self, p: EwasSpec) -> dict:
         ref = None
-        if p.molecule != 'protein':
-            symbol = re.sub(r'\s+(gene|mRNA|RNA|transcript)$', '', p.name, flags=re.I)
+        if p.molecule != 'protein' and p.reference_entity is not None:      # Reactome already has this gene / transcript
+            ref = self._shell_of(p.reference_entity)
+        elif p.molecule != 'protein':
+            symbol = sequence_symbol(p.name)
             cls = self._SEQUENCE_CLASS[p.molecule]
             memo = f'{p.molecule}:{symbol}'
             if memo not in self._refs:

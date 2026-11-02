@@ -438,8 +438,34 @@ concern the instance-list view that recent `nl-query` commits changed, so they a
 no clean baseline run was made (it would have meant stashing uncommitted changes), so that is not proven. One earlier
 full run also failed in `InstanceEffects` once, and did not recur. The form has not been looked at in a browser.
 
-**Test suites at the end of this work:** service repo 296 passed, 1 skipped (the skipped test needs a real
+**Test suites at the end of the previous step:** service repo 296 passed, 1 skipped (the skipped test needs a real
 curator-tool-ws); front-end as above. Nothing is deployed to the server and nothing is committed.
+
+### Fixing what the output showed, and suggesting fixes (2026-11-02)
+
+The real clock Science PDF + PMID 32448362 run (22 reactions, 88 open issues) showed problems; the ones that were bugs are
+fixed, and the ones that need judgement are offered as **suggested fixes**. Nothing is fixed automatically: a suggestion
+is a pending proposal (actor `suggestions`) that changes the draft only when a curator accepts it.
+
+| Problem in the output | What was done | Measured (live Reactome graph, 25 gene/transcript entities and 22 reactions of that run) |
+|---|---|---|
+| 22 serious "Reactome already has this reaction" issues, mostly wrong | Genes and transcripts have no UniProt accession, so a reaction about them is no longer compared (an info note says so); a match on the enzyme alone is never "same" | "same" matches 22 -> 6; 16 reactions skipped as gene/transcript reactions |
+| 24 "new reference must be set" warnings, new ReferenceDNASequences for genes Reactome has | The resolver looks the gene symbol up among Reactome's ReferenceDNA/RNASequence and reuses the HUMAN one (the species is a graph relationship, so the lookup reads it from there); several candidates: the one named exactly, with a "confirm it" note; none stands out: no guess | new DNA references 15 -> 0, RNA 10 -> 9, warnings 24 -> 10; 16 of 25 reuse a human reference, no non-human id |
+| An enzyme listed as an input (and not an output); a reaction with nothing changing | Structural checks (`qa_no_inputs`/`outputs`/`change`, catalyst and regulator rules, and the new `qa_catalyst_is_consumed`) now run on every refresh and show as issues (source `checks`) without a QA run. The evidence rules stay on demand | on the saved run: 2 `checks` issues (1 consumed enzyme, 1 no-change) |
+| Body text labelled "Abstract" in a PDF with no headings | A text whose only heading is Abstract is labelled "Main Text" after 2,500 characters or the next page | tests only |
+| Suggested fixes | `services/suggestions.py`: remove a consumed enzyme from the inputs (not when that would leave no input); cite the PubMed papers a reaction's quotes come from when it has no PMID. Made when a session is created and after each accepted proposal; `POST /sessions/{id}/suggestions`; `<name>.suggestions.json` from the command line; a "Suggested fixes" tab in the workspace. A rejected one is not made again; a pending one that no longer applies is dropped | on the saved run: 0 suggestions (its one consumed enzyme is the reaction's only input, so removing it would be wrong) |
+
+**Not fixable safely, so left to the curator:** invented states such as "(repressed)"; related-but-different reactions kept
+separate (and duplicates the merge missed: a patch cannot move evidence between reactions); evidence from another species
+(whether to infer a human reaction is a curation decision); ChEBI identifiers (still flagged). The suggestions skip the
+usual "needs a quote" rule because the curator who accepts one is the one deciding; the quote requirement still holds for
+anything the chat proposes.
+
+**What was not run:** the clock PDF was not at hand, so the whole pipeline was not rerun on it; the live numbers come from
+re-resolving the saved draft against the graph, and the suggestion count from the saved run. The Suggested fixes tab has
+been tested in specs and compiled, not looked at in a browser.
+
+Tests: service repo 317 passed, 1 skipped; paper-annotation front-end 145 pass.
 
 ## 11. How to reproduce
 

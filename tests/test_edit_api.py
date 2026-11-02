@@ -176,3 +176,11 @@ def test_cors_allows_the_frontend_origin_only(env):
     bad = c.options('/api/llm/sessions', headers={'Origin': 'http://evil.example', 'Access-Control-Request-Method': 'GET'})
     assert ok.headers.get('access-control-allow-origin') == 'http://localhost:4200'
     assert 'access-control-allow-origin' not in bad.headers
+
+
+def test_suggestions_endpoint_returns_pending_proposals_and_is_private(env):
+    c, sid, _ = env
+    r = c.post(f'/api/llm/sessions/{sid}/suggestions', headers=H())
+    assert r.status_code == 200 and all(p['actor'] == 'suggestions' and p['status'] == 'pending' for p in r.json())
+    assert c.post('/api/llm/sessions/nope/suggestions', headers=H()).status_code == 404
+    assert c.post(f'/api/llm/sessions/{sid}/suggestions').status_code == 401

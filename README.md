@@ -400,8 +400,8 @@ scripts/annotate_papers.sh /path/to/pdf_folder --separate                       
 ```
 
 Per draft, in `--out` (default `./annotations`): `<name>.staged_instances.json` (what the curator tool's "load staged
-instances" takes), `<name>.issues.json`, `<name>.session.json` (papers, counts, tokens used) and `<name>.evidence.json`
-(every quote with its paper, page and section). Finished results are skipped unless you pass `--force`; `--help` lists
+instances" takes), `<name>.issues.json`, `<name>.suggestions.json` (fixes suggested for some issues, as edits; none is
+applied), `<name>.session.json` (papers, counts, tokens used) and `<name>.evidence.json` (every quote with its paper, page and section). Finished results are skipped unless you pass `--force`; `--help` lists
 everything. What the script does not give you is the interactive side (chat, proposed edits, QA, the evidence viewer),
 which lives in the service and the front-end.
 
@@ -480,6 +480,7 @@ Every route is under `/api/llm` and needs the bearer token.
 | `POST /sessions/{id}/qa` | Check every reaction at once (about 15 s for 11 reactions) and return them most urgent first, with the findings recorded as issues. |
 | `GET`, `POST /sessions/{id}/proposals` | List, or submit your own edit as an RFC 6902 patch. |
 | `POST /sessions/{id}/proposals/{pid}/accept` , `/reject` | Decide a proposed edit. |
+| `POST /sessions/{id}/suggestions` | Make the suggested fixes for the draft as it is now (also made when the session is created and after each accepted edit); returns the pending ones. They are proposals with actor `suggestions`: nothing changes until one is accepted. |
 | `GET`, `POST /sessions/{id}/chat` | Read the conversation; send a message (streams). |
 
 The machine-readable contract is [`docs/openapi.json`](docs/openapi.json); regenerate it after changing the API with

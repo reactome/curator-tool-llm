@@ -6,13 +6,13 @@ import os
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 from curator_llm.models.reactome import (EwasSpec, ExistingRef, ModifiedResidueSpec, ReactomeDraft,
                                          SimpleEntitySpec)
 from curator_llm.ports.external import OntologyClient, UniProtClient
 from curator_llm.ports.lookup import InstanceLookup
-from curator_llm.services.emitter import entity_display_name
+from curator_llm.services.emitter import entity_display_name, sequence_symbol
 
 _COMPARTMENT_SYNONYMS = {'cytoplasm': 'cytosol', 'outer mitochondrial membrane': 'mitochondrial outer membrane',
                          'omm': 'mitochondrial outer membrane', 'mitochondrial matrix space': 'mitochondrial matrix'}
@@ -109,6 +109,25 @@ class Resolver:
         ref = self._by_identifier('GO_MolecularFunction', identifier.split(':')[-1]) if identifier else None
         return identifier, ref
 
+    _SEQUENCE_CLASS = {'dna': 'ReferenceDNASequence', 'rna': 'ReferenceRNASequence'}
+
+    def reference_sequence(self, symbol: str, molecule: str) -> Tuple[Optional[ExistingRef], Optional[str]]:
+        """The human ReferenceDNASequence (a gene) or ReferenceRNASequence (a transcript) Reactome already has for this
+        gene symbol: (reference, note). One match is used. Several: the one whose own symbol is exactly `symbol`, if a
+        single one is, with a note to confirm it; otherwise none is guessed (a gene can have many transcripts) and the
+        note says so. Nothing found: (None, None), and a new reference is created for the curator to complete."""
+        cls = self._SEQUENCE_CLASS[molecule]
+        hits = self._call('Reactome graph', self.lookup.search, cls, 'geneName', symbol, 'equal', 20, default=[]) or []
+        human = [h for h in hits if h.get('species', 'Homo sapiens') == 'Homo sapiens']      # unknown species is not human
+        if len(human) == 1:
+            return _ref(human[0]), None
+        exact = [h for h in human if (h.get('displayName') or '').split(' ')[-1].upper() == symbol.upper()]
+        if len(human) > 1 and len(exact) == 1:
+            return _ref(exact[0]), f'{symbol}: {len(human)} human {cls}s match this symbol; used {exact[0]["displayName"]}, confirm it'
+        if len(human) > 1:
+            return None, f'{symbol}: {len(human)} human {cls}s exist (for example {human[0]["displayName"]}); choose one'
+        return None, None
+
     def psi_mod(self, mod_id: str) -> Optional[ExistingRef]:
         return self._by_identifier('PsiMod', mod_id.split(':')[-1])
 
@@ -170,7 +189,11 @@ class Resolver:
                               f'come from {", ".join(genes)}. Choose the gene(s) or use that set')
 
     def _ewas(self, p: EwasSpec):
-        if p.molecule != 'protein':          # a gene or transcript has no UniProt entry; only look for an identical one
+        if p.molecule != 'protein':          # a gene or transcript has no UniProt entry
+            if p.reference_entity is None:
+                p.reference_entity, note = self.reference_sequence(sequence_symbol(p.name), p.molecule)
+                if note:
+                    self._note(note)
             if p.existing is None and p.compartment is not None:
                 p.existing = _ref(self.lookup.find_by_display_name(
                     entity_display_name(p), ['EntityWithAccessionedSequence']))

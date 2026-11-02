@@ -16,6 +16,7 @@ from curator_llm.services.quote_verifier import normalize_with_map, verify_quote
 _FIG_REF = re.compile(r'\bFig(?:ure)?s?\.?\s*(S?\d+(?:[A-Za-z]|\s[A-Z](?![A-Za-z]))?)', re.I)
 _FIG_LOOKAHEAD = 80   # a citation like "(Fig. 3 B)" follows the sentence it supports
 
+ABSTRACT_MAX_CHARS = 2500
 _HEADING = re.compile(
     r'^[ \t]*(?:\d+[.)]?\s*)?(abstract|introduction|results(?:\s+and\s+discussion)?|discussion|'
     r'materials\s+and\s+methods|methods|experimental\s+procedures|conclusions?|'
@@ -52,7 +53,20 @@ class PaperText:
         text = '\n'.join(parts)
         pt = cls(pmid=pmid, text=text, page_starts=starts)
         pt.section_starts = [(m.start(), m.group(1).strip().title()) for m in _HEADING.finditer(text)]
+        pt._label_headingless_body()
         return pt
+
+    def _label_headingless_body(self) -> None:
+        """A PDF whose only heading found is 'Abstract' would label the whole paper 'Abstract'. A real abstract is short:
+        past ABSTRACT_MAX_CHARS, or at the next page if that comes sooner, the text is labelled 'Main Text'."""
+        if not self.section_starts or self.section_starts[-1][1] != 'Abstract':
+            return
+        start = self.section_starts[-1][0]
+        if len(self.text) - start <= ABSTRACT_MAX_CHARS:
+            return
+        next_page = next((o for o, _ in self.page_starts if o > start), None)
+        at = min(start + ABSTRACT_MAX_CHARS, next_page) if next_page is not None else start + ABSTRACT_MAX_CHARS
+        self.section_starts.append((at, 'Main Text'))
 
     @classmethod
     def from_pdf(cls, pmid: Optional[str], path: str, first_page: int = 1) -> 'PaperText':

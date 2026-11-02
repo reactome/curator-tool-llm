@@ -25,6 +25,8 @@ EPILOG = """\
 results, per session, in --out:
   <name>.staged_instances.json   the draft, as the curator tool's "load staged instances" takes it
   <name>.issues.json             what needs a curator's attention (open issues)
+  <name>.suggestions.json        fixes suggested for some of those issues, as edits (RFC 6902 patches) with the reason;
+                                 none is applied: a curator accepts them in the curator tool's Paper2Path page
   <name>.session.json            the papers, number of reactions and issues, and the tokens used
   <name>.evidence.json           every quote with the paper, page and section it is from, and which instance it supports
 A paper that cannot be read (not open access, or nothing reaction-like in it) is skipped and listed in the issues; the
@@ -122,17 +124,20 @@ def annotate(name: str, refs: List[PaperRef], focus: Optional[str], out_dir: str
                 issues=list(result.issues), existing=list(result.existing), usage=list(result.usage),
                 paper=result.paper, paper_texts=dict(result.papers), status='ready')
     SessionService.refresh(s)                    # the same step the service runs: instances and issues from the draft
+    SessionService(None, None, pipeline).refresh_suggestions(s)   # suggested fixes, as pending proposals; never applied here
+    suggestions = [p for p in s.proposals if p.status == 'pending']
     open_issues = [i for i in s.issues if i.status == 'open']
     os.makedirs(out_dir, exist_ok=True)
     _write(staged, s.user_instances)
     _write(os.path.join(out_dir, f'{name}.issues.json'), [i.model_dump(mode='json') for i in open_issues])
     _write(os.path.join(out_dir, f'{name}.evidence.json'),
            {'evidence': [e.model_dump(mode='json') for e in s.evidence], 'links': s.evidence_links})
+    _write(os.path.join(out_dir, f'{name}.suggestions.json'), [p.model_dump(mode='json') for p in suggestions])
     usage = summarize(s.usage, saved_pipeline=result.replayed)
     _write(os.path.join(out_dir, f'{name}.session.json'),
-           {'source': s.source, 'focus': focus, 'n_reactions': len(s.draft.reactions), 'n_open_issues': len(open_issues),
+           {'source': s.source, 'focus': focus, 'n_reactions': len(s.draft.reactions), 'n_open_issues': len(open_issues), 'n_suggested_fixes': len(suggestions),
             'papers': [p.model_dump() for p in papers], 'usage': usage})
-    say(f'[{name}] done: {len(s.draft.reactions)} reactions from {len(refs)} paper(s), {len(open_issues)} open issues')
+    say(f'[{name}] done: {len(s.draft.reactions)} reactions from {len(refs)} paper(s), {len(open_issues)} open issues, {len(suggestions)} suggested fixes')
     notes = [i.message for i in open_issues if i.source == 'pipeline']
     if notes:
         say(f'[{name}] note: ' + '; '.join(notes))

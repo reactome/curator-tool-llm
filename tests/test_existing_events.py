@@ -164,3 +164,24 @@ def test_live_draft_reaction_matches_the_curated_pink1_phosphorylation(live):
     top = m[0]
     assert top.level in ('same', 'similar') and top.catalyst_match and top.cites_pmid
     assert any(i.code == 'paper_already_curated' for i in issues)
+
+
+def test_a_reaction_about_genes_or_transcripts_is_skipped_with_a_note_not_matched():
+    d = draft()
+    d.participants['gene'] = EwasSpec(key='gene', name='PINK1 gene', molecule='dna')
+    d.participants['mrna'] = EwasSpec(key='mrna', name='PINK1 mRNA', molecule='rna')
+    d.reactions.append(ReactionSpec(key='r3', name='PINK1 transcription', inputs=['gene'], outputs=['mrna'],
+                                    catalyst=CatalystSpec(entity='pink1')))
+    m, issues = find_existing(d, None, FakeEvents(candidates=[OTHER]))
+    assert not [x for x in m if x.reaction_key == 'r3']
+    skipped = [i for i in issues if i.code == 'existing_check_skipped' and i.reaction_key == 'r3']
+    assert len(skipped) == 1 and skipped[0].severity == 'info' and 'genes or transcripts' in skipped[0].message
+
+
+def test_matching_on_the_enzyme_alone_is_never_same_when_the_substrates_have_no_accession():
+    d = draft()
+    d.participants['sub'] = SimpleEntitySpec(key='sub', name='substrate')
+    d.reactions = [ReactionSpec(key='r9', name='PINK1 acts', inputs=['sub'], outputs=['sub'], catalyst=CatalystSpec(entity='pink1'))]
+    m, _ = find_existing(d, None, FakeEvents(candidates=[OTHER]))
+    assert m and all(x.level != 'same' for x in m)
+    assert any('only the enzyme could be compared' in r for x in m for r in x.reasons)

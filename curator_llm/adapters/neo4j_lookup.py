@@ -17,7 +17,8 @@ _IDENT = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 _HUMAN = 'Homo sapiens'
 _RETURN = ('RETURN n.dbId AS dbId, n.displayName AS displayName, '
            'coalesce(n.schemaClass, head([l IN labels(n) WHERE l <> "DatabaseObject"])) AS schemaClassName, '
-           'n.speciesName AS species')
+           # reference sequences have no speciesName property: their species is a relationship
+           'coalesce(n.speciesName, head([(n)-[:species]->(sp:Species) | sp.displayName])) AS species')
 
 
 def _check(class_name: str, attribute: Optional[str] = None):

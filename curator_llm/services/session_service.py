@@ -1,6 +1,7 @@
 """Owns the life of an annotation session: start it (background job), edit it through proposals, and
 (re)emit instances and issues whenever the draft changes. All writes to the store go through here."""
 import functools
+import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -18,7 +19,8 @@ from curator_llm.services.evidence_store import EvidenceStore
 from curator_llm.services.existing_events import find_existing
 from curator_llm.services.paper_text import PaperText
 from curator_llm.services.patching import PatchError, apply_patch, describe_changes, touched_reactions
-from curator_llm.services.qa import qa_reaction, rank_results
+from curator_llm.services.qa import AUTO_RULE_CODES, auto_findings, qa_reaction, rank_results
+from curator_llm.services.suggestions import suggest_fixes as make_suggestions
 
 
 class ProposalError(ValueError):
@@ -28,6 +30,9 @@ class ProposalError(ValueError):
 _CLAIM_FIELDS = {'inputs', 'outputs', 'catalyst', 'regulations', 'preceding'}
 _locks_guard = threading.Lock()
 _locks: Dict[str, threading.Lock] = {}
+
+
+logger = logging.getLogger(__name__)
 
 
 def _locked(method):
@@ -112,6 +117,7 @@ class SessionService:
             s.existing, s.issues = list(result.existing), list(result.issues)
             s.usage, s.usage_source = list(result.usage), 'saved' if result.replayed else 'run'
             self.refresh(s)
+            self.refresh_suggestions(s)
             s.status, s.progress, s.error = 'ready', 'done', None
             s.change_log.append(ChangeLogEntry(actor='pipeline', action='created',
                                                detail=f'{len(result.draft.reactions)} reactions'))
@@ -128,12 +134,14 @@ class SessionService:
         """Re-emit instances from the draft and rebuild the issue list. Emitter issues are replaced on every
         refresh; issues that recur keep the id and status they had."""
         key = lambda i: (i.code, i.message, i.reaction_key, i.participant_key)
-        kept = [i for i in s.issues if i.source != 'emitter']
+        kept = [i for i in s.issues if i.source not in ('emitter', 'checks')]
         emit = emit_user_instances(s.draft, {e.id: e for e in s.evidence})
         s.user_instances, s.evidence_links, s.key_to_db_id = emit.user_instances, emit.evidence_links, emit.key_to_db_id
         have = {(i.code, i.participant_key) for i in kept}
         merged = kept + [f for f in iss.issues_from_draft(s.draft) if (f.code, f.participant_key) not in have]
         merged += iss.issues_from_notes('emitter', emit.warnings)
+        merged += [Issue(source='checks', severity=f.severity, code=f.code, message=f.message, reaction_key=k)
+                   for k, f in auto_findings(s.draft)]
         iss.link_to_instances(merged, emit.key_to_db_id, emit.participant_to_db_id)
         _carry_over(s.issues, merged, key)
         s.issues = iss.assign_ids(merged)
@@ -196,12 +204,10 @@ class SessionService:
                                 ' (quote exactly, or use curator_assertion): ' + ' | '.join(f'"{f.quote[:100]}"' for f in failed))
         return verified
 
-    @_locked
-    def propose(self, owner: str, session_id: str, ops: List[dict], reason: str = '',
-                evidence: Optional[List[dict]] = None, actor: str = 'chat',
-                curator_assertion: bool = False) -> Proposal:
-        """Validate an edit and hold it for review. Nothing changes until it is accepted."""
-        s = self._ready(owner, session_id)
+    def _build_proposal(self, s: Session, ops: List[dict], reason: str, evidence: Optional[List[dict]], actor: str,
+                        curator_assertion: bool = False, skip_evidence_check: bool = False) -> Proposal:
+        """Validate an edit against the session's draft and describe it. Not stored. `skip_evidence_check` is for the
+        suggestions the service makes itself: the curator who accepts one is the one who decides it."""
         try:
             after = apply_patch(s.draft, ops)
         except PatchError as e:
@@ -209,7 +215,7 @@ class SessionService:
         verified = self._verify_evidence(s, evidence or [])
         if curator_assertion and not verified:
             verified.append(Evidence(quote=reason or 'curator assertion', claim_origin=ClaimOrigin.CURATOR_ASSERTION))
-        if _needs_evidence(ops) and not verified:
+        if _needs_evidence(ops) and not verified and not skip_evidence_check:
             raise ProposalError('this edit changes what a reaction is, so it needs at least one verified '
                                 'quote from the paper, or curator_assertion=true')
         after_keys = {r.key for r in after.reactions}
@@ -219,9 +225,45 @@ class SessionService:
                      evidence=verified, actor=actor)
         if not p.summary:
             raise ProposalError('this edit changes nothing')
+        return p
+
+    @_locked
+    def propose(self, owner: str, session_id: str, ops: List[dict], reason: str = '',
+                evidence: Optional[List[dict]] = None, actor: str = 'chat',
+                curator_assertion: bool = False) -> Proposal:
+        """Validate an edit and hold it for review. Nothing changes until it is accepted."""
+        s = self._ready(owner, session_id)
+        p = self._build_proposal(s, ops, reason, evidence, actor, curator_assertion)
         s.proposals.append(p)
         self.store.save(s)
         return p
+
+    SUGGESTER = 'suggestions'
+
+    def refresh_suggestions(self, s: Session) -> None:
+        """Make the suggested fixes for the draft as it is now, as pending proposals (actor 'suggestions'). A pending one
+        that no longer applies, or no longer fixes anything, is dropped; one the curator already accepted or rejected
+        is not made again."""
+        wanted = make_suggestions(s.draft, s.evidence)
+        same = lambda p, ops: p.ops == ops
+        s.proposals = [p for p in s.proposals
+                       if not (p.actor == self.SUGGESTER and p.status == 'pending' and not any(same(p, w.ops) for w in wanted))]
+        for w in wanted:
+            if any(same(p, w.ops) and p.actor == self.SUGGESTER and p.status in ('pending', 'accepted', 'rejected')
+                   for p in s.proposals):
+                continue
+            try:
+                s.proposals.append(self._build_proposal(s, w.ops, w.reason, None, self.SUGGESTER, skip_evidence_check=True))
+            except ProposalError as e:
+                logger.info('suggestion %s for %s not made: %s', w.code, w.reaction_key, e)
+
+    @_locked
+    def suggest_fixes(self, owner: str, session_id: str) -> List[Proposal]:
+        """(Re)make the suggested fixes and return the pending ones."""
+        s = self._ready(owner, session_id)
+        self.refresh_suggestions(s)
+        self.store.save(s)
+        return [p for p in s.proposals if p.actor == self.SUGGESTER and p.status == 'pending']
 
     def _pending(self, owner: str, session_id: str, proposal_id: str) -> Tuple[Session, Proposal]:
         s = self.store.get(session_id, owner)
@@ -259,6 +301,7 @@ class SessionService:
         self._recheck_existing(s, keys or None)
         p.status, p.decided_by, p.decided_at = 'accepted', owner, time.time()
         s.change_log.append(ChangeLogEntry(actor=owner, action=f'accepted {p.id}', detail='; '.join(p.summary)[:500]))
+        self.refresh_suggestions(s)
         self.store.save(s)
         return s
 
@@ -305,7 +348,8 @@ class SessionService:
             raise ProposalError(f'no reaction with key {reaction_key!r}')
         mine = lambda i: i.source == 'qa' and i.reaction_key == reaction_key
         fresh = [Issue(source='qa', severity=f.severity, code=f.code, message=f.message, reaction_key=reaction_key,
-                       instance_db_id=s.key_to_db_id.get(reaction_key)) for f in result.findings]
+                       instance_db_id=s.key_to_db_id.get(reaction_key))
+                 for f in result.findings if f.code not in AUTO_RULE_CODES]   # those are 'checks' issues already
         _carry_over([i for i in s.issues if mine(i)], fresh, lambda i: (i.code, i.message, i.reaction_key))
         s.issues = iss.assign_ids([i for i in s.issues if not mine(i)] + fresh)
         if result.usage:

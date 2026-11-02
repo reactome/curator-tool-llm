@@ -13,8 +13,13 @@ Rank: because draft participants carry UniProt accessions, matching is on access
   catalyst_match the catalysts share an accession (or neither side has one)
   cites_pmid     the existing event cites this paper
 
-  same     catalyst_match and similarity >= 0.6
+  same     catalyst_match and similarity >= 0.6, AND the draft has substrate accessions of its own (a reaction whose
+           only accessions are its enzyme's, such as a conversion of small molecules, shares nothing but the enzyme
+           with an event that has it as catalyst, so it can only be "similar")
   similar  similarity >= 0.25, or the catalyst matches and the event cites this paper
+
+A reaction about genes or transcripts is not compared at all: those are not identified by UniProt accessions, so only the
+transcription factor would be compared, and every event the factor takes part in would look like a match.
 """
 import logging
 from typing import List, Optional, Sequence, Set, Tuple, Union
@@ -43,6 +48,30 @@ def _accessions(draft: ReactomeDraft, key: str, seen: Optional[Set[str]] = None)
     return out
 
 
+def involves_sequences(draft: ReactomeDraft, reaction, seen: Optional[Set[str]] = None) -> bool:
+    """True if a participant of the reaction (looking inside complexes and sets) is a gene or a transcript."""
+    seen = seen if seen is not None else set()
+
+    def walk(key: str) -> bool:
+        if key in seen or key not in draft.participants:
+            return False
+        seen.add(key)
+        p = draft.participants[key]
+        if isinstance(p, EwasSpec):
+            return p.molecule != 'protein'
+        refs = p.components if isinstance(p, ComplexSpec) else p.members if isinstance(p, DefinedSetSpec) else []
+        return any(walk(k) for k in refs)
+    return any(walk(k) for k in reaction.inputs + reaction.outputs)
+
+
+def substrate_accessions(draft: ReactomeDraft, reaction) -> Set[str]:
+    """Accessions of what the reaction consumes and produces (the catalyst only counts if it is also one of those)."""
+    out: Set[str] = set()
+    for k in reaction.inputs + reaction.outputs:
+        out |= _accessions(draft, k)
+    return out
+
+
 def reaction_accessions(draft: ReactomeDraft, reaction) -> Tuple[Set[str], Set[str]]:
     """(catalyst accessions, all participant accessions incl. catalyst; regulators are not part of identity)."""
     cats = _accessions(draft, reaction.catalyst.entity) if reaction.catalyst else set()
@@ -52,7 +81,7 @@ def reaction_accessions(draft: ReactomeDraft, reaction) -> Tuple[Set[str], Set[s
     return cats, allp
 
 
-def _score(cats: Set[str], allp: Set[str], ev: EventRow, cited: bool) -> Optional[ExistingMatch]:
+def _score(cats: Set[str], allp: Set[str], ev: EventRow, cited: bool, specific: bool = True) -> Optional[ExistingMatch]:
     ev_cats = set(ev.catalysts)
     ev_core = (set(ev.inputs) | set(ev.outputs)) or ev_cats
     core = (allp - cats) or allp
@@ -61,7 +90,7 @@ def _score(cats: Set[str], allp: Set[str], ev: EventRow, cited: bool) -> Optiona
     similarity = len(inter) / len(union) if union else 0.0
     overlap = len(inter) / len(core) if core else 0.0
     cat_match = bool(cats & ev_cats) if (cats or ev_cats) else True
-    if cat_match and similarity >= SAME_SIMILARITY:
+    if cat_match and similarity >= SAME_SIMILARITY and specific:
         level = 'same'
     elif similarity >= SIMILAR_SIMILARITY or (cats & ev_cats and cited):
         level = 'similar'
@@ -73,6 +102,8 @@ def _score(cats: Set[str], allp: Set[str], ev: EventRow, cited: bool) -> Optiona
         reasons.append('same catalyst')
     if cited:
         reasons.append('cites this paper')
+    if not specific:
+        reasons.append('only the enzyme could be compared (the substrates have no UniProt accession)')
     return ExistingMatch(reaction_key='', db_id=ev.db_id, display_name=ev.display_name, st_id=ev.st_id,
                          level=level, score=round(score, 3), similarity=round(similarity, 3), cites_pmid=cited,
                          catalyst_match=cat_match, overlap=round(overlap, 3), reasons=reasons)
@@ -100,7 +131,13 @@ def find_existing(draft: ReactomeDraft, pmid: Union[None, str, Sequence[str]], e
     for r in draft.reactions:
         if only is not None and r.key not in only:
             continue
+        if involves_sequences(draft, r):
+            issues.append(Issue(source='existing', severity='info', code='existing_check_skipped', reaction_key=r.key,
+                                message=f'"{r.name}": it is about genes or transcripts, which UniProt accessions cannot '
+                                        f'identify, so it cannot be compared with existing reactions'))
+            continue
         cats, allp = reaction_accessions(draft, r)
+        specific = bool(substrate_accessions(draft, r))
         if not allp:
             issues.append(Issue(source='existing', severity='info', code='existing_check_skipped', reaction_key=r.key,
                                 message=f'"{r.name}": no participant has a UniProt accession, so it cannot be '
@@ -117,7 +154,7 @@ def find_existing(draft: ReactomeDraft, pmid: Union[None, str, Sequence[str]], e
             cands.setdefault(e.db_id, e)
         scored = []
         for e in cands.values():
-            m = _score(cats, allp, e, e.db_id in cited_ids)
+            m = _score(cats, allp, e, e.db_id in cited_ids, specific)
             if m:
                 m.reaction_key = r.key
                 scored.append(m)
