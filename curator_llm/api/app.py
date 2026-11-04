@@ -18,6 +18,7 @@ from curator_llm.ports.jobs import JobRunner
 from curator_llm.ports.pipeline import PaperRef, Pipeline, PipelineInput
 from curator_llm.ports.sessions import SessionStore
 from curator_llm.services.network import build_network
+from curator_llm.services import issues as iss
 from curator_llm.services.session_service import ProposalError, SessionService
 
 
@@ -31,6 +32,14 @@ def current_user(request: Request) -> AuthUser:
         raise HTTPException(403, str(e))
     except AuthError as e:
         raise HTTPException(401, str(e))
+
+
+def equation(draft, r) -> str:
+    """'CDK1:Cyclin B -> CDK1(pTyr15):Cyclin B (catalyst WEE1)': tells apart reactions that share a name."""
+    name = lambda k: draft.participants[k].name if k in draft.participants else k
+    side = lambda keys: ' + '.join(name(k) for k in keys) or 'nothing'
+    cat = f' (catalyst {name(r.catalyst.entity)})' if r.catalyst else ''
+    return f'{side(r.inputs)} -> {side(r.outputs)}{cat}'
 
 
 class StartRequest(BaseModel):
@@ -189,11 +198,12 @@ def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: O
     def get_session(session_id: str, user: AuthUser = Depends(current_user)):
         s = load(session_id, user)
         out = SessionSummary.of(s).model_dump()
-        out.update({'focus': s.focus, 'error': s.error,
+        out.update({'focus': s.focus, 'error': s.error, 'qa': {k: v.model_dump() for k, v in s.qa.items()},
                     'papers': [p.model_dump() for p in s.papers] or [
                         PaperInfo(source=s.source, kind='pmid' if s.pmid else 'pdf', pmid=s.pmid, name=s.source).model_dump()],
                     'reactions': [{'key': r.key, 'name': r.name, 'dbId': s.key_to_db_id.get(r.key),
-                                   'evidenceIds': r.evidence_ids} for r in (s.draft.reactions if s.draft else [])]})
+                                   'evidenceIds': r.evidence_ids, 'equation': equation(s.draft, r)}
+                                  for r in (s.draft.reactions if s.draft else [])]})
         return out
 
     @router.get('/sessions/{session_id}/issues')
@@ -211,6 +221,7 @@ def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: O
         if issue is None:
             raise HTTPException(404, 'no such issue')
         issue.status = body.status
+        iss.organize(s.issues, s.draft, s.proposals)          # deciding to keep a reaction lists its other issues again
         svc().store.save(s)
         return issue
 

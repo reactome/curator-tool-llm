@@ -34,6 +34,8 @@ class QAResult(BaseModel):
     findings: List[QAFinding] = Field(default_factory=list)
     llm_used: bool = False
     usage: Optional[Dict[str, int]] = None   # tokens the model review spent, when it ran
+    is_reaction: Optional[bool] = None       # the model's answer to "is this a molecular reaction at all" (None: not asked)
+    not_reaction_reason: Optional[str] = None
 
 
 def _state(draft: ReactomeDraft, key: str):
@@ -207,11 +209,16 @@ QA_SYSTEM = """You are a senior Reactome curator reviewing ONE reaction of a dra
 what to fix. Judge only what the reaction and its quotes support. Check: is the catalyst really the enzyme that performs
 the reaction (others are regulators); are consumed and produced entities in the right modification state; does the
 summation claim more than the quotes show; is a regulator's condition recorded; is ortholog or cited evidence presented
-as if shown here. First of all: is it a molecular reaction at all? A cell-level outcome (arrest, a longer phase, death,
-drug sensitivity), a structural contact inside a complex (a hydrogen bond), a hypothesis or model prediction, the reason
-for an experimental step ("X was added to prevent Y"), an event of a tool (a degron, a reporter), or a negative result
-is not: give an "action" finding saying the reaction should be removed, and why.
-Reply with ONLY a JSON object: {"verdict": "ok" | "needs_work", "score": <0-1>, "summary": "<one sentence>",
+as if shown here.
+
+First of all decide whether it is a molecular reaction at all, and answer in "is_reaction". It is NOT one (false) when it
+is a cell-level outcome (arrest, a longer phase, death, drug sensitivity), a structural contact inside a complex (a
+hydrogen bond), a hypothesis or model prediction, the reason for an experimental step ("X was added to prevent Y"), an
+event of a tool (a degron, a reporter), or a negative result; then give the reason in "not_reaction_reason" (one
+sentence) and list NO findings, since the curator will first decide whether to keep it. A real reaction with problems
+(a wrong catalyst, a missing quote, a regulator to remove) IS a reaction: true, with findings.
+Reply with ONLY a JSON object: {"is_reaction": true | false, "not_reaction_reason": "<one sentence, or null>",
+"verdict": "ok" | "needs_work", "score": <0-1>, "summary": "<one sentence>",
 "findings": [{"severity": "info" | "warning" | "action", "message": "...", "field": "<field or null>"}]}.
 
 Report PROBLEMS only. Never say what is correct, reasonable or acceptable, and do not restate the reaction: if nothing is
@@ -257,7 +264,11 @@ def parse_llm_review(text: str) -> Dict[str, Any]:
                                       field=f.get('field') or None, source='llm'))
     score = d.get('score')
     summary = d.get('summary')
-    return {'verdict': d.get('verdict') if d.get('verdict') in ('ok', 'needs_work') else None,
+    is_reaction = d.get('is_reaction') if isinstance(d.get('is_reaction'), bool) else None
+    why = d.get('not_reaction_reason')
+    return {'is_reaction': is_reaction,
+            'not_reaction_reason': str(why).strip()[:400] if is_reaction is False and isinstance(why, str) and why.strip() else None,
+            'verdict': d.get('verdict') if d.get('verdict') in ('ok', 'needs_work') else None,
             'score': float(score) if isinstance(score, (int, float)) and 0 <= score <= 1 else None,
             'summary': str(summary).strip()[:300] if isinstance(summary, str) and summary.strip() else None,
             'findings': findings}
@@ -292,7 +303,7 @@ def qa_reaction(draft: ReactomeDraft, reaction_key: str, evidence: List[Evidence
         raise KeyError(reaction_key)
     ev = {e.id: e for e in evidence}
     findings = rule_findings(draft, r, ev, reviews)
-    score, verdict_llm, summary, used, spent = None, None, None, False, None
+    score, verdict_llm, summary, used, spent, is_reaction, why = None, None, None, False, None, None, None
     if model is not None:
         try:
             turn = model.turn(QA_SYSTEM, [{'role': 'user', 'content': _llm_prompt(draft, r, ev, findings)}], [], lambda t: None)
@@ -303,10 +314,15 @@ def qa_reaction(draft: ReactomeDraft, reaction_key: str, evidence: List[Evidence
             rev = parse_llm_review(turn.text)
             findings += sorted(rev['findings'], key=lambda f: _SEVERITY_RANK[f.severity])[:MAX_LLM_FINDINGS]
             score, verdict_llm, summary, used = rev['score'], rev['verdict'], rev['summary'], True
+            is_reaction, why = rev['is_reaction'], rev['not_reaction_reason']
+            if is_reaction is False:              # nothing else matters until the curator decides to keep it
+                findings = [f for f in findings if f.source != 'llm']
+                summary = summary or why
         except Exception as e:                                   # the rule findings still stand
             findings.append(QAFinding(severity='info', code='qa_llm_unavailable',
                                       message=f'the LLM review could not be completed ({type(e).__name__})'))
-    needs = any(f.severity == 'action' for f in findings) or verdict_llm == 'needs_work'
+    needs = any(f.severity == 'action' for f in findings) or verdict_llm == 'needs_work' or is_reaction is False
     findings.sort(key=lambda f: _SEVERITY_RANK[f.severity])             # stable: most serious first, rules before the LLM
     return QAResult(reaction_key=reaction_key, reaction_name=r.name, verdict='needs_work' if needs else 'ok', score=score, summary=summary,
-                    priority=priority_of(findings, verdict_llm), findings=findings, llm_used=used, usage=spent)
+                    priority='fix_first' if is_reaction is False else priority_of(findings, verdict_llm),
+                    findings=findings, llm_used=used, usage=spent, is_reaction=is_reaction, not_reaction_reason=why)

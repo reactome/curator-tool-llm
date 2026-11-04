@@ -4,7 +4,7 @@ a problem that needs judgement (an invented state, two related reactions that mi
 species) is left to the curator.
 """
 from dataclasses import dataclass
-from typing import Collection, Dict, List
+from typing import Collection, Dict, Iterable, List
 
 from curator_llm.models.evidence import Evidence
 from curator_llm.models.reactome import ReactomeDraft
@@ -64,27 +64,38 @@ def remove_reaction_ops(draft: ReactomeDraft, key: str) -> List[dict]:
     return ops + [{'op': 'remove', 'path': f'/reactions/{key}'}]
 
 
-# the automatic checks (services/qa.py) whose finding leaves one clear fix: the reaction has no direct evidence
+# the automatic checks (services/qa.py) that question whether a reaction should exist: no quote shows it as a result of
+# this paper. Removing it is the fix on offer; the curator decides (keeping it means finding the sentence that shows it).
 _REMOVE_FOR = {
     'qa_only_cited': 'every quote states earlier work, not a result of this paper (Reactome needs direct evidence)',
     'qa_negative_only': 'every quote reports a negative or negligible result, which does not show the reaction happens',
+    'qa_hedged_only': 'every quote stating it is hedged (a hypothesis, "may", "suggests"), not shown as a result',
+    'qa_methods_only': 'every quote comes from Methods or describes a figure panel; none states it as a result',
 }
 
 
-def _unsupported(draft: ReactomeDraft, evidence: Dict[str, Evidence], reviews: Collection[str]) -> List[Suggestion]:
+def _unsupported(draft: ReactomeDraft, evidence: Dict[str, Evidence], reviews: Collection[str],
+                 issues: Iterable = ()) -> List[Suggestion]:
     from curator_llm.services.qa import rule_findings          # qa imports nothing from here; kept local all the same
+    # the QA review's "not a molecular reaction" answer, while the curator has not dismissed it
+    not_reaction = {i.reaction_key: i.message for i in issues
+                    if getattr(i, 'code', None) == 'qa_not_a_reaction' and i.status == 'open'}
     out = []
     for r in draft.reactions:
         why = [_REMOVE_FOR[f.code] for f in rule_findings(draft, r, evidence, reviews) if f.code in _REMOVE_FOR]
+        if r.key in not_reaction:
+            why.append(not_reaction[r.key].replace('not a molecular reaction: ', 'the QA review finds it is not a molecular reaction: ', 1))
         if why:
             out.append(Suggestion(r.key, 'remove_reaction', f'remove "{r.name}": {"; ".join(why)}',
                                   remove_reaction_ops(draft, r.key)))
     return out
 
 
-def suggest_fixes(draft: ReactomeDraft, evidence: List[Evidence], reviews: Collection[str] = ()) -> List[Suggestion]:
-    """`reviews`: source tags of the papers that are review articles (their cited statements are evidence)."""
+def suggest_fixes(draft: ReactomeDraft, evidence: List[Evidence], reviews: Collection[str] = (),
+                  issues: Iterable = ()) -> List[Suggestion]:
+    """`reviews`: source tags of the papers that are review articles (their cited statements are evidence). `issues`: the
+    session's issues, for the QA review's open "not a molecular reaction" findings."""
     by_id = {e.id: e for e in evidence}
-    removed = _unsupported(draft, by_id, reviews)
+    removed = _unsupported(draft, by_id, reviews, list(issues))
     gone = {s.reaction_key for s in removed}               # no point fixing the inputs of a reaction to be removed
     return removed + [s for s in _enzyme_as_input(draft) + _missing_pmids(draft, by_id) if s.reaction_key not in gone]

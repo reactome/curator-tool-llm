@@ -8,7 +8,7 @@ import time
 from typing import Callable, Dict, List, Optional, Tuple
 
 from curator_llm.models.evidence import ClaimOrigin, Evidence, Verification
-from curator_llm.models.session import ChangeLogEntry, Issue, PaperInfo, Proposal, Session
+from curator_llm.models.session import ChangeLogEntry, Issue, PaperInfo, Proposal, ReactionQA, Session
 from curator_llm.models.usage import UsageEntry
 from curator_llm.ports.jobs import JobRunner
 from curator_llm.ports.pipeline import PaperRef, Pipeline, PipelineInput
@@ -154,6 +154,7 @@ class SessionService:
             results = list(pool.map(lambda k: qa_reaction(s.draft, k, s.evidence, model, reviews), keys))
         for res in results:
             SessionService._merge_qa(s, res, model)
+        iss.organize(s.issues, s.draft, s.proposals)
         return rank_results(results)
 
     @staticmethod
@@ -161,7 +162,11 @@ class SessionService:
         """Re-emit instances from the draft and rebuild the issue list. Emitter issues are replaced on every
         refresh; issues that recur keep the id and status they had."""
         key = lambda i: (i.code, i.message, i.reaction_key, i.participant_key)
-        kept = [i for i in s.issues if i.source not in ('emitter', 'checks')]
+        alive = {r.key for r in s.draft.reactions}
+        for k in [k for k in s.qa if k not in alive]:              # a removed reaction takes its QA with it
+            del s.qa[k]
+        kept = [i for i in s.issues if i.source not in ('emitter', 'checks')
+                and (i.reaction_key is None or i.reaction_key in alive)]
         emit = emit_user_instances(s.draft, {e.id: e for e in s.evidence})
         s.user_instances, s.evidence_links, s.key_to_db_id = emit.user_instances, emit.evidence_links, emit.key_to_db_id
         have = {(i.code, i.participant_key) for i in kept}
@@ -169,9 +174,18 @@ class SessionService:
         merged += iss.issues_from_notes('emitter', emit.warnings)
         merged += [Issue(source='checks', severity=f.severity, code=f.code, message=f.message, reaction_key=k)
                    for k, f in auto_findings(s.draft, s.evidence, SessionService.reviews_of(s))]
+        if not SessionService._has_pmid(s) and any(not r.pmids for r in s.draft.reactions):
+            merged.append(Issue(source='checks', severity='warning', code='paper_no_pmid',
+                                message='the paper has no PubMed ID, so no reaction has a literature reference: add it to '
+                                        'the reactions once the paper is in PubMed'))
         iss.link_to_instances(merged, emit.key_to_db_id, emit.participant_to_db_id)
         _carry_over(s.issues, merged, key)
         s.issues = iss.assign_ids(merged)
+        iss.organize(s.issues, s.draft, s.proposals)
+
+    @staticmethod
+    def _has_pmid(s: Session) -> bool:
+        return bool(s.pmid or any(p.pmid for p in s.papers))
 
     # ── proposals ──────────────────────────────────────────────────────────
     @staticmethod
@@ -271,7 +285,7 @@ class SessionService:
         """Make the suggested fixes for the draft as it is now, as pending proposals (actor 'suggestions'). A pending one
         that no longer applies, or no longer fixes anything, is dropped; one the curator already accepted or rejected
         is not made again."""
-        wanted = make_suggestions(s.draft, s.evidence, self.reviews_of(s))
+        wanted = make_suggestions(s.draft, s.evidence, self.reviews_of(s), s.issues)
         same = lambda p, ops: p.ops == ops
         s.proposals = [p for p in s.proposals
                        if not (p.actor == self.SUGGESTER and p.status == 'pending' and not any(same(p, w.ops) for w in wanted))]
@@ -283,6 +297,7 @@ class SessionService:
                 s.proposals.append(self._build_proposal(s, w.ops, w.reason, None, self.SUGGESTER, skip_evidence_check=True))
             except ProposalError as e:
                 logger.info('suggestion %s for %s not made: %s', w.code, w.reaction_key, e)
+        iss.organize(s.issues, s.draft, s.proposals)
 
     @_locked
     def suggest_fixes(self, owner: str, session_id: str) -> List[Proposal]:
@@ -373,6 +388,7 @@ class SessionService:
         if not any(r.key == result.reaction_key for r in s.draft.reactions):
             raise ProposalError(f'no reaction with key {result.reaction_key!r}')
         self._merge_qa(s, result, model, actor=owner)
+        self.refresh_suggestions(s)                       # a reaction found not to be one gets a suggestion to remove it
         self.store.save(s)
         return result
 
@@ -381,9 +397,17 @@ class SessionService:
         """Replace the reaction's QA issues with this result's (ids and statuses of recurring ones kept)."""
         reaction_key = result.reaction_key
         mine = lambda i: i.source == 'qa' and i.reaction_key == reaction_key
+        no_pmid = not SessionService._has_pmid(s)            # then 'paper_no_pmid' says it once, not per reaction
         fresh = [Issue(source='qa', severity=f.severity, code=f.code, message=f.message, reaction_key=reaction_key,
-                       instance_db_id=s.key_to_db_id.get(reaction_key))
-                 for f in result.findings if f.code not in AUTO_RULE_CODES]   # those are 'checks' issues already
+                       instance_db_id=s.key_to_db_id.get(reaction_key), field=f.field)
+                 for f in result.findings if f.code not in AUTO_RULE_CODES   # those are 'checks' issues already
+                 and not (no_pmid and f.code == 'qa_no_literature_reference')]
+        if result.is_reaction is False:
+            fresh.insert(0, Issue(source='qa', severity='action', code='qa_not_a_reaction', reaction_key=reaction_key,
+                                  instance_db_id=s.key_to_db_id.get(reaction_key),
+                                  message='not a molecular reaction: ' + (result.not_reaction_reason or 'see the QA summary')))
+        s.qa[reaction_key] = ReactionQA(priority=result.priority, summary=result.summary, score=result.score,
+                                        is_reaction=result.is_reaction)
         _carry_over([i for i in s.issues if mine(i)], fresh, lambda i: (i.code, i.message, i.reaction_key))
         s.issues = iss.assign_ids([i for i in s.issues if not mine(i)] + fresh)
         if result.usage:

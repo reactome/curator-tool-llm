@@ -90,3 +90,104 @@ def link_to_instances(issues: List[Issue], key_to_db_id: Dict[str, int],
         elif i.participant_key and participant_db_ids and i.participant_key in participant_db_ids:
             i.instance_db_id = participant_db_ids[i.participant_key]
     return issues
+
+
+# ── organizing the list for a curator ──────────────────────────────────────
+# A draft gets hundreds of issues (291 on one 30-reaction paper), most of them on reactions that should not exist at
+# all. So: decide first whether each such reaction stays ("keep"), list the rest grouped by kind, and hold back the
+# issues of a reaction that waits on that decision (they are moot if it goes).
+# "should this reaction stay": not a molecular reaction, or no quote shows it as a result of this paper
+KEEP_CODES = frozenset({'qa_not_a_reaction', 'qa_only_cited', 'qa_negative_only', 'qa_hedged_only', 'qa_methods_only'})
+_IDENTIFIER_PREFIXES = ('needs_resolution', 'uniprot', 'chebi', 'new_reference_entity', 'go_', 'compartment_',
+                        'psimod_', 'duplicate_entities')
+_EVIDENCE_CODES = frozenset({'qa_no_evidence', 'qa_only_assertion',
+                             'qa_fuzzy_evidence', 'qa_non_human_evidence', 'qa_no_summation',
+                             'qa_no_literature_reference', 'quote_rejected', 'qa_unsupported_catalyst',
+                             'qa_unsupported_regulation', 'paper_no_pmid'})
+_EVIDENCE_FIELDS = ('evidence', 'summation', 'pmids', 'literature')
+CATEGORY_ORDER = ('keep', 'existing', 'content', 'identifiers', 'evidence', 'paper', 'other')
+
+
+def categorize(i: Issue) -> str:
+    c = i.code
+    if c in KEEP_CODES:
+        return 'keep'
+    if c.startswith('existing') or i.source == 'existing':
+        return 'existing'
+    if c.startswith(_IDENTIFIER_PREFIXES) or (i.source == 'resolver' and c == 'note'):
+        return 'identifiers'
+    if c in _EVIDENCE_CODES or (c == 'qa_llm' and (i.field or '').split('[')[0] in _EVIDENCE_FIELDS):
+        return 'evidence'
+    if i.source == 'pipeline' or c.startswith('paper_') or c == 'cited_only_left_out':
+        return 'paper'
+    if c.startswith('qa_') or i.source in ('builder', 'emitter', 'checks'):
+        return 'content'
+    return 'other'
+
+
+def _participant_of(message: str, names: Dict[str, str]) -> Optional[str]:
+    """The participant a "NAME: ..." note is about (the resolver's and emitter's notes start that way): the longest
+    participant name the message starts with, followed by a colon."""
+    best = None
+    for name, key in names.items():
+        if name and message.startswith(name + ':') and (best is None or len(name) > len(best[0])):
+            best = (name, key)
+    return best[1] if best else None
+
+
+def organize(issues: List[Issue], draft: Optional[ReactomeDraft], proposals: Iterable = ()) -> None:
+    """Fill category, blocked_by and proposal_id on every issue (in place); link an entity note to its participant."""
+    keep: Dict[str, str] = {}
+    for i in issues:
+        i.category = categorize(i)
+        if i.category == 'keep' and i.status == 'open' and i.reaction_key and i.reaction_key not in keep:
+            keep[i.reaction_key] = i.id
+    used_by: Dict[str, set] = {}
+    names: Dict[str, str] = {}
+    if draft is not None:
+        names = {p.name: k for k, p in draft.participants.items()}
+
+        def within(k: str, seen: set):
+            if k in seen or k not in draft.participants:
+                return
+            seen.add(k)
+            p = draft.participants[k]
+            for x in list(getattr(p, 'components', []) or []) + list(getattr(p, 'members', []) or []):
+                within(x, seen)
+        for r in draft.reactions:
+            seen: set = set()
+            for k in r.inputs + r.outputs + [g.regulator for g in r.regulations] + ([r.catalyst.entity] if r.catalyst else []):
+                within(k, seen)
+            for k in seen:
+                used_by.setdefault(k, set()).add(r.key)
+    for i in issues:
+        i.blocked_by = None
+        if i.participant_key is None and i.reaction_key is None and names:
+            i.participant_key = _participant_of(i.message, names)
+        if i.category == 'keep':
+            continue
+        if i.code == 'qa_possible_duplicate':      # helps decide which of two look-alikes to keep: never held back
+            continue
+        if i.reaction_key:
+            i.blocked_by = keep.get(i.reaction_key)
+        elif i.participant_key and used_by.get(i.participant_key):
+            rs = used_by[i.participant_key]
+            if all(r in keep for r in rs):                  # every reaction using the entity waits on a decision
+                i.blocked_by = keep[sorted(rs)[0]]
+    # a pending suggested fix that resolves the issue: a reaction's removal resolves its keep issues
+    fix: Dict[tuple, str] = {}
+    for p in proposals:
+        if getattr(p, 'actor', None) != 'suggestions' or getattr(p, 'status', None) != 'pending':
+            continue
+        for op in p.ops:
+            path = op.get('path', '')
+            parts = path.strip('/').split('/')
+            if op.get('op') == 'remove' and len(parts) == 2 and parts[0] == 'reactions':
+                fix[(parts[1], 'keep')] = p.id
+            elif op.get('op') == 'remove' and len(parts) == 4 and parts[0] == 'reactions' and parts[2] == 'inputs':
+                fix[(parts[1], 'qa_catalyst_is_consumed')] = p.id
+            elif op.get('op') == 'replace' and len(parts) == 3 and parts[0] == 'reactions' and parts[2] == 'pmids':
+                fix[(parts[1], 'qa_no_literature_reference')] = p.id
+    for i in issues:
+        i.proposal_id = (fix.get((i.reaction_key, 'keep')) if i.category == 'keep'
+                         else fix.get((i.reaction_key, i.code))) if i.reaction_key else None
