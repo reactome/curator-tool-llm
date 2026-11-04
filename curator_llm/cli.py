@@ -118,7 +118,7 @@ def annotate(name: str, refs: List[PaperRef], focus: Optional[str], out_dir: str
         say(f'[{name}] FAILED: {type(e).__name__}: {e}')
         return False
     papers = [PaperInfo(source=r.source, kind='pmid' if r.pmid else 'pdf', pmid=r.pmid,
-                        name=r.label or (r.pmid if r.pmid else r.source)) for r in refs]
+                        name=r.label or (r.pmid if r.pmid else r.source), review=r.review) for r in refs]
     s = Session(owner='local', pmid=next((r.pmid for r in refs if r.pmid), None), focus=focus, papers=papers,
                 source=SessionService._source_label(papers), draft=result.draft, evidence=list(result.evidence),
                 issues=list(result.issues), existing=list(result.existing), usage=list(result.usage),
@@ -157,6 +157,10 @@ def main(argv: Optional[List[str]] = None, pipeline=None, say: Callable[[str], N
     ap.add_argument('--name', metavar='NAME', help='file name prefix of the merged result (default papers-<date and time>)')
     ap.add_argument('--separate', action='store_true', help='annotate each paper on its own instead of one merged draft')
     ap.add_argument('--force', action='store_true', help='run again even if the results already exist')
+    ap.add_argument('--review', action='store_true',
+                    help='the papers are review articles: keep reactions they only cite from earlier work (by default a '
+                         'paper is research, and only reactions its own results show are kept; Reactome needs direct '
+                         'evidence. What is left out is listed in the issues)')
     args = ap.parse_args(argv)
     try:
         pdfs, ids = collect_papers(args.paths, args.pmid + args.pmids, args.pmid_file)
@@ -165,13 +169,16 @@ def main(argv: Optional[List[str]] = None, pipeline=None, say: Callable[[str], N
     except UsageError as e:
         print(f'error: {e}', file=sys.stderr)
         return 2
-    refs = [PaperRef(pdf_path=p, label=os.path.basename(p)) for p in pdfs] + [PaperRef(pmid=i) for i in ids]
+    refs = ([PaperRef(pdf_path=p, label=os.path.basename(p), review=args.review) for p in pdfs]
+            + [PaperRef(pmid=i, review=args.review) for i in ids])
     if pipeline is None:
         from curator_llm.wiring import build_pipeline, load_env
         load_env()
         pipeline, _ = build_pipeline()
     done, failed = 0, []
-    if args.separate or len(refs) == 1:
+    if len(refs) == 1 and args.name:
+        jobs = [(args.name, refs)]
+    elif args.separate or len(refs) == 1:
         jobs = [((os.path.splitext(r.label)[0] if r.pdf_path else f'pmid-{r.pmid}'), [r]) for r in refs]
     else:
         jobs = [(args.name or f'papers-{time.strftime("%Y%m%d-%H%M%S")}', refs)]

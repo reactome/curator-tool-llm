@@ -188,8 +188,18 @@ class SubprocessExtractor:
             return None
         return proc
 
+    def _cited_note(self, extraction_path: str) -> Optional[str]:
+        """What run_extraction left out of a research paper as only cited from earlier work, as a note for the curator
+        (None when nothing was)."""
+        left_out = self._read(extraction_path[:-len('_extraction.json')] + '_cited_only.json')
+        if not left_out:
+            return None
+        names = '; '.join((r.get('annotation_result') or {}).get('name', '') for r in left_out)
+        return (f'left out {len(left_out)} reaction(s) the paper only cites from earlier work (Reactome needs direct '
+                f'evidence; annotate it as a review article to keep them): {names}')
+
     def extract(self, pmid: Optional[str], pdf_path: Optional[str], gene: str,
-                report: Optional[Callable[[str], None]] = None) -> ExtractionResult:
+                report: Optional[Callable[[str], None]] = None, review: bool = False) -> ExtractionResult:
         res = ExtractionResult()
         if not pmid and not pdf_path:
             res.error = 'need a pmid or a pdf'
@@ -201,14 +211,18 @@ class SubprocessExtractor:
         res.extraction_path = os.path.join(self.results_dir, f'{label}_extraction.json')
         py = sys.executable
         with _lock_for(label):
-            cmd = [py, 'run_extraction.py', spec, '--gene', gene, '--overwrite'] + (['--tag', tag] if tag else [])
+            cmd = ([py, 'run_extraction.py', spec, '--gene', gene, '--overwrite'] + (['--tag', tag] if tag else [])
+                   + (['--review'] if review else []))
             if self._step('extraction', cmd, res, report) is None:
                 return res
             extracted = self._read(res.extraction_path)
             res.n_extracted = len(extracted)
+            cited = self._cited_note(res.extraction_path)
             if not extracted:
-                res.error = 'extraction found no reactions'
+                res.error = 'extraction found no reactions' + (f' the paper shows itself; {cited}' if cited else '')
                 return res
+            if cited:
+                res.warnings.append(cited)
             res.reactions = extracted                      # fallback if merge fails
             res.merged_path = os.path.join(self.results_dir, f'{label}_merged.json')   # what run_merge writes
             err_before = res.error
@@ -266,13 +280,17 @@ class SubprocessExtractor:
             label = f'{self._output_stem(spec, gene)}_{tag}' if tag else self._output_stem(spec, gene)
             sub.extraction_path = os.path.join(self.results_dir, f'{label}_extraction.json')
             with _lock_for(label):
-                cmd = [sys.executable, 'run_extraction.py', spec, '--gene', gene, '--overwrite'] + (['--tag', tag] if tag else [])
+                cmd = ([sys.executable, 'run_extraction.py', spec, '--gene', gene, '--overwrite']
+                       + (['--tag', tag] if tag else []) + (['--review'] if getattr(ref, 'review', False) else []))
                 if self._step('extraction', cmd, sub, lambda m, k=k: say(k, m)) is None:
                     return sub
                 sub.reactions = self._read(sub.extraction_path)
                 sub.n_extracted = len(sub.reactions)
+                cited = self._cited_note(sub.extraction_path)
                 if not sub.reactions:
-                    sub.error = 'extraction found no reactions'
+                    sub.error = 'extraction found no reactions' + (f' the paper shows itself; {cited}' if cited else '')
+                elif cited:
+                    sub.warnings.append(f'{ref.label or ref.source}: {cited}')
             return sub
 
         with ThreadPoolExecutor(max_workers=min(self.paper_workers, n)) as pool:
@@ -284,6 +302,7 @@ class SubprocessExtractor:
             for step, counts in sub.step_usage.items():
                 res.step_usage[step] = _add(res.step_usage.get(step, {}), counts)
             res.n_extracted += sub.n_extracted
+            res.warnings += sub.warnings
             if sub.error or not sub.reactions:
                 res.warnings.append(f'{ref.label or ref.source}: skipped, {sub.error or "no reactions"}')
             else:

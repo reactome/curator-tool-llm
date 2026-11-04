@@ -59,17 +59,22 @@ class DefaultPipeline:
         return result
 
     def _extract(self, spec: PipelineInput, gene: str, report: Callable[[str], None]):
-        """Run the extractor, passing `report` along when it takes one (a custom Extractor may not)."""
+        """Run the extractor, passing `report` (and, for one paper, `review`) along when it takes them (a custom Extractor
+        may not)."""
         refs = spec.refs()
         method = self.extractor.extract if len(refs) == 1 else getattr(self.extractor, 'extract_many', None)
         if method is None:
             raise ValueError('this extractor handles one paper at a time')
         try:
-            takes_report = 'report' in inspect.signature(method).parameters
+            params = inspect.signature(method).parameters
         except (TypeError, ValueError):
-            takes_report = False
-        args = (refs[0].pmid, refs[0].pdf_path, gene) if len(refs) == 1 else (refs, gene)
-        return method(*args, report=report) if takes_report else method(*args)
+            params = {}
+        kw = {'report': report} if 'report' in params else {}
+        if len(refs) == 1:
+            if 'review' in params:                    # extract_many reads it from each PaperRef instead
+                kw['review'] = refs[0].review
+            return method(refs[0].pmid, refs[0].pdf_path, gene, **kw)
+        return method(refs, gene, **kw)
 
     @staticmethod
     def _paper_loader(spec: PipelineInput):

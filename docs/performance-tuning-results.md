@@ -183,6 +183,31 @@ Reading it:
   expression" reactions whose target genes are never named in the text (likely a supplementary table). Paper 32448362
   needs SMAD complexes the extraction never saw. No setting change recovers these.
 
+### 7a. Direct evidence, extraction exclusions and site-aware merging (2026-11)
+
+Changes: research papers drop reactions whose every quote is `cited` (`services/direct_evidence.py`; reviews keep them,
+`--review`); the extraction prompt excludes hypotheses/model predictions, cell-level outcomes, intra-complex structural
+contacts and tool-only events, and gives a modification site only to the enzyme its sentence names; the merge judge
+treats fewer named sites as less detail. Same 8 papers, the 2 reviews run with `--review` (`ground_truth_eval.py run ...
+--only gtv2`), compared with the stored new-defaults run:
+
+| Setting | Recall (all 8) | Research recall | Entity recall | Reactions (research) |
+|---|---|---|---|---|
+| new defaults (before) | 41/61 | 29/41 | 78% | 91 |
+| **2026-11 changes** | **41/61** | **29/41** | 77% | 86 |
+
+- Recall is the same on every paper. One curated entity fewer was named (24368734: 11/13 vs 12/13), where extraction
+  went from 37 to 23 records and the merge folded them to 11 reactions (was 23).
+- The cited-only filter left out ONE reaction across the six research papers: these are extracted from a tagged Results
+  section, which cites little. It matters for papers read whole (no tagged Results, e.g. the Nature WEE1/CDH1 PDF):
+  there it left out 7 of the reactions, all background stated with references.
+- WEE1/CDH1 PDF (whole paper, 121 chunks): 42 reactions before, 31 after. Gone: the WEE1-at-Thr129 record (a site the
+  text gives to mTOR), the model hypotheses, cell-level outcomes and the degron artefact; site lists no longer split
+  the CDH1 phosphorylation. Still wrong: CDH1 phosphorylation is 3 reactions (the in-vitro N186 fragment and the
+  Xenopus ortholog were kept as named and judged different participants); a quote carrying "(ref. 43)" was tagged
+  `this_paper`; hydrogen-bond records, a hedged Discussion sentence and two figure-legend-only "results" (one the paper
+  contradicts) were still extracted despite the prompt rules.
+
 ## 8. Bugs found along the way
 
 - **Section lookup returned empty replies** for papers without a standard Results heading: thinking used up the tiny

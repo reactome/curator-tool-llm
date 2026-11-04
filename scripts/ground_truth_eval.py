@@ -4,6 +4,7 @@ For each PMID: fetch the curated human reactions that cite it from the Reactome 
 and merge in several configurations, and score each result against the curated reactions.
 
   python scripts/ground_truth_eval.py run   PMID [PMID ...]   # extraction + merge for every configuration (resumable)
+  python scripts/ground_truth_eval.py run   PMID ... --only gtv2   # just one extraction configuration and its merges
   python scripts/ground_truth_eval.py score PMID [PMID ...]   # table of scores
 
 Scoring is deliberately lenient and name-based (curated names are symbols, papers use common names, so every alias of
@@ -33,13 +34,19 @@ EXTRACTION = {
     'gtleg': {'EXTRACT_WORKERS': '1', 'LLM_THINKING_EXTRACTION': 'on'},     # the original: serial, thinking on
     'gtdef': {},                                                            # the new defaults
     'gt55': {'LLM_MODEL_EXTRACTION': 'claude-sonnet-5-5', 'LLM_THINKING_EXTRACTION': 'on'},
+    # direct evidence (cited-only reactions left out of research papers), no hypotheses/phenotypes, site attribution,
+    # and the merge judge treating fewer named sites as less detail (2026-11)
+    'gtv2': {},
 }
+# review articles: extracted with --review (they keep the reactions they only cite); every other PMID is research
+REVIEWS = {'23256519', '25670789'}
 # merge configurations: variant -> (extra args, environment, which extraction tags it runs on)
 MERGE = {
     'orig': (['--no-prefilter'], {'MERGE_THINKING': 'on'}, ['gtleg']),      # the original merge
     'new': ([], {}, ['gtleg', 'gtdef', 'gt55']),
     'nopf': (['--no-prefilter'], {}, ['gtdef']),
     'think': ([], {'MERGE_THINKING': 'on'}, ['gtdef']),
+    'v2': ([], {}, ['gtv2']),
 }
 
 
@@ -159,19 +166,21 @@ def sh(cmd, env, log):
         return subprocess.run(cmd, cwd=ROOT, env=e, stdout=f, stderr=subprocess.STDOUT).returncode
 
 
-def run(pmids):
+def run(pmids, only=None):
     from concurrent.futures import ThreadPoolExecutor
     jobs = []
     for pmid in pmids:
         for tag, env in EXTRACTION.items():
-            jobs.append((pmid, tag, env))
+            if only is None or tag == only:
+                jobs.append((pmid, tag, env))
 
     def extract(job):
         pmid, tag, env = job
         out = extraction_path(pmid, tag)
         if os.path.exists(out) and os.path.getsize(out) > 2:
             return
-        sh([sys.executable, 'run_extraction.py', str(pmid), '--gene', GENE, '--tag', tag, '--overwrite'], env,
+        review = ['--review'] if tag == 'gtv2' and str(pmid) in REVIEWS else []    # earlier tags predate the filter
+        sh([sys.executable, 'run_extraction.py', str(pmid), '--gene', GENE, '--tag', tag, '--overwrite'] + review, env,
            f'/tmp/gt_{pmid}_{tag}.log')
         print(f'extracted {pmid} {tag}: {"ok" if os.path.exists(out) else "NO OUTPUT"}', flush=True)
 
@@ -188,6 +197,8 @@ def run(pmids):
     for pmid in pmids:
         for variant, (args, env, tags) in MERGE.items():
             for tag in tags:
+                if only is not None and tag != only:
+                    continue
                 src, dst = extraction_path(pmid, tag), merged_path(pmid, tag, variant)
                 if not os.path.exists(src) or (os.path.exists(dst) and os.path.getsize(dst) > 2):
                     continue
@@ -202,7 +213,8 @@ def report(pmids):
             ('NEW DEFAULTS', 'gtdef', 'new'),
             ('defaults, merge without pre-filter', 'gtdef', 'nopf'),
             ('defaults, merge thinking on', 'gtdef', 'think'),
-            ('sonnet-5.5 extraction (thinking on)', 'gt55', 'new')]
+            ('sonnet-5.5 extraction (thinking on)', 'gt55', 'new'),
+            ('direct evidence + prompt/merge fixes (2026-11)', 'gtv2', 'v2')]
     print('curated reactions per paper:', {p: len(c) for p, c in cur.items()})
     tot = {}
     print(f'\n{"configuration":50} {"PMID":>9} extracted recalled(of curated) matches-curated entity-recall')
@@ -224,7 +236,8 @@ def report(pmids):
               f'({100 * t["matches_curated"] / max(1, t["extracted"]):.0f}%)  entity-recall={100 * t["entities_found"] / max(1, t["entities"]):.0f}%')
     # unmerged extraction too, to separate extraction from merge
     print('\nEXTRACTION ONLY (before merge)')
-    for label, tag in (('original serial', 'gtleg'), ('new default', 'gtdef'), ('sonnet-5.5 thinking on', 'gt55')):
+    for label, tag in (('original serial', 'gtleg'), ('new default', 'gtdef'), ('sonnet-5.5 thinking on', 'gt55'),
+                       ('direct evidence (2026-11)', 'gtv2')):
         r = c = x = 0
         for p in pmids:
             if os.path.exists(extraction_path(p, tag)):
@@ -237,5 +250,8 @@ if __name__ == '__main__':
     if len(sys.argv) < 3 or sys.argv[1] not in ('run', 'score'):
         print(__doc__)
         sys.exit(1)
-    ids = sys.argv[2:]
-    (run if sys.argv[1] == 'run' else report)(ids)
+    ids = [a for a in sys.argv[2:] if not a.startswith('--')]
+    only = sys.argv[sys.argv.index('--only') + 1] if '--only' in sys.argv else None
+    if only:
+        ids.remove(only)
+    run(ids, only) if sys.argv[1] == 'run' else report(ids)

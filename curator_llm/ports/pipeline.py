@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Dict, List, Optional, Protocol
 
 from curator_llm.models.evidence import Evidence
@@ -14,6 +14,7 @@ class PaperRef:
     pmid: Optional[str] = None
     pdf_path: Optional[str] = None
     label: Optional[str] = None        # a name to show, e.g. the uploaded file's name
+    review: bool = False               # a review article: reactions it only cites are kept (a research paper's are not)
 
     @property
     def source(self) -> str:
@@ -27,12 +28,13 @@ class PipelineInput:
     pdf_path: Optional[str] = None
     focus: Optional[str] = None        # gene/protein the curator cares about; None = whole paper
     papers: List[PaperRef] = field(default_factory=list)   # several papers, merged into ONE draft (pmid/pdf_path unused)
+    review: bool = False               # every paper is a review article (a PaperRef can also say so on its own)
 
     def refs(self) -> List[PaperRef]:
-        """The papers to annotate: `papers` if given, else the single pmid or pdf_path."""
+        """The papers to annotate: `papers` if given, else the single pmid or pdf_path. `review` here marks them all."""
         if self.papers:
-            return list(self.papers)
-        return [PaperRef(self.pmid, self.pdf_path)] if (self.pmid or self.pdf_path) else []
+            return [replace(r, review=True) if self.review and not r.review else r for r in self.papers]
+        return [PaperRef(self.pmid, self.pdf_path, review=self.review)] if (self.pmid or self.pdf_path) else []
 
 
 @dataclass

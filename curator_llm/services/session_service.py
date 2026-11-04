@@ -86,7 +86,7 @@ class SessionService:
         """Create the session, queue the pipeline, return (session_id, job_id)."""
         refs = spec.refs()
         papers = [PaperInfo(source=r.source, kind='pmid' if r.pmid else 'pdf', pmid=r.pmid,
-                            name=r.label or (r.pmid if r.pmid else r.source)) for r in refs]
+                            name=r.label or (r.pmid if r.pmid else r.source), review=r.review) for r in refs]
         first_pmid = next((r.pmid for r in refs if r.pmid), None)
         s = Session(owner=owner, pmid=first_pmid, focus=spec.focus, papers=papers,
                     source=source_label or self._source_label(papers))

@@ -12,6 +12,7 @@ def _classify(source: str, msg: str):
     closed set of patterns; anything unrecognised stays a generic warning."""
     m = msg.lower()
     rules = [
+        ('only cites from earlier work', 'cited_only_left_out', 'info'),   # services/extraction.py, _cited_note
         ('unavailable', 'service_unavailable', 'warning'),
         ('does not match', 'uniprot_mismatch', 'action'),
         ('does not exist or is obsolete', 'uniprot_invalid', 'action'),

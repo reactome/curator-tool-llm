@@ -36,6 +36,7 @@ from typing import TypedDict, List, Dict
 import PubMedFetcher as fetcher
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from curator_llm.services.evidence_attach import split_evidence
+from curator_llm.services.direct_evidence import split_cited_only
 
 PAPERS_DIR = os.path.join(PROJECT_ROOT, 'data', 'papers')
 RESULTS_DIR = os.path.join(PROJECT_ROOT, 'results')
@@ -181,7 +182,12 @@ builder.add_edge(START, 'process_chunk')
 builder.add_conditional_edges('process_chunk', should_continue, {'continue': 'process_chunk', 'done': END})
 graph = builder.compile(checkpointer=InMemorySaver())
 
-def extract_paper(paper, gene=None, tag=None, overwrite=False, pmcid=None):
+def cited_only_path(out):
+    """Where the reactions a research paper only cites are put aside (next to the extraction file)."""
+    return out[:-len('_extraction.json')] + '_cited_only.json'
+
+
+def extract_paper(paper, gene=None, tag=None, overwrite=False, pmcid=None, review=False):
     # gene is only a filename label — a PMID stem carries no gene on its own.
     stem = fetcher.output_stem(paper, gene=gene)
     # --tag keeps a re-run in its own file so two extractions can be compared
@@ -207,6 +213,19 @@ def extract_paper(paper, gene=None, tag=None, overwrite=False, pmcid=None):
                 'reactions_found': [], 'recent_notes': []}
         final = graph.invoke(init, config=config)
         found, n_chunks = final['reactions_found'], final['current_chunk_index']
+    # Reactome needs direct evidence: from a research paper keep only what the paper itself shows. A review reports
+    # cited work by nature, so nothing is left out for one. What is left out is kept next to the extraction file.
+    left_out = []
+    if not review:
+        found, left_out = split_cited_only(found)
+        with open(out, 'w') as f:
+            json.dump(found, f, indent=2)
+    with open(cited_only_path(out), 'w') as f:      # always written, so an earlier run's list never lingers
+        json.dump(left_out, f, indent=2)
+    if left_out:
+        print(f"[cited] left out {len(left_out)} reaction(s) the paper only cites from earlier work "
+              f"(a research paper needs direct evidence; pass --review for a review article): "
+              + '; '.join(r['annotation_result'].get('name', '') for r in left_out), flush=True)
     print(f"[done] {source_id}: {n_chunks} chunks, {len(found)} reaction(s), "
           f"{time.time()-t0:.0f}s ({WORKERS} worker(s)) -> {out}", flush=True)
 
@@ -224,6 +243,9 @@ if __name__ == '__main__':
                     help='allow replacing an existing extraction file (refused by default)')
     ap.add_argument('--workers', type=int, help='chunks extracted concurrently (default $EXTRACT_WORKERS or 16; '
                     '1 = the original serial mode, where each chunk sees notes on the previous two)')
+    ap.add_argument('--review', action='store_true',
+                    help='the papers are review articles: keep reactions they only cite from earlier work (a research '
+                         'paper keeps only reactions its own results show; the rest go to <stem>_cited_only.json)')
     a = ap.parse_args()
     if a.workers:
         WORKERS = a.workers
@@ -249,7 +271,7 @@ if __name__ == '__main__':
         print(f"\n########## {paper} ##########", flush=True)
         try:
             extract_paper(paper, gene=a.gene, tag=a.tag, overwrite=a.overwrite,
-                          pmcid=triage['hits'].get(paper))
+                          pmcid=triage['hits'].get(paper), review=a.review)
         except FileExistsError as e:
             print(f"[skip] {paper}: {e}", flush=True)
             misses[paper] = 'output-exists'

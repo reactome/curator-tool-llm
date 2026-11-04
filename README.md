@@ -380,6 +380,20 @@ curl -s $API/sessions/SESSION_ID/instances/-5/evidence -H "$AUTH"
 
 Piping the output through `jq` makes it readable.
 
+### Research papers and review articles (direct evidence)
+
+Reactome annotates from direct evidence, so by default a paper is treated as **research**: only reactions its own
+results show are kept. A reaction whose every quote states earlier work ("WEE1 phosphorylates CDK1 on Tyr15
+(refs. 1–3)") is left out. The extractor tags each quote `this_paper` or `cited`, and code (not the prompt) applies the
+rule, in `curator_llm/services/direct_evidence.py`. What was left out is not lost: it is listed in an info issue
+(`cited_only_left_out`) and in `results/<stem>_cited_only.json`. A reaction with at least one quote from the paper's
+own data stays.
+
+A **review article** reports cited work by nature, so mark it as one to keep those reactions: `"review": true` in
+`POST /sessions`, the form field `review=true` in `POST /sessions/upload` (it applies to every paper of that
+session), `--review` for `scripts/annotate_papers.sh` and `run_extraction.py`. A review and a research run of the
+same paper are saved as different snapshots.
+
 ### Several papers in one session
 
 A session can take several papers (PubMed IDs and/or PDFs, up to `MAX_PAPERS`, default 10). Each paper is extracted on

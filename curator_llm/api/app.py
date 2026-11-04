@@ -36,6 +36,9 @@ class StartRequest(BaseModel):
     pmid: Optional[str] = None                       # one paper ...
     pmids: List[str] = Field(default_factory=list)   # ... or several: merged into ONE draft, across papers
     focus: Optional[str] = None
+    # review articles: keep the reactions they only cite. A research paper (the default) keeps only reactions its own
+    # results show, since Reactome needs direct evidence; what it only cites is left out and listed in the issues.
+    review: bool = False
 
 
 class IssueUpdate(BaseModel):
@@ -116,18 +119,18 @@ def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: O
             raise HTTPException(422, 'give a pmid, or a list of pmids')
         if len(pmids) > max_papers:
             raise HTTPException(422, f'at most {max_papers} papers per session')
-        spec = (PipelineInput(pmid=pmids[0], focus=req.focus) if len(pmids) == 1 else
-                PipelineInput(papers=[PaperRef(pmid=p) for p in pmids], focus=req.focus))
+        spec = (PipelineInput(pmid=pmids[0], focus=req.focus, review=req.review) if len(pmids) == 1 else
+                PipelineInput(papers=[PaperRef(pmid=p) for p in pmids], focus=req.focus, review=req.review))
         sid, jid = svc().start(user.username, spec)
         return {'sessionId': sid, 'jobId': jid}
 
     @router.post('/sessions/upload', status_code=202)
     async def upload(file: Optional[UploadFile] = File(None), files: Optional[List[UploadFile]] = File(None),
                      pmids: Optional[str] = Form(None), focus: Optional[str] = Form(None),
-                     user: AuthUser = Depends(current_user)):
+                     review: bool = Form(False), user: AuthUser = Depends(current_user)):
         """Annotate papers that are not (all) in PubMed Central: upload PDFs. Send one in `file` (as before), or several
         in `files`, and optionally add PubMed IDs in `pmids` (comma or space separated). With more than one paper in all,
-        they are merged into ONE draft, across papers."""
+        they are merged into ONE draft, across papers. `review=true` marks the papers as review articles (see StartRequest)."""
         if not upload_dir:
             raise HTTPException(503, 'uploads are not configured')
         sent = [f for f in ([file] if file else []) + list(files or []) if f is not None and (f.filename or f.size)]
@@ -162,10 +165,10 @@ def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: O
             raise
         refs += [PaperRef(pmid=p) for p in ids]
         if len(refs) == 1 and refs[0].pdf_path:            # one PDF: exactly as before
-            sid, jid = svc().start(user.username, PipelineInput(pdf_path=refs[0].pdf_path, focus=focus or None),
-                                   source_label=refs[0].label)
+            sid, jid = svc().start(user.username, PipelineInput(pdf_path=refs[0].pdf_path, focus=focus or None,
+                                                                review=review), source_label=refs[0].label)
         else:
-            sid, jid = svc().start(user.username, PipelineInput(papers=refs, focus=focus or None))
+            sid, jid = svc().start(user.username, PipelineInput(papers=refs, focus=focus or None, review=review))
         return {'sessionId': sid, 'jobId': jid}
 
     @router.get('/sessions')

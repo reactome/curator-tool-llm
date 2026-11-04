@@ -221,6 +221,12 @@ Likewise these are the SAME, not different:
     above.)
   - GO molecular-function wording for the same catalytic act ("ubiquitin-protein ligase
     activity" = "ubiquitin-protein transferase activity")
+  - the same modification of the same substrate by the same catalyst, named with FEWER sites
+    or none: "phosphorylated at Tyr130" vs "phosphorylated at Tyr91 and Tyr130" vs
+    "phosphorylated on tyrosine residues" vs "phosphorylated". One sentence of a paper often
+    names only some of the sites another sentence lists: that is less detail, not a different
+    product. Only two records naming DISJOINT site sets ("at Ser65" vs "at Ser228", with
+    neither naming both) are different products.
 Judge the CORE transformation: which entity acts on which, and what change it undergoes.
 
 When in doubt, do NOT merge. Two records left separate can still be merged by a curator
@@ -423,7 +429,10 @@ described the reaction in its own words, the subsections now repeat themselves.
 Reduce each subsection to a single non-repeating section:
 - input / output: one canonical name per distinct entity. "Parkin (mitochondria)" and
   "Parkin (mitochondrial)" are the SAME entity — keep one. Different entities, or the
-  same protein in a genuinely different state/compartment, stay separate.
+  same protein in a genuinely different state/compartment, stay separate. The same modified
+  protein named with more or fewer sites ("phospho-CDH1", "CDH1 phosphorylated at Tyr130",
+  "CDH1 phosphorylated at Tyr91, Tyr130") is ONE entity: keep the name that lists every site
+  the records name.
 - regulatedBy: one entry per distinct (regulationType, regulator). Collapse synonymous
   regulators ("UbS65A" = "UbS65A (phospho-null ubiquitin)"), keeping the more informative
   name. A different regulationType on the same regulator is a DIFFERENT entry — keep both.

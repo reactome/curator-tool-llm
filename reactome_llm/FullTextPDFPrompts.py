@@ -127,6 +127,22 @@ DO NOT extract experimental observations that are not themselves molecular react
   - Comparative measurements between variants or conditions ("A does/binds X more than B").
   - Controls, reagent treatments, or mutant/knockout/inhibitor manipulations performed only to
     test or interpret a result.
+  - Hypotheses and models, as opposed to findings: alternatives the authors set out to test ("we
+    considered three hypotheses", "a model in which X …"), predictions or simulations of a
+    mathematical/computational model, and proposals. Extract the event from the sentences where
+    the paper's DATA show it, never from the sentence that poses it.
+  - Cell-level outcomes that name no molecular event: cell cycle arrest, a longer or shorter
+    phase, cell death, drug sensitivity or resistance, DNA damage as a phenotype.
+  - Structural contacts inside a complex (a hydrogen bond, a salt bridge, residues at an
+    interface): they explain a binding event; they are not reactions of their own.
+  - Events that exist only in the experimental tool: degradation of a degron-tagged or
+    auxin-inducible construct, expression of a reporter.
+
+MODIFICATION SITES belong to the enzyme the text ties them to. Put a site (e.g. "Tyr130",
+"Thr129") in this reaction's output ONLY when a quoted sentence attributes THAT site to THIS
+reaction's catalyst. A site the text gives to a different enzyme ("Thr129 ... phosphorylated by
+mTOR") is not a product of this reaction, even when the same sentence mentions this catalyst
+nearby. When the sentence names no site, leave the site out ("phosphorylated CDH1").
 
 When a mutant, knockout, inhibitor, or negative result establishes that a factor is REQUIRED for
 (or regulates) a real reaction, record it as a `regulatedBy` entry ON that reaction — NOT as its
@@ -215,8 +231,12 @@ Each evidence item is an OBJECT, not a bare string:
   - "experimental_species": the organism the protein/cells came from IN THIS EXPERIMENT, as the
     Latin binomial ("Homo sapiens", "Tribolium castaneum" for an insect ortholog used as a
     proxy), or null if not stated.
-  - "claim_origin": "this_paper" when the paper shows it, or "cited" when the paper only cites
-    it from earlier work (then give "cited_reference", e.g. "Kondapalli et al. 2012").
+  - "claim_origin": "this_paper" when the quote reports this paper's OWN data (an experiment,
+    figure or measurement of this study, or a conclusion drawn from them), or "cited" when it
+    states earlier work: a sentence carrying a reference ("(ref. 16)", "(refs. 1–3)", a superscript
+    number, "Smith et al."), or background phrased as known ("has been shown", "was previously
+    reported", "is known to"). Be strict: code uses this tag to tell findings from background.
+    For "cited", give "cited_reference" (e.g. "refs. 1–3", "Kondapalli et al. 2012").
 One quote may support several fields: list them all in "supports" instead of repeating the quote.
 
 EVIDENCE THAT BLEEDS ACROSS THE CHUNK BOUNDARY — chunks cut the paper mid-sentence and
