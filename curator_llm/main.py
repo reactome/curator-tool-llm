@@ -2,7 +2,9 @@
 
 Settings (.env is loaded):
   WS_BASE_URL      curator-tool-ws, which checks every token (default http://localhost:9090)
-  SESSION_STORE    memory (default) or mongo
+  SESSION_STORE    file (default: one JSON file per session under SESSION_DIR, kept across restarts), mongo (also kept;
+                   needs MongoDB at PUBMED_MONGO_URI), or memory (lost on restart; for development)
+  SESSION_DIR      where the file store keeps sessions, one folder per user (default data/sessions)
   SNAPSHOT_MODE    record (default: save each successful run), replay (reuse a saved result instead of calling the
                    models; for interface development and demos) or off. SNAPSHOT_DIR defaults to data/snapshots.
   LLM_MODEL_<ROLE> which model a step uses (all defaults are in curator_llm/model_settings.py; CHAT_MODEL still works)
@@ -30,11 +32,20 @@ def build_app():
     from curator_llm.api.app import create_app
     from curator_llm.services.resolvers import Resolver
 
-    if os.getenv('SESSION_STORE', 'memory') == 'mongo':
+    kind = os.getenv('SESSION_STORE', 'file')
+    if kind == 'mongo':
         from curator_llm.adapters.sessions_mongo import MongoSessionStore
         store = MongoSessionStore.from_env()
-    else:
+    elif kind == 'memory':
         store = InMemorySessionStore()
+    elif kind == 'file':
+        from curator_llm.adapters.sessions_file import FileSessionStore
+        store = FileSessionStore(os.getenv('SESSION_DIR', os.path.join(ROOT, 'data', 'sessions')))
+        # Sessions now outlive the process, but their jobs do not: fail the ones a restart cut off, rather than
+        # leaving them "running" for ever.
+        store.mark_interrupted()
+    else:
+        raise ValueError(f'SESSION_STORE must be file, mongo or memory, not {kind!r}')
     pipeline, inner = build_pipeline()
     lookup, uniprot, ols = inner.lookup, inner.uniprot, inner.ontology
     origins = [o.strip() for o in os.getenv('CORS_ORIGINS', 'http://localhost:4200').split(',') if o.strip()]

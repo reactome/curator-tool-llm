@@ -317,7 +317,8 @@ Read from `.env` (the keys in [Configuration](#configuration-env) apply too):
 | Variable | Default | Meaning |
 |---|---|---|
 | `WS_BASE_URL` | `http://localhost:9090` | curator-tool-ws, which verifies tokens and roles. |
-| `SESSION_STORE` | `memory` | `memory`, or `mongo` to keep sessions across restarts (uses `PUBMED_MONGO_URI`). |
+| `SESSION_STORE` | `file` | Where sessions (one per annotation) are kept. `file`: one JSON file per session in a folder per user under `SESSION_DIR`, kept across restarts, nothing else needed. `mongo`: in MongoDB at `PUBMED_MONGO_URI`, also kept across restarts. `memory`: lost on restart, for development. |
+| `SESSION_DIR` | `data/sessions` | Where the file store keeps sessions: `<SESSION_DIR>/<username>/<session id>.json`. Back it up to back up every curator's annotations. |
 | `SNAPSHOT_MODE` | `record` | `record` saves every successful run, `replay` reuses a saved result instead of calling the models, `off` does neither. See [Fast iteration](#fast-iteration-without-calling-the-models). |
 | `SNAPSHOT_DIR` | `data/snapshots` | Where saved results go. |
 | `LLM_MODEL_<ROLE>` | see below | Model for one step, e.g. `LLM_MODEL_CHAT`. `CHAT_MODEL` still works. |
@@ -563,10 +564,12 @@ call (see the script's header; `--usage extraction=LOG --usage merge=LOG` record
 
 ### Running it for real
 
-- **One worker.** Sessions (unless `SESSION_STORE=mongo`) and background jobs live in the process, so do not start
-  several workers (`--workers`). Restarting the service ends any job still running. With `SESSION_STORE=mongo` finished
-  sessions survive a restart, but one that was still running when the service stopped keeps showing "running" (its job
-  is gone, and nothing marks it failed): start that paper again.
+- **One worker.** Background jobs (and sessions, with `SESSION_STORE=memory`) live in the process, and the file store
+  expects a single writer, so do not start several workers (`--workers`). Restarting the service ends any job still
+  running. With the file store (the default) or `SESSION_STORE=mongo`, finished sessions survive a restart. With the
+  file store, a session that was still running when the service stopped is marked failed at the next start ("The
+  service restarted before this annotation finished"), so the curator knows to start it again. With mongo it keeps
+  showing "running": start that paper again.
 - **Behind a reverse proxy**, do not let it buffer responses for the chat route, or the live steps arrive in one lump
   (the service already sends `X-Accel-Buffering: no` for nginx), and allow long-running requests.
 - **Browsers** may only call it from the origins in `CORS_ORIGINS`.
