@@ -11,6 +11,8 @@ Settings (.env is loaded):
   MAX_PAPERS       most papers in one session (default 10)
   PAPER_WORKERS    papers extracted at the same time within a session (default 2)
   LLM_REVIEW=1     also run the OpenAI cross-model review
+  AUTO_QA          1 (default): QA every reaction of a new draft with the model before the session is ready (one call
+                   per reaction, concurrent; not for a replayed run); 0: only when the curator asks (POST .../qa)
 plus the existing ANTHROPIC_API_KEY, REACTOME_NEO4J_* and PUBMED_MONGO_URI.
 """
 import os
@@ -41,7 +43,8 @@ def build_app():
                       resolver_factory=lambda: Resolver(lookup, uniprot, ols), events=lookup,
                       upload_dir=os.getenv('UPLOAD_DIR', os.path.join(ROOT, 'data', 'uploads')),
                       cors_origins=origins, chat_model=AnthropicChatModel(),
-                      qa_model=AnthropicChatModel(role='qa'), max_papers=int(os.getenv('MAX_PAPERS', '10')))
+                      qa_model=AnthropicChatModel(role='qa'), max_papers=int(os.getenv('MAX_PAPERS', '10')),
+                      auto_qa=os.getenv('AUTO_QA', '1') != '0')
 
 
 app = build_app() if os.getenv('CURATOR_LLM_AUTOSTART', '1') == '1' else None

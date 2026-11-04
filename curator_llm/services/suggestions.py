@@ -4,7 +4,7 @@ a problem that needs judgement (an invented state, two related reactions that mi
 species) is left to the curator.
 """
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Collection, Dict, List
 
 from curator_llm.models.evidence import Evidence
 from curator_llm.models.reactome import ReactomeDraft
@@ -13,7 +13,7 @@ from curator_llm.models.reactome import ReactomeDraft
 @dataclass
 class Suggestion:
     reaction_key: str
-    code: str               # the kind of fix: 'enzyme_as_input' | 'missing_pmids'
+    code: str               # the kind of fix: 'enzyme_as_input' | 'missing_pmids' | 'remove_reaction'
     reason: str
     ops: List[dict]         # RFC 6902 patch against the draft
 
@@ -51,6 +51,40 @@ def _missing_pmids(draft: ReactomeDraft, evidence: Dict[str, Evidence]) -> List[
     return out
 
 
-def suggest_fixes(draft: ReactomeDraft, evidence: List[Evidence]) -> List[Suggestion]:
+def remove_reaction_ops(draft: ReactomeDraft, key: str) -> List[dict]:
+    """The patch that removes reaction `key`: out of the pathway, out of every other reaction's preceding list, then
+    the reaction itself (its participants stay; one no reaction uses is harmless and the curator can drop it)."""
+    ops = []
+    if draft.pathway and key in draft.pathway.reactions:
+        ops += [{'op': 'remove', 'path': f'/pathway/reactions/{i}'}
+                for i in sorted((i for i, k in enumerate(draft.pathway.reactions) if k == key), reverse=True)]
+    for r in draft.reactions:
+        ops += [{'op': 'remove', 'path': f'/reactions/{r.key}/preceding/{i}'}
+                for i in sorted((i for i, k in enumerate(r.preceding) if k == key), reverse=True)]
+    return ops + [{'op': 'remove', 'path': f'/reactions/{key}'}]
+
+
+# the automatic checks (services/qa.py) whose finding leaves one clear fix: the reaction has no direct evidence
+_REMOVE_FOR = {
+    'qa_only_cited': 'every quote states earlier work, not a result of this paper (Reactome needs direct evidence)',
+    'qa_negative_only': 'every quote reports a negative or negligible result, which does not show the reaction happens',
+}
+
+
+def _unsupported(draft: ReactomeDraft, evidence: Dict[str, Evidence], reviews: Collection[str]) -> List[Suggestion]:
+    from curator_llm.services.qa import rule_findings          # qa imports nothing from here; kept local all the same
+    out = []
+    for r in draft.reactions:
+        why = [_REMOVE_FOR[f.code] for f in rule_findings(draft, r, evidence, reviews) if f.code in _REMOVE_FOR]
+        if why:
+            out.append(Suggestion(r.key, 'remove_reaction', f'remove "{r.name}": {"; ".join(why)}',
+                                  remove_reaction_ops(draft, r.key)))
+    return out
+
+
+def suggest_fixes(draft: ReactomeDraft, evidence: List[Evidence], reviews: Collection[str] = ()) -> List[Suggestion]:
+    """`reviews`: source tags of the papers that are review articles (their cited statements are evidence)."""
     by_id = {e.id: e for e in evidence}
-    return _enzyme_as_input(draft) + _missing_pmids(draft, by_id)
+    removed = _unsupported(draft, by_id, reviews)
+    gone = {s.reaction_key for s in removed}               # no point fixing the inputs of a reaction to be removed
+    return removed + [s for s in _enzyme_as_input(draft) + _missing_pmids(draft, by_id) if s.reaction_key not in gone]

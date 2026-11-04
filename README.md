@@ -404,6 +404,22 @@ A **review article** reports cited work by nature, so it keeps those reactions. 
 The session's paper list shows what was decided (`papers[].review`). A review and a research run of the same paper are
 saved as different snapshots.
 
+### Checks on every draft
+
+Every draft is checked before a curator sees it, and what the checks find is listed as issues; nothing is removed or
+changed without the curator:
+
+- **Automatic checks** (source `checks`, no model): a reaction whose every quote states earlier work (tagged cited, or
+  carrying a reference such as "(ref. 43)"; not for review articles), whose quotes stating a result are all negative
+  ("negligible", "did not") or all hedged ("may", "suggests"), whose quotes all come from Methods or describe a figure
+  panel ("Western blot showing ..."), or that looks like another reaction the merge left apart (same catalyst, mostly
+  the same inputs and outputs). For a cited-only or negative-only reaction a suggested fix proposes removing it.
+- **The model's QA review** of each reaction (source `qa`), run automatically after the pipeline (`AUTO_QA=1`, the
+  default; not for a replayed run; `--no-qa` on the command line). It asks first whether the reaction is a molecular
+  reaction at all (a cell-level outcome, a structural contact, a hypothesis, the reason for an experimental step, an
+  event of a tool or a negative result is not), then checks the catalyst, states, summation and evidence. It costs one
+  model call per reaction, run concurrently (30 reactions: about 30 seconds). `POST /sessions/{id}/qa` runs it again.
+
 ### Several papers in one session
 
 A session can take several papers (PubMed IDs and/or PDFs, up to `MAX_PAPERS`, default 10). Each paper is extracted on

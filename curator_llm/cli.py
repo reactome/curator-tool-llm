@@ -104,7 +104,7 @@ def _progress(name: str, say: Callable[[str], None]) -> Callable[[str], None]:
 
 
 def annotate(name: str, refs: List[PaperRef], focus: Optional[str], out_dir: str, pipeline, say: Callable[[str], None],
-             force: bool = False) -> bool:
+             force: bool = False, qa_model=None) -> bool:
     """One draft from `refs`; writes the result files. False if it failed (the reason is printed)."""
     staged = os.path.join(out_dir, f'{name}.staged_instances.json')
     if os.path.isfile(staged) and os.path.getsize(staged) > 0 and not force:
@@ -125,6 +125,9 @@ def annotate(name: str, refs: List[PaperRef], focus: Optional[str], out_dir: str
                 issues=list(result.issues), existing=list(result.existing), usage=list(result.usage),
                 paper=result.paper, paper_texts=dict(result.papers), status='ready')
     SessionService.refresh(s)                    # the same step the service runs: instances and issues from the draft
+    if qa_model is not None and s.draft.reactions:
+        say(f'[{name}] checking each reaction ({len(s.draft.reactions)})')
+        SessionService.qa_into(s, qa_model)      # the model's QA review, as issues (source 'qa')
     SessionService(None, None, pipeline).refresh_suggestions(s)   # suggested fixes, as pending proposals; never applied here
     suggestions = [p for p in s.proposals if p.status == 'pending']
     open_issues = [i for i in s.issues if i.status == 'open']
@@ -145,7 +148,7 @@ def annotate(name: str, refs: List[PaperRef], focus: Optional[str], out_dir: str
     return True
 
 
-def main(argv: Optional[List[str]] = None, pipeline=None, say: Callable[[str], None] = None) -> int:
+def main(argv: Optional[List[str]] = None, pipeline=None, say: Callable[[str], None] = None, qa_model=None) -> int:
     say = say or (lambda m: print(m, flush=True))
     ap = argparse.ArgumentParser(prog='annotate_papers', description=DESCRIPTION, epilog=EPILOG,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -158,6 +161,8 @@ def main(argv: Optional[List[str]] = None, pipeline=None, say: Callable[[str], N
     ap.add_argument('--name', metavar='NAME', help='file name prefix of the merged result (default papers-<date and time>)')
     ap.add_argument('--separate', action='store_true', help='annotate each paper on its own instead of one merged draft')
     ap.add_argument('--force', action='store_true', help='run again even if the results already exist')
+    ap.add_argument('--no-qa', action='store_true',
+                    help='skip the model QA review of each reaction (one call per reaction); the automatic checks still run')
     ap.add_argument('--review', action='store_true',
                     help='the papers are review articles: keep reactions they only cite from earlier work. Without it '
                          'a PubMed ID is a review when PubMed says so, and a PDF is research: only reactions its own '
@@ -177,6 +182,11 @@ def main(argv: Optional[List[str]] = None, pipeline=None, say: Callable[[str], N
         from curator_llm.wiring import build_pipeline, load_env
         load_env()
         pipeline, _ = build_pipeline()
+        if qa_model is None and not args.no_qa:
+            from curator_llm.adapters.chat_anthropic import AnthropicChatModel
+            qa_model = AnthropicChatModel(role='qa')
+    if args.no_qa:
+        qa_model = None
     done, failed = 0, []
     if len(refs) == 1 and args.name:
         jobs = [(args.name, refs)]
@@ -185,7 +195,7 @@ def main(argv: Optional[List[str]] = None, pipeline=None, say: Callable[[str], N
     else:
         jobs = [(args.name or f'papers-{time.strftime("%Y%m%d-%H%M%S")}', refs)]
     for name, group in jobs:
-        if annotate(name, group, args.focus, args.out, pipeline, say, args.force):
+        if annotate(name, group, args.focus, args.out, pipeline, say, args.force, qa_model=qa_model):
             done += 1
         else:
             failed.append(name)

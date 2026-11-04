@@ -70,10 +70,14 @@ def _carry_over(previous: List[Issue], fresh: List[Issue], key: Callable[[Issue]
 
 class SessionService:
     def __init__(self, store: SessionStore, jobs: JobRunner, pipeline: Pipeline,
-                 resolver_factory: Optional[Callable] = None, events=None):
+                 resolver_factory: Optional[Callable] = None, events=None, qa_model=None, auto_qa: bool = False,
+                 qa_workers: int = 8):
         self.store, self.jobs, self.pipeline = store, jobs, pipeline
         self.resolver_factory = resolver_factory     # () -> Resolver, to resolve entities an edit introduces
         self.events = events                         # EventLookup, to check for existing Reactome events
+        # with auto_qa, every reaction of a new draft gets the model's QA review before the session is ready (not for a
+        # replayed run, which promises no model calls); the curator can always run it again (POST .../qa)
+        self.qa_model, self.auto_qa, self.qa_workers = qa_model, auto_qa, qa_workers
 
     def _ready(self, owner: str, session_id: str) -> Session:
         s = self.store.get(session_id, owner)
@@ -120,6 +124,9 @@ class SessionService:
             s.existing, s.issues = list(result.existing), list(result.issues)
             s.usage, s.usage_source = list(result.usage), 'saved' if result.replayed else 'run'
             self.refresh(s)
+            if self.auto_qa and self.qa_model is not None and not result.replayed and s.draft.reactions:
+                progress(f'checking each reaction ({len(s.draft.reactions)})')
+                self.qa_into(s, self.qa_model, self.qa_workers)
             self.refresh_suggestions(s)
             s.status, s.progress, s.error = 'ready', 'done', None
             s.change_log.append(ChangeLogEntry(actor='pipeline', action='created',
@@ -133,6 +140,23 @@ class SessionService:
         return session_id
 
     @staticmethod
+    def reviews_of(s: Session) -> List[str]:
+        """Source tags of the session's papers that are review articles (their cited statements are their evidence)."""
+        return [p.source for p in s.papers if p.review]
+
+    @staticmethod
+    def qa_into(s: Session, model, workers: int = 8) -> list:
+        """QA every reaction of `s` (model calls concurrent) and put the findings into its issues; `s` is not saved here.
+        Returns the results, most urgent first."""
+        reviews = SessionService.reviews_of(s)
+        keys = [r.key for r in s.draft.reactions]
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(keys) or 1))) as pool:
+            results = list(pool.map(lambda k: qa_reaction(s.draft, k, s.evidence, model, reviews), keys))
+        for res in results:
+            SessionService._merge_qa(s, res, model)
+        return rank_results(results)
+
+    @staticmethod
     def refresh(s: Session) -> None:
         """Re-emit instances from the draft and rebuild the issue list. Emitter issues are replaced on every
         refresh; issues that recur keep the id and status they had."""
@@ -144,7 +168,7 @@ class SessionService:
         merged = kept + [f for f in iss.issues_from_draft(s.draft) if (f.code, f.participant_key) not in have]
         merged += iss.issues_from_notes('emitter', emit.warnings)
         merged += [Issue(source='checks', severity=f.severity, code=f.code, message=f.message, reaction_key=k)
-                   for k, f in auto_findings(s.draft)]
+                   for k, f in auto_findings(s.draft, s.evidence, SessionService.reviews_of(s))]
         iss.link_to_instances(merged, emit.key_to_db_id, emit.participant_to_db_id)
         _carry_over(s.issues, merged, key)
         s.issues = iss.assign_ids(merged)
@@ -247,7 +271,7 @@ class SessionService:
         """Make the suggested fixes for the draft as it is now, as pending proposals (actor 'suggestions'). A pending one
         that no longer applies, or no longer fixes anything, is dropped; one the curator already accepted or rejected
         is not made again."""
-        wanted = make_suggestions(s.draft, s.evidence)
+        wanted = make_suggestions(s.draft, s.evidence, self.reviews_of(s))
         same = lambda p, ops: p.ops == ops
         s.proposals = [p for p in s.proposals
                        if not (p.actor == self.SUGGESTER and p.status == 'pending' and not any(same(p, w.ops) for w in wanted))]
@@ -322,7 +346,7 @@ class SessionService:
         The model call runs outside the session lock, so chat and the UI are not held up while it waits."""
         s = self._ready(owner, session_id)
         try:
-            result = qa_reaction(s.draft, reaction_key, s.evidence, model)
+            result = qa_reaction(s.draft, reaction_key, s.evidence, model, self.reviews_of(s))
         except KeyError:
             raise ProposalError(f'no reaction with key {reaction_key!r}')
         return self._apply_qa(owner, session_id, result, model)
@@ -331,10 +355,10 @@ class SessionService:
         """QA every reaction (the model calls run concurrently), record the findings as issues, and return the
         results most urgent first."""
         s = self._ready(owner, session_id)
-        draft, evidence = s.draft, s.evidence
+        draft, evidence, reviews = s.draft, s.evidence, self.reviews_of(s)
         keys = [r.key for r in draft.reactions]
         with ThreadPoolExecutor(max_workers=max(1, min(workers, len(keys) or 1))) as pool:
-            results = list(pool.map(lambda k: qa_reaction(draft, k, evidence, model), keys))
+            results = list(pool.map(lambda k: qa_reaction(draft, k, evidence, model, reviews), keys))
         applied = []
         for res in results:
             try:
@@ -346,9 +370,16 @@ class SessionService:
     @_locked
     def _apply_qa(self, owner: str, session_id: str, result, model=None):
         s = self._ready(owner, session_id)
+        if not any(r.key == result.reaction_key for r in s.draft.reactions):
+            raise ProposalError(f'no reaction with key {result.reaction_key!r}')
+        self._merge_qa(s, result, model, actor=owner)
+        self.store.save(s)
+        return result
+
+    @staticmethod
+    def _merge_qa(s: Session, result, model=None, actor: str = 'pipeline') -> None:
+        """Replace the reaction's QA issues with this result's (ids and statuses of recurring ones kept)."""
         reaction_key = result.reaction_key
-        if not any(r.key == reaction_key for r in s.draft.reactions):
-            raise ProposalError(f'no reaction with key {reaction_key!r}')
         mine = lambda i: i.source == 'qa' and i.reaction_key == reaction_key
         fresh = [Issue(source='qa', severity=f.severity, code=f.code, message=f.message, reaction_key=reaction_key,
                        instance_db_id=s.key_to_db_id.get(reaction_key))
@@ -358,9 +389,7 @@ class SessionService:
         if result.usage:
             s.usage.append(UsageEntry(step='qa', calls=1, detail=reaction_key, model=getattr(model, 'model', None),
                                       **result.usage))
-        s.change_log.append(ChangeLogEntry(actor=owner, action=f'qa {reaction_key}', detail=result.verdict))
-        self.store.save(s)
-        return result
+        s.change_log.append(ChangeLogEntry(actor=actor, action=f'qa {reaction_key}', detail=result.verdict))
 
     @_locked
     def check_existing(self, owner: str, session_id: str, only: Optional[List[str]] = None) -> Session:

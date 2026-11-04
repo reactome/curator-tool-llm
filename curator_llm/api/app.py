@@ -87,13 +87,15 @@ def _safe_name(name: str) -> str:
 def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: Optional[JobRunner] = None,
                pipeline: Optional[Pipeline] = None, resolver_factory=None,
                upload_dir: Optional[str] = None, cors_origins: Optional[List[str]] = None,
-               chat_model=None, events=None, qa_model=None, max_papers: int = MAX_PAPERS) -> FastAPI:
+               chat_model=None, events=None, qa_model=None, max_papers: int = MAX_PAPERS,
+               auto_qa: bool = False) -> FastAPI:
     app = FastAPI(title='curator-tool-llm')
     if cors_origins:
         app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=True,
                            allow_methods=['*'], allow_headers=['Authorization', 'Content-Type'])
     app.state.auth = auth
-    service = SessionService(store, jobs, pipeline, resolver_factory, events) if store and jobs and pipeline else None
+    service = (SessionService(store, jobs, pipeline, resolver_factory, events, qa_model=qa_model or chat_model,
+                              auto_qa=auto_qa) if store and jobs and pipeline else None)
     app.state.service, app.state.store, app.state.jobs = service, store, jobs
     router = APIRouter(prefix='/api/llm', dependencies=[Depends(current_user)])
 

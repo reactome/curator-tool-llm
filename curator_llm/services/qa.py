@@ -7,12 +7,13 @@ overstate the evidence) and sees the same facts plus the quotes.
 """
 import json
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Collection, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
 from curator_llm.models.evidence import ClaimOrigin, Evidence, Verification
 from curator_llm.models.reactome import ReactionSpec, ReactomeDraft, SimpleEntitySpec
+from curator_llm.services.dedup_prefilter import side_tokens, tokens
 
 
 class QAFinding(BaseModel):
@@ -41,7 +42,37 @@ def _state(draft: ReactomeDraft, key: str):
     return (p.name.lower(), mods)
 
 
-def rule_findings(draft: ReactomeDraft, r: ReactionSpec, evidence: Dict[str, Evidence]) -> List[QAFinding]:
+# What a quote's wording says about it. Patterns, so they can be wrong: they raise warnings for a curator to look at and
+# only fire when EVERY quote of a reaction matches.
+_REF_MARKER = re.compile(r'\(\s*(?:see\s+)?refs?\.\s*\d|\bet al\.', re.I)            # "(ref. 43)", "(refs. 1-3)", "Smith et al."
+_HEDGE = re.compile(r'\b(?:may|might|could|possibly|potentially|perhaps|suggests?|suggesting|hypothes\w*|propose[sd]?|'
+                    r'predicts?|predicted|we considered|it is (?:possible|likely))\b', re.I)
+_NEGATIVE = re.compile(r'\b(?:negligible|did not|does not|do not|was not|were not|no (?:significant |detectable )?'
+                       r'(?:change|effect|difference|increase|decrease)|not (?:detected|observed|affected|altered|changed)|'
+                       r'unchanged|unaffected|failed to|fails to)\b', re.I)
+# the first words of a figure legend that describes a panel rather than stating a result
+_LEGEND = re.compile(r'^\s*(?:\(?[a-z]\)?[.,]?\s+)?(?:western blots?|immunoblots?|graphs?|images?|quantification|schematic|'
+                     r'cartoon|representative|plots?|heat ?map|dose[\u2013-]response|time[- ]course|time-lapse|growth curves?|'
+                     r'validation of)\b', re.I)
+_METHODS_SECTIONS = ('method', 'materials', 'experimental procedure', 'supplementary')
+
+
+def is_cited_quote(e: Evidence) -> bool:
+    """States earlier work: tagged cited, or tagged as this paper's but carrying a reference such as "(ref. 43)"."""
+    return e.claim_origin == ClaimOrigin.CITED or (e.claim_origin == ClaimOrigin.THIS_PAPER
+                                                   and bool(_REF_MARKER.search(e.quote or '')))
+
+
+def describes_method_or_figure(e: Evidence) -> bool:
+    """From a Methods section, or a figure legend describing a panel ("Western blot showing ...")."""
+    section = (e.section or '').lower()
+    return any(section.startswith(m) for m in _METHODS_SECTIONS) or bool(_LEGEND.match(e.quote or ''))
+
+
+def rule_findings(draft: ReactomeDraft, r: ReactionSpec, evidence: Dict[str, Evidence],
+                  reviews: Collection[str] = ()) -> List[QAFinding]:
+    """The deterministic checks of one reaction. `reviews`: the source tags of the papers that are review articles, whose
+    cited statements are their evidence (a research paper's are not)."""
     out: List[QAFinding] = []
     F = lambda sev, code, msg, field=None: out.append(QAFinding(severity=sev, code=code, message=msg, field=field))
     blackbox = r.reaction_type in ('blackBoxEvent', 'omitted')
@@ -84,13 +115,29 @@ def rule_findings(draft: ReactomeDraft, r: ReactionSpec, evidence: Dict[str, Evi
                 F('warning', 'qa_unsupported_regulation',
                   f'no quote is marked as supporting the regulation by "{draft.participants[g.regulator].name}"',
                   f'regulations[{i}]')
+        research = [e for e in ev if e.source not in reviews and e.claim_origin != ClaimOrigin.CURATOR_ASSERTION]
         if all(e.claim_origin == ClaimOrigin.CURATOR_ASSERTION for e in ev):
             F('warning', 'qa_only_assertion', 'the only evidence is a curator assertion, not the paper', 'evidence')
-        elif all(e.claim_origin == ClaimOrigin.CITED for e in ev):
-            F('warning', 'qa_only_cited', 'every quote is a result this paper cites from earlier work, not shown here',
-              'evidence')
+        elif research and len(research) == len(ev) and all(is_cited_quote(e) for e in ev):
+            marked = [e for e in ev if e.claim_origin == ClaimOrigin.THIS_PAPER]
+            F('warning', 'qa_only_cited', 'every quote states earlier work' +
+              (' (cited, or carrying a reference such as "(ref. N)")' if marked else '') +
+              ', not a result shown in this paper; Reactome needs direct evidence: remove the reaction unless the paper '
+              'also shows it', 'evidence')
         elif all(e.verified == Verification.FUZZY for e in ev):
             F('info', 'qa_fuzzy_evidence', 'every quote matched the paper only approximately; check the wording', 'evidence')
+        quotes = [e for e in ev if e.claim_origin != ClaimOrigin.CURATOR_ASSERTION]
+        results = [e for e in quotes if not describes_method_or_figure(e)]     # the quotes that state something
+        if results and all(_NEGATIVE.search(e.quote or '') for e in results):
+            F('warning', 'qa_negative_only', 'every quote stating a result reports a negative or negligible one ("did not", '
+              '"negligible", "no change"), which is not evidence that this reaction happens: remove it, or find the '
+              'sentence that shows it', 'evidence')
+        elif results and all(_HEDGE.search(e.quote or '') for e in results):
+            F('warning', 'qa_hedged_only', 'every quote stating a result is hedged ("may", "could", "suggests", a hypothesis or a '
+              'model prediction): it is not shown as a result; find a sentence that states it, or remove it', 'evidence')
+        if quotes and all(describes_method_or_figure(e) for e in quotes):
+            F('warning', 'qa_methods_only', 'every quote comes from Methods or describes a figure panel ("Western blot '
+              'showing ..."), none states a result: check that the paper reports this as a finding', 'evidence')
         species = {e.experimental_species for e in ev if e.experimental_species}
         if species and 'Homo sapiens' not in species:
             F('info', 'qa_non_human_evidence',
@@ -102,23 +149,68 @@ def rule_findings(draft: ReactomeDraft, r: ReactionSpec, evidence: Dict[str, Evi
     return out
 
 
-# The rules that need no quote and no model: they read the draft's structure only, so they run on every refresh and
-# appear in the issue list without the curator asking for a QA run.
+# The rules that need no model: the draft's structure, what the quotes say about themselves, and reactions that look
+# like each other. They run on every refresh and appear in the issue list without the curator asking for a QA run.
 AUTO_RULE_CODES = frozenset({'qa_no_inputs', 'qa_no_outputs', 'qa_no_change', 'qa_catalyst_not_protein',
                              'qa_catalyst_is_output', 'qa_catalyst_is_consumed', 'qa_regulator_is_input',
-                             'qa_conflicting_regulation'})
+                             'qa_conflicting_regulation', 'qa_only_cited', 'qa_negative_only', 'qa_hedged_only',
+                             'qa_methods_only', 'qa_possible_duplicate'})
 
 
-def auto_findings(draft: ReactomeDraft) -> List[Tuple[str, QAFinding]]:
-    """(reaction key, finding) for every structural rule that fires, in reaction order."""
-    return [(r.key, f) for r in draft.reactions for f in rule_findings(draft, r, {}) if f.code in AUTO_RULE_CODES]
+def _jaccard(a, b) -> float:
+    return len(a & b) / len(a | b) if a | b else 1.0
+
+
+def _overlap(a, b) -> float:
+    """Shared share of the smaller set: "CDK1" vs "CDK1, cyclin B" is 1 (less detail, as the merge judge treats it)."""
+    return len(a & b) / min(len(a), len(b)) if a and b else 0.0
+
+
+def duplicate_findings(draft: ReactomeDraft) -> List[Tuple[str, QAFinding]]:
+    """Reactions the merge left apart that look like the same event: the same catalyst (or none for both), and inputs
+    and outputs that name mostly the same entities, one side possibly with less detail (names compared by tokens,
+    ignoring modification words and cofactors, see dedup_prefilter). With no catalyst there is less to go on, so both
+    must produce something and their regulators must agree. Reported on the later reaction of each pair, as a warning:
+    the merge's judge had called them different, so a curator decides."""
+    name = lambda k: draft.participants[k].name if k in draft.participants else k
+    sides = []
+    for r in draft.reactions:
+        cat = tokens(name(r.catalyst.entity)) if r.catalyst else None
+        sides.append((r, cat, side_tokens(name(k) for k in r.inputs), side_tokens(name(k) for k in r.outputs),
+                      side_tokens(name(g.regulator) for g in r.regulations)))
+    out = []
+    for j, (b, cb, ib, ob, gb) in enumerate(sides):
+        for a, ca, ia, oa, ga in sides[:j]:
+            if (ca is None) != (cb is None) or (ca is not None and _jaccard(ca, cb) < 0.5):
+                continue
+            if ca is None and (not (oa and ob) or (ga and gb and _overlap(ga, gb) < 0.5)):
+                continue
+            if _overlap(ia, ib) >= 0.67 and _overlap(oa, ob) >= 0.67:
+                out.append((b.key, QAFinding(severity='warning', code='qa_possible_duplicate', field=None,
+                            message=f'may describe the same event as {a.key} "{a.name}" (same catalyst, mostly the same '
+                                    f'inputs and outputs): merge them if they are one reaction')))
+                break
+    return out
+
+
+def auto_findings(draft: ReactomeDraft, evidence: Optional[List[Evidence]] = None,
+                  reviews: Collection[str] = ()) -> List[Tuple[str, QAFinding]]:
+    """(reaction key, finding) for every automatic rule that fires, in reaction order."""
+    ev = {e.id: e for e in evidence or []}
+    found = [(r.key, f) for r in draft.reactions for f in rule_findings(draft, r, ev, reviews) if f.code in AUTO_RULE_CODES]
+    dups = dict(duplicate_findings(draft))
+    order = {r.key: i for i, r in enumerate(draft.reactions)}
+    return sorted(found + list(dups.items()), key=lambda kf: order.get(kf[0], 0))
 
 
 QA_SYSTEM = """You are a senior Reactome curator reviewing ONE reaction of a draft annotation, to tell a human curator
 what to fix. Judge only what the reaction and its quotes support. Check: is the catalyst really the enzyme that performs
 the reaction (others are regulators); are consumed and produced entities in the right modification state; does the
 summation claim more than the quotes show; is a regulator's condition recorded; is ortholog or cited evidence presented
-as if shown here.
+as if shown here. First of all: is it a molecular reaction at all? A cell-level outcome (arrest, a longer phase, death,
+drug sensitivity), a structural contact inside a complex (a hydrogen bond), a hypothesis or model prediction, the reason
+for an experimental step ("X was added to prevent Y"), an event of a tool (a degron, a reporter), or a negative result
+is not: give an "action" finding saying the reaction should be removed, and why.
 Reply with ONLY a JSON object: {"verdict": "ok" | "needs_work", "score": <0-1>, "summary": "<one sentence>",
 "findings": [{"severity": "info" | "warning" | "action", "message": "...", "field": "<field or null>"}]}.
 
@@ -193,12 +285,13 @@ def rank_results(results: List['QAResult']) -> List['QAResult']:
     return sorted(results, key=key)
 
 
-def qa_reaction(draft: ReactomeDraft, reaction_key: str, evidence: List[Evidence], model=None) -> QAResult:
+def qa_reaction(draft: ReactomeDraft, reaction_key: str, evidence: List[Evidence], model=None,
+                reviews: Collection[str] = ()) -> QAResult:
     r = next((x for x in draft.reactions if x.key == reaction_key), None)
     if r is None:
         raise KeyError(reaction_key)
     ev = {e.id: e for e in evidence}
-    findings = rule_findings(draft, r, ev)
+    findings = rule_findings(draft, r, ev, reviews)
     score, verdict_llm, summary, used, spent = None, None, None, False, None
     if model is not None:
         try:
