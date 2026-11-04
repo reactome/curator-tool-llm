@@ -208,6 +208,19 @@ treats fewer named sites as less detail. Same 8 papers, the 2 reviews run with `
   `this_paper`; hydrogen-bond records, a hedged Discussion sentence and two figure-legend-only "results" (one the paper
   contradicts) were still extracted despite the prompt rules.
 
+Then constructs and orthologs as the protein (extraction normalizes "CDH1 N186", "Xenopus FZR (Cdh1)" to CDH1; the
+merge judge treats an assay construct or stand-in ortholog as the protein), same 8 papers (`--only gtv3`):
+
+| Setting | Recall (all 8) | Entity recall | Reactions (all 8) |
+|---|---|---|---|
+| 2026-11 changes above | 41/61 | 77% | 274 |
+| **+ constructs/orthologs as the protein** | **42/61** | **80%** | 258 |
+
+Within noise on recall (one review gained one curated reaction); 16 fewer reactions. On the WEE1/CDH1 PDF the CDH1
+phosphorylation became ONE reaction (six variants folded: no site, Tyr130, Tyr91+Tyr130, "tyrosine residues"), 30
+reactions in all. Run-to-run variation of the extraction is visible there: a negative result ("WEE1 phosphorylates
+CDC20 (negligible)") and a Methods rationale ("CDK1 phosphorylates WEE1") appeared that the previous run did not have.
+
 ## 8. Bugs found along the way
 
 - **Section lookup returned empty replies** for papers without a standard Results heading: thinking used up the tiny

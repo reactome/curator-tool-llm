@@ -210,6 +210,12 @@ They are also DIFFERENT if they merely share one participant.
 
 Likewise these are the SAME, not different:
   - a domain or subunit vs its parent protein as catalyst (e.g. "ZNFX1 RZ domain" = "ZNFX1")
+  - an experimental construct vs the protein it stands for, as substrate or catalyst: a
+    truncation or fragment made for an assay ("CDH1 N186", "CDH1 (N-terminal fragment)" =
+    "CDH1"), a tagged or recombinant form, or an ortholog from another species used as a stand-in
+    ("Xenopus FZR (Cdh1)" = "CDH1"). One paper often shows the same event in vitro with such a
+    construct and in cells with the native protein: that is one reaction. (A fragment that is a
+    real product of the biology, such as a cleavage product, is a different entity.)
   - one record listing an accessory cofactor (E1/E2 enzyme, ATP, ubiquitin) the other omits
   - a compartment vs a sub-compartment of it ("mitochondrial outer membrane" = "mitochondrion")
   - DIFFERENT SETS OF REGULATORS. Regulation hangs OFF a reaction; it is not part of the

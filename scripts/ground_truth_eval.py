@@ -37,6 +37,7 @@ EXTRACTION = {
     # direct evidence (cited-only reactions left out of research papers), no hypotheses/phenotypes, site attribution,
     # and the merge judge treating fewer named sites as less detail (2026-11)
     'gtv2': {},
+    'gtv3': {},     # + constructs/orthologs normalized to the protein (extraction and merge judge)
 }
 # review articles: extracted with --review (they keep the reactions they only cite); every other PMID is research
 REVIEWS = {'23256519', '25670789'}
@@ -47,6 +48,7 @@ MERGE = {
     'nopf': (['--no-prefilter'], {}, ['gtdef']),
     'think': ([], {'MERGE_THINKING': 'on'}, ['gtdef']),
     'v2': ([], {}, ['gtv2']),
+    'v3': ([], {}, ['gtv3']),
 }
 
 
@@ -179,7 +181,7 @@ def run(pmids, only=None):
         out = extraction_path(pmid, tag)
         if os.path.exists(out) and os.path.getsize(out) > 2:
             return
-        review = ['--review'] if tag == 'gtv2' and str(pmid) in REVIEWS else []    # earlier tags predate the filter
+        review = ['--review'] if tag in ('gtv2', 'gtv3') and str(pmid) in REVIEWS else []    # earlier tags predate the filter
         sh([sys.executable, 'run_extraction.py', str(pmid), '--gene', GENE, '--tag', tag, '--overwrite'] + review, env,
            f'/tmp/gt_{pmid}_{tag}.log')
         print(f'extracted {pmid} {tag}: {"ok" if os.path.exists(out) else "NO OUTPUT"}', flush=True)
@@ -214,7 +216,8 @@ def report(pmids):
             ('defaults, merge without pre-filter', 'gtdef', 'nopf'),
             ('defaults, merge thinking on', 'gtdef', 'think'),
             ('sonnet-5.5 extraction (thinking on)', 'gt55', 'new'),
-            ('direct evidence + prompt/merge fixes (2026-11)', 'gtv2', 'v2')]
+            ('direct evidence + prompt/merge fixes (2026-11)', 'gtv2', 'v2'),
+            ('+ constructs/orthologs as the protein (2026-11)', 'gtv3', 'v3')]
     print('curated reactions per paper:', {p: len(c) for p, c in cur.items()})
     tot = {}
     print(f'\n{"configuration":50} {"PMID":>9} extracted recalled(of curated) matches-curated entity-recall')
@@ -237,7 +240,7 @@ def report(pmids):
     # unmerged extraction too, to separate extraction from merge
     print('\nEXTRACTION ONLY (before merge)')
     for label, tag in (('original serial', 'gtleg'), ('new default', 'gtdef'), ('sonnet-5.5 thinking on', 'gt55'),
-                       ('direct evidence (2026-11)', 'gtv2')):
+                       ('direct evidence (2026-11)', 'gtv2'), ('+ constructs/orthologs', 'gtv3')):
         r = c = x = 0
         for p in pmids:
             if os.path.exists(extraction_path(p, tag)):

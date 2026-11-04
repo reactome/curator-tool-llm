@@ -113,6 +113,13 @@ captured ONCE no matter how many experiments demonstrate it:
     recombinant protein or an ortholog used as an in-vitro proxy is the SAME entity as the
     native one). The entity name is normalized, but the species actually used is NOT thrown
     away: record it on each evidence item as "experimental_species" (see the evidence rules).
+    Name the entity as the paper names the protein it studies, without the species: "Xenopus
+    FZR (Cdh1)" used for human CDH1 is "CDH1".
+  - Normalize truncation and fragment CONSTRUCTS made for an experiment to the full protein:
+    "CDH1 N186", "the N-terminal 186 residues of CDH1", "GST-FZR N186", "Cdc20 N159",
+    "residues 1-110" are "CDH1" / "CDC20". Likewise a tool point mutant used only to test a
+    site (Y91F, Y130E) is the protein; the mutant belongs in regulatedBy or the evidence. A
+    fragment stays separate only when it is a real product of the biology (a cleavage product).
   - Do NOT let the experimental SYSTEM (in vitro / cell-free / recombinant / in cells), the
     inducing TREATMENT, the DETECTION method, or a tool MUTANT (catalytic-dead trap,
     phosphomimetic, phospho-null) create separate reactions — the same enzyme + substrate +
