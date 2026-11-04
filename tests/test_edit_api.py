@@ -131,9 +131,10 @@ def test_stale_proposal_is_detected(env):
     e = propose(c, sid, [{'op': 'add', 'path': '/reactions/r0/regulations/-', 'value': {'kind': 'positive', 'regulator': 'cccp'}}],
                 evidence=[{'quote': Q2}]).json()['id']
     assert c.post(f'/api/llm/sessions/{sid}/proposals/{d}/accept', headers=H()).status_code == 200
-    r = c.post(f'/api/llm/sessions/{sid}/proposals/{e}/accept', headers=H())
-    assert r.status_code == 409 and 'no longer applies' in r.json()['detail']
+    # accepting d made e stale at once, so it is no longer offered; accepting it anyway is refused
     assert c.get(f'/api/llm/sessions/{sid}/proposals?status=stale', headers=H()).json()[0]['id'] == e
+    r = c.post(f'/api/llm/sessions/{sid}/proposals/{e}/accept', headers=H())
+    assert r.status_code == 409 and 'stale' in r.json()['detail']
 
 
 def test_paper_search_and_privacy(env):

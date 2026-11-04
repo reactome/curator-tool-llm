@@ -373,6 +373,22 @@ def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: O
                 'reactions': [{'key': r.key, 'name': r.name, 'dbId': s.key_to_db_id.get(r.key)} for r in s.draft.reactions],
                 'nOpenIssues': sum(i.status == 'open' for i in s.issues)}
 
+    @router.delete('/sessions/{session_id}/reactions/{key}')
+    def remove_reaction(session_id: str, key: str, user: AuthUser = Depends(current_user)):
+        """Remove one reaction from the draft, as the curator's own decision (no quote needed). Recorded as an accepted
+        proposal, so issues, QA, suggestions, other pending proposals and the emitted instances follow, exactly as when
+        a suggested removal is accepted. Same reply as accepting a proposal."""
+        load(session_id, user)
+        try:
+            s, p = svc().remove_reaction(user.username, session_id, key)
+        except LookupError:
+            raise HTTPException(404, f'no reaction with key {key!r}')
+        except ProposalError as e:
+            raise HTTPException(409, str(e))
+        return {'proposal': p,
+                'reactions': [{'key': r.key, 'name': r.name, 'dbId': s.key_to_db_id.get(r.key)} for r in s.draft.reactions],
+                'nOpenIssues': sum(i.status == 'open' for i in s.issues)}
+
     @router.post('/sessions/{session_id}/proposals/{proposal_id}/reject')
     def reject(session_id: str, proposal_id: str, user: AuthUser = Depends(current_user)):
         load(session_id, user)

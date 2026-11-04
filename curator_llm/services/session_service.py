@@ -20,7 +20,7 @@ from curator_llm.services.existing_events import find_existing
 from curator_llm.services.paper_text import PaperText
 from curator_llm.services.patching import PatchError, apply_patch, describe_changes, touched_reactions
 from curator_llm.services.qa import AUTO_RULE_CODES, auto_findings, qa_reaction, rank_results
-from curator_llm.services.suggestions import suggest_fixes as make_suggestions
+from curator_llm.services.suggestions import remove_reaction_ops, suggest_fixes as make_suggestions
 
 
 class ProposalError(ValueError):
@@ -322,6 +322,24 @@ class SessionService:
     def accept(self, owner: str, session_id: str, proposal_id: str) -> Session:
         """Apply a proposal: patch the draft, register its evidence, resolve what it introduced, re-emit."""
         s, p = self._pending(owner, session_id, proposal_id)
+        return self._apply(s, p, owner)
+
+    @_locked
+    def remove_reaction(self, owner: str, session_id: str, key: str, reason: str = '') -> Tuple[Session, Proposal]:
+        """The curator removes a reaction directly (the reaction panel's "Remove this reaction"). It goes through the same
+        path as accepting a proposal, so the change log, issues, QA, suggestions, other pending proposals and the emitted
+        instances all follow. Removing is the curator's own decision, so it needs no quote."""
+        s = self._ready(owner, session_id)
+        r = next((x for x in s.draft.reactions if x.key == key), None)
+        if r is None:
+            raise LookupError(f'no reaction with key {key!r}')
+        p = self._build_proposal(s, remove_reaction_ops(s.draft, key), reason or f'removed "{r.name}" ({key})', None,
+                                 owner, skip_evidence_check=True)
+        s.proposals.append(p)
+        return self._apply(s, p, owner), p
+
+    def _apply(self, s: Session, p: Proposal, owner: str) -> Session:
+        """Accept proposal `p` on session `s` (the caller holds the session's lock) and save."""
         try:
             new = apply_patch(s.draft, p.ops)
         except PatchError as e:                       # the draft changed since the proposal was made
@@ -343,6 +361,14 @@ class SessionService:
         self._recheck_existing(s, keys or None)
         p.status, p.decided_by, p.decided_at = 'accepted', owner, time.time()
         s.change_log.append(ChangeLogEntry(actor=owner, action=f'accepted {p.id}', detail='; '.join(p.summary)[:500]))
+        # another pending edit that no longer applies (say, a chat edit of a reaction just removed) is stale now, so it
+        # is not offered any more; suggestions are remade just below
+        for q in s.proposals:
+            if q.status == 'pending' and q is not p and q.actor != self.SUGGESTER:
+                try:
+                    apply_patch(s.draft, q.ops)
+                except PatchError:
+                    q.status, q.decided_by, q.decided_at = 'stale', owner, time.time()
         self.refresh_suggestions(s)
         self.store.save(s)
         return s

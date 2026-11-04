@@ -522,6 +522,7 @@ Every route is under `/api/llm` and needs the bearer token.
 | `POST /sessions/{id}/qa` | Check every reaction at once (about 15 s for 11 reactions) and return them most urgent first, with the findings recorded as issues. |
 | `GET`, `POST /sessions/{id}/proposals` | List, or submit your own edit as an RFC 6902 patch. |
 | `POST /sessions/{id}/proposals/{pid}/accept` , `/reject` | Decide a proposed edit. |
+| `DELETE /sessions/{id}/reactions/{key}` | Remove a reaction, as the curator's own decision (no quote needed). Recorded as an accepted proposal, so issues, QA, suggestions and other pending proposals (now stale if they no longer apply) follow. |
 | `POST /sessions/{id}/suggestions` | Make the suggested fixes for the draft as it is now (also made when the session is created and after each accepted edit); returns the pending ones. They are proposals with actor `suggestions`: nothing changes until one is accepted. |
 | `GET`, `POST /sessions/{id}/chat` | Read the conversation; send a message (streams). |
 

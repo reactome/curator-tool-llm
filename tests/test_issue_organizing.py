@@ -150,3 +150,31 @@ def test_a_look_alike_note_is_never_held_back_and_reactions_carry_their_equation
     from curator_llm.api.app import equation
     assert equation(s.draft, s.draft.reactions[1]) == 'CDK1 -> CDK1 (phospho-Tyr15) (catalyst WEE1)'
     assert equation(s.draft, s.draft.reactions[2]) == 'APC1 -> APC1'
+
+
+def test_the_curator_removes_a_reaction_directly_and_everything_follows():
+    class Pipe:
+        def run(self, spec, report):
+            return PipelineResult(draft(), list(EV), [])
+    c = TestClient(create_app(FakeAuthProvider(TOKENS), InMemorySessionStore(), SyncJobRunner(), Pipe(),
+                              qa_model=Model(NOT_A_REACTION), auto_qa=True))
+    sid = c.post('/api/llm/sessions', headers=AUTH('alice'), json={'pmid': '1', 'review': False}).json()['sessionId']
+    # a pending chat edit of r2, which removing r2 makes moot
+    edit = c.post(f'/api/llm/sessions/{sid}/proposals', headers=AUTH('alice'),
+                  json={'ops': [{'op': 'replace', 'path': '/reactions/r2/summation', 'value': 'new text'}], 'reason': 'x'}).json()['id']
+    before = c.get(f'/api/llm/sessions/{sid}', headers=AUTH('alice')).json()
+    assert 'r2' in before['qa'] and any(r['key'] == 'r2' for r in before['reactions'])
+    r = c.delete(f'/api/llm/sessions/{sid}/reactions/r2', headers=AUTH('alice'))
+    assert r.status_code == 200 and r.json()['proposal']['status'] == 'accepted'
+    assert [x['key'] for x in r.json()['reactions']] == ['r0', 'r1']
+    after = c.get(f'/api/llm/sessions/{sid}', headers=AUTH('alice')).json()
+    assert 'r2' not in after['qa'] and [x['key'] for x in after['reactions']] == ['r0', 'r1']
+    assert not [i for i in c.get(f'/api/llm/sessions/{sid}/issues', headers=AUTH('alice')).json() if i['reaction_key'] == 'r2']
+    props = c.get(f'/api/llm/sessions/{sid}/proposals', headers=AUTH('alice')).json()
+    assert next(p for p in props if p['id'] == edit)['status'] == 'stale'
+    assert not [p for p in props if p['status'] == 'pending' and 'r2' in json.dumps(p['ops'])]   # its removal suggestion is gone
+    staged = c.get(f'/api/llm/sessions/{sid}/export', headers=AUTH('alice')).json()
+    events = [i for i in staged['newInstances'] if i['schemaClassName'] in ('Reaction', 'BlackBoxEvent')]
+    assert len(events) == 2                                              # the staged instances follow too
+    assert c.delete(f'/api/llm/sessions/{sid}/reactions/r2', headers=AUTH('alice')).status_code == 404
+    assert c.delete(f'/api/llm/sessions/{sid}/reactions/r0', headers=AUTH('bob')).status_code == 404     # not her session
