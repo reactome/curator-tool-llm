@@ -14,7 +14,9 @@ class PaperRef:
     pmid: Optional[str] = None
     pdf_path: Optional[str] = None
     label: Optional[str] = None        # a name to show, e.g. the uploaded file's name
-    review: bool = False               # a review article: reactions it only cites are kept (a research paper's are not)
+    # a review article keeps the reactions it only cites; a research paper does not. None = decide (services/paper_kind:
+    # PubMed for a PMID, research for a PDF)
+    review: Optional[bool] = None
 
     @property
     def source(self) -> str:
@@ -28,12 +30,14 @@ class PipelineInput:
     pdf_path: Optional[str] = None
     focus: Optional[str] = None        # gene/protein the curator cares about; None = whole paper
     papers: List[PaperRef] = field(default_factory=list)   # several papers, merged into ONE draft (pmid/pdf_path unused)
-    review: bool = False               # every paper is a review article (a PaperRef can also say so on its own)
+    review: Optional[bool] = None      # for every paper that does not say itself (PaperRef.review); None = decide
 
     def refs(self) -> List[PaperRef]:
-        """The papers to annotate: `papers` if given, else the single pmid or pdf_path. `review` here marks them all."""
+        """The papers to annotate: `papers` if given, else the single pmid or pdf_path. `review` here fills in the papers
+        that leave it open; a paper's own setting wins."""
         if self.papers:
-            return [replace(r, review=True) if self.review and not r.review else r for r in self.papers]
+            return [replace(r, review=self.review) if r.review is None and self.review is not None else r
+                    for r in self.papers]
         return [PaperRef(self.pmid, self.pdf_path, review=self.review)] if (self.pmid or self.pdf_path) else []
 
 
@@ -47,6 +51,7 @@ class PipelineResult:
     usage: List[UsageEntry] = field(default_factory=list)
     replayed: bool = False             # served from a saved result: the usage is the original run's
     papers: Dict[str, dict] = field(default_factory=dict)   # every paper's PaperText.to_dict(), by source tag
+    reviews: Dict[str, bool] = field(default_factory=dict)  # review (True) or research, by source tag (paper_kind)
 
 
 class Pipeline(Protocol):

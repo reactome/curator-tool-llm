@@ -74,7 +74,8 @@ class PaperInfo(BaseModel):
     kind: Literal['pmid', 'pdf'] = 'pmid'
     pmid: Optional[str] = None
     name: str = ''                              # what to show: the PMID or the uploaded file's name
-    review: bool = False                        # annotated as a review article: reactions it only cites were kept
+    review: Optional[bool] = None               # annotated as a review article (reactions it only cites were kept);
+                                                # None until decided (a PMID's kind is read from PubMed when it runs)
 
 
 class Session(BaseModel):

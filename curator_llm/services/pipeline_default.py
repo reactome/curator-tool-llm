@@ -72,7 +72,7 @@ class DefaultPipeline:
         kw = {'report': report} if 'report' in params else {}
         if len(refs) == 1:
             if 'review' in params:                    # extract_many reads it from each PaperRef instead
-                kw['review'] = refs[0].review
+                kw['review'] = bool(refs[0].review)
             return method(refs[0].pmid, refs[0].pdf_path, gene, **kw)
         return method(refs, gene, **kw)
 

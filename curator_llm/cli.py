@@ -118,7 +118,8 @@ def annotate(name: str, refs: List[PaperRef], focus: Optional[str], out_dir: str
         say(f'[{name}] FAILED: {type(e).__name__}: {e}')
         return False
     papers = [PaperInfo(source=r.source, kind='pmid' if r.pmid else 'pdf', pmid=r.pmid,
-                        name=r.label or (r.pmid if r.pmid else r.source), review=r.review) for r in refs]
+                        name=r.label or (r.pmid if r.pmid else r.source),
+                        review=result.reviews.get(r.source, r.review)) for r in refs]
     s = Session(owner='local', pmid=next((r.pmid for r in refs if r.pmid), None), focus=focus, papers=papers,
                 source=SessionService._source_label(papers), draft=result.draft, evidence=list(result.evidence),
                 issues=list(result.issues), existing=list(result.existing), usage=list(result.usage),
@@ -158,9 +159,9 @@ def main(argv: Optional[List[str]] = None, pipeline=None, say: Callable[[str], N
     ap.add_argument('--separate', action='store_true', help='annotate each paper on its own instead of one merged draft')
     ap.add_argument('--force', action='store_true', help='run again even if the results already exist')
     ap.add_argument('--review', action='store_true',
-                    help='the papers are review articles: keep reactions they only cite from earlier work (by default a '
-                         'paper is research, and only reactions its own results show are kept; Reactome needs direct '
-                         'evidence. What is left out is listed in the issues)')
+                    help='the papers are review articles: keep reactions they only cite from earlier work. Without it '
+                         'a PubMed ID is a review when PubMed says so, and a PDF is research: only reactions its own '
+                         'results show are kept (Reactome needs direct evidence; what is left out is in the issues)')
     args = ap.parse_args(argv)
     try:
         pdfs, ids = collect_papers(args.paths, args.pmid + args.pmids, args.pmid_file)
@@ -169,8 +170,9 @@ def main(argv: Optional[List[str]] = None, pipeline=None, say: Callable[[str], N
     except UsageError as e:
         print(f'error: {e}', file=sys.stderr)
         return 2
-    refs = ([PaperRef(pdf_path=p, label=os.path.basename(p), review=args.review) for p in pdfs]
-            + [PaperRef(pmid=i, review=args.review) for i in ids])
+    review = True if args.review else None           # None: a PMID's kind comes from PubMed, a PDF is research
+    refs = ([PaperRef(pdf_path=p, label=os.path.basename(p), review=review) for p in pdfs]
+            + [PaperRef(pmid=i, review=review) for i in ids])
     if pipeline is None:
         from curator_llm.wiring import build_pipeline, load_env
         load_env()

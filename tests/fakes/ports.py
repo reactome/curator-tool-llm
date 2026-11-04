@@ -81,3 +81,16 @@ class SyncJobRunner:
     def get(self, job_id, owner):
         job = self.jobs.get(job_id)
         return job if job and job.owner == owner else None
+
+
+class FakePubMed:
+    """PubMed publication types by PMID; `fail` makes every call raise, as an unreachable PubMed would."""
+
+    def __init__(self, types: Optional[Dict[str, List[str]]] = None, fail: bool = False):
+        self.types, self.fail, self.calls = types or {}, fail, []
+
+    def publication_types(self, pmids):
+        self.calls.append(list(pmids))
+        if self.fail:
+            raise ConnectionError('PubMed is down')
+        return {p: self.types[p] for p in pmids if p in self.types}

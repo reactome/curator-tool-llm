@@ -15,3 +15,10 @@ class OntologyClient(Protocol):
     def search(self, name: str, ontology: str) -> List[Dict]:
         """Exact-label hits as [{identifier: 'GO:0004672', label: str}], best first."""
         ...
+
+
+class PublicationTypes(Protocol):
+    def publication_types(self, pmids: List[str]) -> Dict[str, List[str]]:
+        """PubMed's publication types per PMID, e.g. {'25670789': ['Journal Article', 'Review']}. A PMID PubMed does not
+        know is absent. Raises when PubMed cannot be asked (network, HTTP error)."""
+        ...

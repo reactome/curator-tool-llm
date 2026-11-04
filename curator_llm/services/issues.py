@@ -12,6 +12,8 @@ def _classify(source: str, msg: str):
     closed set of patterns; anything unrecognised stays a generic warning."""
     m = msg.lower()
     rules = [
+        ('is a review article (pubmed', 'paper_is_review', 'info'),          # services/paper_kind.py
+        ('could not read its publication type', 'paper_kind_unknown', 'info'),
         ('only cites from earlier work', 'cited_only_left_out', 'info'),   # services/extraction.py, _cited_note
         ('unavailable', 'service_unavailable', 'warning'),
         ('does not match', 'uniprot_mismatch', 'action'),

@@ -389,10 +389,20 @@ rule, in `curator_llm/services/direct_evidence.py`. What was left out is not los
 (`cited_only_left_out`) and in `results/<stem>_cited_only.json`. A reaction with at least one quote from the paper's
 own data stays.
 
-A **review article** reports cited work by nature, so mark it as one to keep those reactions: `"review": true` in
-`POST /sessions`, the form field `review=true` in `POST /sessions/upload` (it applies to every paper of that
-session), `--review` for `scripts/annotate_papers.sh` and `run_extraction.py`. A review and a research run of the
-same paper are saved as different snapshots.
+A **review article** reports cited work by nature, so it keeps those reactions. Which papers are reviews:
+
+- **A PubMed ID**: PubMed's publication type decides ("Review", "Systematic Review", "Scoping Review",
+  "Meta-Analysis"), looked up when the annotation starts (`services/paper_kind.py`, one request for all of a session's
+  PMIDs). It matched all 8 papers of the ground-truth set; PMC's own article type did not. A PMID found to be a review
+  gets an info issue (`paper_is_review`). If PubMed cannot be reached, the paper is treated as research and an info
+  issue (`paper_kind_unknown`) says so.
+- **A PDF**: research, unless the curator ticks it as a review (the front-end has a "Review" box per PDF; over the API,
+  `review_files` in `POST /sessions/upload`, one form field per file name).
+- **An override for every paper of a request**: `"review": true|false` in `POST /sessions`, `review=true|false` in the
+  upload form, `--review` for `scripts/annotate_papers.sh` and `run_extraction.py`.
+
+The session's paper list shows what was decided (`papers[].review`). A review and a research run of the same paper are
+saved as different snapshots.
 
 ### Several papers in one session
 

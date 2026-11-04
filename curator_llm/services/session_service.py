@@ -114,6 +114,9 @@ class SessionService:
             s = self.store.get(session_id, owner)
             s.draft, s.evidence, s.paper = result.draft, result.evidence, result.paper
             s.paper_texts = dict(result.papers)
+            for p in s.papers:                                 # review or research, as decided for the run
+                if p.source in result.reviews:
+                    p.review = result.reviews[p.source]
             s.existing, s.issues = list(result.existing), list(result.issues)
             s.usage, s.usage_source = list(result.usage), 'saved' if result.replayed else 'run'
             self.refresh(s)
