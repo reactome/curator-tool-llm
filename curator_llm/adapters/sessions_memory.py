@@ -28,3 +28,11 @@ class InMemorySessionStore:
         with self._lock:
             return sorted((copy.deepcopy(s) for s in self._s.values() if s.owner == owner),
                           key=lambda s: -s.created)
+
+    def delete(self, session_id: str, owner: str) -> bool:
+        with self._lock:
+            s = self._s.get(session_id)
+            if s is None or s.owner != owner:
+                return False
+            del self._s[session_id]
+            return True

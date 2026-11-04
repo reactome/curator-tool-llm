@@ -26,6 +26,9 @@ def check_contract(store):
     assert store.get(s.id, 'alice').status == 'ready'
     other = sample('bob'); store.save(other)
     assert [x.id for x in store.list('alice')] == [s.id] and [x.id for x in store.list('bob')] == [other.id]
+    assert store.delete(other.id, 'alice') is False and store.get(other.id, 'bob') is not None   # not hers to delete
+    assert store.delete(s.id, 'alice') is True
+    assert store.get(s.id, 'alice') is None and store.list('alice') == [] and store.delete(s.id, 'alice') is False
 
 
 def test_in_memory_store_contract():

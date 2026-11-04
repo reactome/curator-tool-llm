@@ -286,6 +286,18 @@ def test_upload_one_pdf_is_unchanged_and_the_old_field_name_still_works(env):
     assert c.get(f'/api/llm/sessions/{r.json()["sessionId"]}', headers=AUTH('alice')).json()['source'] == 'only.pdf'
 
 
+def test_deleting_a_session_removes_its_uploaded_pdfs_only(env):
+    c, _, up = env
+    keep = c.post('/api/llm/sessions/upload', headers=AUTH('alice'), files=[('files', pdf('keep.pdf'))]).json()['sessionId']
+    sid = c.post('/api/llm/sessions/upload', headers=AUTH('alice'), data={'pmids': P1},
+                 files=[('files', pdf('a.pdf')), ('files', pdf('b.pdf'))]).json()['sessionId']
+    assert len(os.listdir(up / 'alice')) == 3
+    assert c.delete(f'/api/llm/sessions/{sid}', headers=AUTH('alice')).status_code == 204
+    left = os.listdir(up / 'alice')
+    assert len(left) == 1 and left[0].endswith('_keep.pdf')
+    assert c.get(f'/api/llm/sessions/{keep}', headers=AUTH('alice')).status_code == 200
+
+
 def test_a_refused_upload_leaves_no_files_and_starts_nothing(env):
     c, pipe, up = env
     bad = c.post('/api/llm/sessions/upload', headers=AUTH('alice'), files=[('files', pdf('good.pdf')), ('files', ('bad.pdf', b'not a pdf', 'application/pdf'))])

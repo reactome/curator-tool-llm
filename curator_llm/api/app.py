@@ -6,7 +6,7 @@ import re
 import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -205,6 +205,28 @@ def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: O
                                    'evidenceIds': r.evidence_ids, 'equation': equation(s.draft, r)}
                                   for r in (s.draft.reactions if s.draft else [])]})
         return out
+
+    @router.delete('/sessions/{session_id}', status_code=204)
+    def delete_session(session_id: str, user: AuthUser = Depends(current_user)):
+        """Delete one of the curator's sessions (annotations) for good, with the PDFs uploaded for it. 409 while it is
+        still queued or running."""
+        try:
+            s = svc().delete(user.username, session_id)
+        except LookupError:
+            raise HTTPException(404, 'no such session')
+        except ProposalError as e:
+            raise HTTPException(409, str(e))
+        if upload_dir:
+            # An uploaded PDF's source is its stored file name (<random>_<name>.pdf, unique to this upload) in the
+            # owner's upload folder. basename() keeps a hand-edited source from pointing anywhere else.
+            folder = os.path.join(upload_dir, _safe_name(user.username))
+            for paper in s.papers:
+                if paper.kind == 'pdf' and paper.source:
+                    try:
+                        os.remove(os.path.join(folder, os.path.basename(paper.source)))
+                    except OSError:
+                        pass                                   # already gone: the session is deleted all the same
+        return Response(status_code=204)
 
     @router.get('/sessions/{session_id}/issues')
     def issues(session_id: str, status: Optional[str] = None,

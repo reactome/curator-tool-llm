@@ -507,6 +507,7 @@ Every route is under `/api/llm` and needs the bearer token.
 | `POST /sessions/upload` | Start from PDFs: multipart `file` (one) or `files` (several), optional `pmids` (comma or space separated, to add PubMed papers) and `focus` → `202`. See [Several papers in one session](#several-papers-in-one-session). |
 | `GET /sessions` | Your sessions. |
 | `GET /sessions/{id}` | One session: status, progress, reactions, counts. |
+| `DELETE /sessions/{id}` | Delete one of your sessions for good, with the PDFs uploaded for it → `204`. `409` while it is still queued or running. |
 | `GET /jobs/{jobId}` | Progress of the background job. |
 | `GET /sessions/{id}/issues` | Everything needing attention (`?status=open\|resolved\|dismissed`). |
 | `PATCH /sessions/{id}/issues/{issueId}` | `{"status": "resolved"\|"dismissed"\|"open"}`. |

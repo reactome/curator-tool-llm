@@ -130,3 +130,24 @@ def test_bad_input_and_unconfigured_service():
 def test_viewer_role_is_forbidden(env):
     c, _ = env
     assert c.post('/api/llm/sessions', json={'pmid': '1234567'}, headers=AUTH('viewer')).status_code == 403
+
+
+def test_delete_a_session_for_good(env):
+    c, _ = env
+    sid = start(c)['sessionId']
+    assert c.delete(f'/api/llm/sessions/{sid}', headers=AUTH('bob')).status_code == 404          # not his
+    r = c.delete(f'/api/llm/sessions/{sid}', headers=AUTH('alice'))
+    assert r.status_code == 204
+    assert c.get(f'/api/llm/sessions/{sid}', headers=AUTH('alice')).status_code == 404
+    assert c.get('/api/llm/sessions', headers=AUTH('alice')).json() == []
+    assert c.delete(f'/api/llm/sessions/{sid}', headers=AUTH('alice')).status_code == 404        # already gone
+
+
+def test_a_running_session_cannot_be_deleted(env):
+    c, _ = env
+    sid = start(c)['sessionId']
+    store = c.app.state.service.store
+    s = store.get(sid, 'alice'); s.status = 'running'; store.save(s)
+    r = c.delete(f'/api/llm/sessions/{sid}', headers=AUTH('alice'))
+    assert r.status_code == 409 and 'still running' in r.json()['detail']
+    assert store.get(sid, 'alice') is not None

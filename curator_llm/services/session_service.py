@@ -348,6 +348,21 @@ class SessionService:
         return s
 
     @_locked
+    def delete(self, owner: str, session_id: str) -> Session:
+        """Delete a session (one annotation) for good, so the curator can start the papers again or tidy up their list.
+        Returns what was deleted (the caller removes its uploaded PDFs). A session still queued or running is refused:
+        its job lives on in the process and would save the session again when it finished, bringing it back."""
+        s = self.store.get(session_id, owner)
+        if s is None:
+            raise LookupError('no such session')
+        if s.status in ('queued', 'running'):
+            raise ProposalError('This annotation is still running. Wait until it finishes, then delete it.')
+        self.store.delete(session_id, owner)
+        with _locks_guard:
+            _locks.pop(session_id, None)
+        return s
+
+    @_locked
     def reject(self, owner: str, session_id: str, proposal_id: str) -> Session:
         s, p = self._pending(owner, session_id, proposal_id)
         p.status, p.decided_by, p.decided_at = 'rejected', owner, time.time()

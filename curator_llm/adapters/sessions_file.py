@@ -102,6 +102,16 @@ class FileSessionStore:
                     out.append(s)
         return sorted(out, key=lambda s: -s.created)
 
+    def delete(self, session_id: str, owner: str) -> bool:
+        if self.get(session_id, owner) is None:           # not there, or someone else's
+            return False
+        with self._lock:
+            try:
+                os.remove(self._path(session_id, owner))
+            except FileNotFoundError:
+                return False
+        return True
+
     def mark_interrupted(self) -> int:
         """Call once at startup. A session still queued or running when the service stopped has lost its job (jobs
         live in the process), so it would show "running" for ever. Mark each one failed, saying why, so the curator

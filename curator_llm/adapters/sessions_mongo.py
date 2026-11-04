@@ -30,3 +30,6 @@ class MongoSessionStore:
     def list(self, owner: str) -> List[Session]:
         return [Session.model_validate({k: v for k, v in d.items() if k != '_id'})
                 for d in self.c.find({'owner': owner}).sort('created', -1)]
+
+    def delete(self, session_id: str, owner: str) -> bool:
+        return self.c.delete_one({'_id': session_id, 'owner': owner}).deleted_count == 1
