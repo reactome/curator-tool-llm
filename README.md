@@ -442,9 +442,46 @@ scripts/annotate_papers.sh /path/to/pdf_folder --separate                       
 
 Per draft, in `--out` (default `./annotations`): `<name>.staged_instances.json` (what the curator tool's "load staged
 instances" takes), `<name>.issues.json`, `<name>.suggestions.json` (fixes suggested for some issues, as edits; none is
-applied), `<name>.session.json` (papers, counts, tokens used) and `<name>.evidence.json` (every quote with its paper, page and section). Finished results are skipped unless you pass `--force`; `--help` lists
-everything. What the script does not give you is the interactive side (chat, proposed edits, QA, the evidence viewer),
-which lives in the service and the front-end.
+applied), `<name>.session.json` (papers, counts, tokens used), `<name>.evidence.json` (every quote with its paper, page
+and section) and `<name>.annotation.json` (the whole annotation, see below). Finished results are skipped unless you
+pass `--force`; `--help` lists everything.
+
+#### Opening command-line results in the front-end
+
+`<name>.annotation.json` is the whole annotation as the service keeps it (draft, quotes, issues, suggested fixes, QA
+results, the papers' text), so a command-line run can be opened in Paper2Path like one started there: the Issues tab,
+the reaction panel with its quotes, the network, chat and proposed edits. An annotation belongs to one curator, by their
+login name. Two ways to give it to one:
+
+1. **While annotating**: add `--owner USER`. The annotation is also saved among that curator's annotations, in the
+   service's session folder (`SESSION_DIR` from `.env`, else `data/sessions` of this checkout; `--session-dir DIR` to
+   name another).
+
+   ```bash
+   scripts/annotate_papers.sh paper.pdf --focus WEE1 --owner wgm
+   ```
+
+2. **Later**: add the file to a curator's annotations with `scripts/import_annotation.sh` (several files at once are
+   fine). The same file is added only once; `--replace` overwrites it.
+
+   ```bash
+   scripts/import_annotation.sh annotations/paper.annotation.json --owner marija
+   scripts/import_annotation.sh annotations/*.annotation.json --owner wgm --session-dir /path/to/data/sessions
+   ```
+
+Then reload the Paper2Path page, logged in as that curator: it is listed under **Your annotations**. The service reads
+the session folder on every request, so no restart is needed.
+
+**On the server** (production: `aws_curator_new`, see "Deploying to a Linux server"), copy the `.annotation.json` file there and add it
+from the deployed folder, so it lands in the folder the running service uses:
+
+```bash
+scp annotations/paper.annotation.json aws_curator_new:/tmp/
+ssh aws_curator_new
+cd /usr/local/reactomes/Reactome/production/webbench/curator-tool-llm
+.venv/bin/python -m curator_llm.annotation_files /tmp/paper.annotation.json --owner marija
+chmod -R g+rwX data/sessions        # several people deploy there: keep the annotations group-writable
+```
 
 **In the front-end**, the Paper annotation page has one "Papers to annotate" form: type one or more PubMed IDs and/or add PDFs, then Annotate. Several papers start ONE annotation; its page lists the papers, and each quote says which paper it is from.
 

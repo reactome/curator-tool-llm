@@ -57,7 +57,7 @@ def test_several_papers_become_one_merged_draft_with_all_the_result_files(tmp_pa
     spec = pipe.calls[0]
     assert [r.source for r in spec.refs()] == ['a.PDF', 'b.pdf', 'PMID:24751536', 'PMID:29168502'] and spec.focus == 'PINK1'
     out = tmp_path / 'out'
-    assert sorted(os.listdir(out)) == ['together.evidence.json', 'together.issues.json', 'together.session.json', 'together.staged_instances.json', 'together.suggestions.json']
+    assert sorted(os.listdir(out)) == ['together.annotation.json', 'together.evidence.json', 'together.issues.json', 'together.session.json', 'together.staged_instances.json', 'together.suggestions.json']
     assert json.load(open(out / 'together.staged_instances.json'))['newInstances']
     sess = json.load(open(out / 'together.session.json'))
     assert sess['n_reactions'] == 5 and [p['kind'] for p in sess['papers']] == ['pdf', 'pdf', 'pmid', 'pmid'] and sess['source'].startswith('4 papers: ')

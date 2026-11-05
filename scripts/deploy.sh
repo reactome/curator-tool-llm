@@ -90,7 +90,7 @@ SERVICE_FILES=(
   reactome_llm/PubMedFetcher.py reactome_llm/token_profiler.py
   run_extraction.py run_merge.py run_review.py
   resources/reactome_domain_model.json
-  scripts/run_api.sh requirements-service.txt .env.example README.md
+  scripts/run_api.sh scripts/import_annotation.sh requirements-service.txt .env.example README.md
 )
 for f in "${SERVICE_FILES[@]}"; do
   [[ -f "$f" ]] || { echo "Missing required file: $f" >&2; exit 1; }

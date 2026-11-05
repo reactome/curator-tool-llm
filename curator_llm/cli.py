@@ -15,6 +15,7 @@ import sys
 import time
 from typing import Callable, List, Optional, Tuple
 
+from curator_llm.annotation_files import add_to, default_session_dir
 from curator_llm.models.session import PaperInfo, Session
 from curator_llm.models.usage import summarize
 from curator_llm.ports.pipeline import PaperRef, PipelineInput
@@ -29,6 +30,9 @@ results, per session, in --out:
                                  none is applied: a curator accepts them in the curator tool's Paper2Path page
   <name>.session.json            the papers, number of reactions and issues, and the tokens used
   <name>.evidence.json           every quote with the paper, page and section it is from, and which instance it supports
+  <name>.annotation.json         the whole annotation, as the service keeps it: with --owner it is also added to that
+                                 curator's annotations, or add it later with scripts/import_annotation.sh, and open it
+                                 in the front-end (Paper2Path, "Your annotations")
 A paper that cannot be read (not open access, or nothing reaction-like in it) is skipped and listed in the issues; the
 other papers still go through. Needs the same .env as the service (ANTHROPIC_API_KEY, REACTOME_NEO4J_*, ...).
 """
@@ -104,8 +108,9 @@ def _progress(name: str, say: Callable[[str], None]) -> Callable[[str], None]:
 
 
 def annotate(name: str, refs: List[PaperRef], focus: Optional[str], out_dir: str, pipeline, say: Callable[[str], None],
-             force: bool = False, qa_model=None) -> bool:
-    """One draft from `refs`; writes the result files. False if it failed (the reason is printed)."""
+             force: bool = False, qa_model=None, owner: Optional[str] = None, store=None) -> bool:
+    """One draft from `refs`; writes the result files. False if it failed (the reason is printed). With `owner` and
+    `store` (a SessionStore) the annotation is also saved as one of that curator's, for the front-end."""
     staged = os.path.join(out_dir, f'{name}.staged_instances.json')
     if os.path.isfile(staged) and os.path.getsize(staged) > 0 and not force:
         say(f'[{name}] already done (use --force to run again), skipping')
@@ -120,7 +125,7 @@ def annotate(name: str, refs: List[PaperRef], focus: Optional[str], out_dir: str
     papers = [PaperInfo(source=r.source, kind='pmid' if r.pmid else 'pdf', pmid=r.pmid,
                         name=r.label or (r.pmid if r.pmid else r.source),
                         review=result.reviews.get(r.source, r.review)) for r in refs]
-    s = Session(owner='local', pmid=next((r.pmid for r in refs if r.pmid), None), focus=focus, papers=papers,
+    s = Session(owner=owner or 'local', pmid=next((r.pmid for r in refs if r.pmid), None), focus=focus, papers=papers,
                 source=SessionService._source_label(papers), draft=result.draft, evidence=list(result.evidence),
                 issues=list(result.issues), existing=list(result.existing), usage=list(result.usage),
                 paper=result.paper, paper_texts=dict(result.papers), status='ready')
@@ -141,7 +146,13 @@ def annotate(name: str, refs: List[PaperRef], focus: Optional[str], out_dir: str
     _write(os.path.join(out_dir, f'{name}.session.json'),
            {'source': s.source, 'focus': focus, 'n_reactions': len(s.draft.reactions), 'n_open_issues': len(open_issues), 'n_suggested_fixes': len(suggestions),
             'papers': [p.model_dump() for p in papers], 'usage': usage})
+    s.progress = 'done'
+    _write(os.path.join(out_dir, f'{name}.annotation.json'), s.model_dump(mode='json'))   # the whole annotation
     say(f'[{name}] done: {len(s.draft.reactions)} reactions from {len(refs)} paper(s), {len(open_issues)} open issues, {len(suggestions)} suggested fixes')
+    if owner and store is not None:
+        add_to(store, s, owner, replace=True)
+        say(f'[{name}] added to {owner}\'s annotations ({os.path.join(store.directory, owner, s.id + ".json")}): '
+            f'open it in the front-end, Paper2Path, "Your annotations"')
     notes = [i.message for i in open_issues if i.source == 'pipeline']
     if notes:
         say(f'[{name}] note: ' + '; '.join(notes))
@@ -161,6 +172,12 @@ def main(argv: Optional[List[str]] = None, pipeline=None, say: Callable[[str], N
     ap.add_argument('--name', metavar='NAME', help='file name prefix of the merged result (default papers-<date and time>)')
     ap.add_argument('--separate', action='store_true', help='annotate each paper on its own instead of one merged draft')
     ap.add_argument('--force', action='store_true', help='run again even if the results already exist')
+    ap.add_argument('--owner', metavar='USER',
+                    help="also add each annotation to this curator's annotations (their login name), so the front-end "
+                         'shows it in Paper2Path, "Your annotations"; without it, add <name>.annotation.json later with '
+                         'scripts/import_annotation.sh')
+    ap.add_argument('--session-dir', metavar='DIR', help='with --owner: the service\'s session folder (default: SESSION_DIR '
+                    'from .env, else data/sessions of this checkout)')
     ap.add_argument('--no-qa', action='store_true',
                     help='skip the model QA review of each reaction (one call per reaction); the automatic checks still run')
     ap.add_argument('--review', action='store_true',
@@ -187,6 +204,10 @@ def main(argv: Optional[List[str]] = None, pipeline=None, say: Callable[[str], N
             qa_model = AnthropicChatModel(role='qa')
     if args.no_qa:
         qa_model = None
+    store = None
+    if args.owner:
+        from curator_llm.adapters.sessions_file import FileSessionStore
+        store = FileSessionStore(args.session_dir or default_session_dir())
     done, failed = 0, []
     if len(refs) == 1 and args.name:
         jobs = [(args.name, refs)]
@@ -195,7 +216,8 @@ def main(argv: Optional[List[str]] = None, pipeline=None, say: Callable[[str], N
     else:
         jobs = [(args.name or f'papers-{time.strftime("%Y%m%d-%H%M%S")}', refs)]
     for name, group in jobs:
-        if annotate(name, group, args.focus, args.out, pipeline, say, args.force, qa_model=qa_model):
+        if annotate(name, group, args.focus, args.out, pipeline, say, args.force, qa_model=qa_model,
+                    owner=args.owner, store=store):
             done += 1
         else:
             failed.append(name)
