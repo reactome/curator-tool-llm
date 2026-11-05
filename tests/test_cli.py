@@ -57,7 +57,7 @@ def test_several_papers_become_one_merged_draft_with_all_the_result_files(tmp_pa
     spec = pipe.calls[0]
     assert [r.source for r in spec.refs()] == ['a.PDF', 'b.pdf', 'PMID:24751536', 'PMID:29168502'] and spec.focus == 'PINK1'
     out = tmp_path / 'out'
-    assert sorted(os.listdir(out)) == ['together.annotation.json', 'together.evidence.json', 'together.issues.json', 'together.session.json', 'together.staged_instances.json', 'together.suggestions.json']
+    assert sorted(os.listdir(out)) == ['together.annotation.json', 'together.evidence.json', 'together.issues.json', 'together.progress.json', 'together.session.json', 'together.staged_instances.json', 'together.suggestions.json']
     assert json.load(open(out / 'together.staged_instances.json'))['newInstances']
     sess = json.load(open(out / 'together.session.json'))
     assert sess['n_reactions'] == 5 and [p['kind'] for p in sess['papers']] == ['pdf', 'pdf', 'pmid', 'pmid'] and sess['source'].startswith('4 papers: ')
@@ -100,7 +100,7 @@ def test_a_failing_session_does_not_stop_the_others_and_the_exit_code_says_so(tm
     folder.mkdir()
     code, pipe, lines = run([pdf(folder, 'boom.pdf'), pdf(folder, 'fine.pdf'), '--separate'], tmp_path)
     assert code == 1 and len(pipe.calls) == 2
-    assert any('FAILED: RuntimeError: no full text' in m for m in lines) and any('1 session(s) done, 1 failed (boom)' in m for m in lines)
+    assert any('FAILED: RuntimeError: no full text' in m for m in lines) and any('1 session(s) done, 0 partial, 1 failed; failed: boom' in m for m in lines)
     assert os.path.isfile(tmp_path / 'out' / 'fine.staged_instances.json') and not os.path.exists(tmp_path / 'out' / 'boom.staged_instances.json')
 
 

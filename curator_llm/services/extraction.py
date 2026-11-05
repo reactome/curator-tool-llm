@@ -140,8 +140,11 @@ class StepProgress:
 class SubprocessExtractor:
     def __init__(self, root: str = ROOT, results_dir: Optional[str] = None, timeout: int = 1800,
                  review: bool = False, run: Callable = _subprocess_run, stem: Optional[Callable] = None,
-                 paper_workers: Optional[int] = None):
+                 paper_workers: Optional[int] = None, resume: bool = False):
         self.root, self.timeout, self.review, self._run = root, timeout, review, run
+        # keep a paper's extraction from an earlier run when it finished completely with the same paper, model, prompt
+        # and settings (run_extraction.py --resume); the command line turns this on, the service extracts afresh
+        self.resume = resume
         # papers extracted at the same time (each extraction already runs its chunks 16 at a time)
         self.paper_workers = max(1, paper_workers if paper_workers is not None else int(os.getenv('PAPER_WORKERS', '2')))
         self.results_dir = results_dir or os.path.join(root, 'results')
@@ -188,6 +191,20 @@ class SubprocessExtractor:
             return None
         return proc
 
+    @staticmethod
+    def _paper_state(extraction_path: str, started: float, ran_ok: bool) -> dict:
+        """How run_extraction.py ended this paper (its <stem>_extraction.status.json). It writes one whenever it exits
+        normally, so no status after a failed step means it did not finish (a crash, a timeout): incomplete, to be
+        tried again. No status after a clean exit is an extraction script without status files: taken as complete."""
+        try:
+            with open(extraction_path[:-len('_extraction.json')] + '_extraction.status.json') as f:
+                st = json.load(f)
+        except (OSError, ValueError):
+            return ({'state': 'complete', 'reason': '', 'reused': False} if ran_ok else
+                    {'state': 'incomplete', 'reason': 'the extraction did not finish', 'reused': False})
+        state = st.get('state') if st.get('state') in ('complete', 'incomplete', 'no_text') else 'incomplete'
+        return {'state': state, 'reason': st.get('reason') or '', 'reused': float(st.get('finished_at') or 0) < started}
+
     def _cited_note(self, extraction_path: str) -> Optional[str]:
         """What run_extraction left out of a research paper as only cited from earlier work, as a note for the curator
         (None when nothing was)."""
@@ -212,8 +229,16 @@ class SubprocessExtractor:
         py = sys.executable
         with _lock_for(label):
             cmd = ([py, 'run_extraction.py', spec, '--gene', gene, '--overwrite'] + (['--tag', tag] if tag else [])
-                   + (['--review'] if review else []))
-            if self._step('extraction', cmd, res, report) is None:
+                   + (['--review'] if review else []) + (['--resume'] if self.resume else []))
+            source = f'PMID:{pmid}' if pmid else os.path.basename(pdf_path)
+            started = time.time()
+            stepped = self._step('extraction', cmd, res, report)
+            res.paper_status[source] = st = self._paper_state(res.extraction_path, started, stepped is not None)
+            if stepped is None:
+                return res
+            if st['state'] != 'complete':
+                res.error = (('incomplete, run again to finish: ' if st['state'] == 'incomplete' else 'no usable text: ')
+                             + (st['reason'] or 'the extraction did not finish'))
                 return res
             extracted = self._read(res.extraction_path)
             res.n_extracted = len(extracted)
@@ -228,14 +253,14 @@ class SubprocessExtractor:
             err_before = res.error
             if self._step('merge', [py, 'run_merge.py', res.extraction_path], res, report) is None:
                 res.warnings.append(f'{res.error}; using unmerged reactions')
-                res.error, res.merged_path = err_before, None
+                res.error, res.merged_path, res.merge_ok = err_before, None, False
             else:
                 merged = self._read(res.merged_path)
                 if merged:
                     res.reactions, res.n_merged = merged, len(merged)
                 else:
                     res.warnings.append('merge wrote no reactions; using unmerged reactions')
-                    res.merged_path = None
+                    res.merged_path, res.merge_ok = None, False
             if self.review and res.merged_path:
                 if self._step('review', [py, 'run_review.py', res.merged_path], res, report) is None:
                     res.warnings.append(res.error)
@@ -281,8 +306,16 @@ class SubprocessExtractor:
             sub.extraction_path = os.path.join(self.results_dir, f'{label}_extraction.json')
             with _lock_for(label):
                 cmd = ([sys.executable, 'run_extraction.py', spec, '--gene', gene, '--overwrite']
-                       + (['--tag', tag] if tag else []) + (['--review'] if getattr(ref, 'review', False) else []))
-                if self._step('extraction', cmd, sub, lambda m, k=k: say(k, m)) is None:
+                       + (['--tag', tag] if tag else []) + (['--review'] if getattr(ref, 'review', False) else [])
+                       + (['--resume'] if self.resume else []))
+                started = time.time()
+                stepped = self._step('extraction', cmd, sub, lambda m, k=k: say(k, m))
+                sub.paper_status[ref.source] = st = self._paper_state(sub.extraction_path, started, stepped is not None)
+                if stepped is None:
+                    return sub
+                if st['state'] != 'complete':
+                    sub.error = (('incomplete, run again to finish: ' if st['state'] == 'incomplete' else 'no usable text: ')
+                                 + (st['reason'] or 'the extraction did not finish'))
                     return sub
                 sub.reactions = self._read(sub.extraction_path)
                 sub.n_extracted = len(sub.reactions)
@@ -303,6 +336,7 @@ class SubprocessExtractor:
                 res.step_usage[step] = _add(res.step_usage.get(step, {}), counts)
             res.n_extracted += sub.n_extracted
             res.warnings += sub.warnings
+            res.paper_status.update(sub.paper_status)
             if sub.error or not sub.reactions:
                 res.warnings.append(f'{ref.label or ref.source}: skipped, {sub.error or "no reactions"}')
             else:
@@ -320,13 +354,13 @@ class SubprocessExtractor:
             cmd = [sys.executable, 'run_merge.py'] + [sub.extraction_path for sub in usable] + ['--out', res.merged_path]
             if self._step('merge', cmd, res, report) is None:
                 res.warnings.append(f'{res.error}; using unmerged reactions')
-                res.error, res.merged_path = err_before, None
+                res.error, res.merged_path, res.merge_ok = err_before, None, False
             else:
                 merged = self._read(res.merged_path)
                 if merged:
                     res.reactions, res.n_merged = merged, len(merged)
                 else:
                     res.warnings.append('merge wrote no reactions; using unmerged reactions')
-                    res.merged_path = None
+                    res.merged_path, res.merge_ok = None, False
         res.ok = True
         return res

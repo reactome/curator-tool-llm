@@ -446,6 +446,29 @@ applied), `<name>.session.json` (papers, counts, tokens used), `<name>.evidence.
 and section) and `<name>.annotation.json` (the whole annotation, see below). Finished results are skipped unless you
 pass `--force`; `--help` lists everything.
 
+#### Large runs: progress and resuming
+
+A run over many papers can be interrupted (a lost connection, a rate limit, a closed laptop). Run **the same command
+again** and it continues where it stopped:
+
+- Each paper's extraction ends with a status next to it (`results/<stem>_extraction.status.json`): `complete`,
+  `incomplete` (the model or PubMed Central could not be reached: worth another try) or `no_text` (not open access, or
+  no usable text: another try will not change it). A model call that fails is retried (waits `EXTRACT_RETRY_WAITS`,
+  default `5,20,60` seconds) before a chunk counts as failed, and a paper with a failed chunk is `incomplete`: it is
+  kept out of the draft and reported, instead of being used with reactions missing.
+- On the next run, a paper whose extraction is `complete` for the same paper, focus, review setting, model and prompt is
+  reused (`[resume]` in the log); the others are extracted. Changing the model or the prompt makes every paper extract
+  again. The merge's verdicts are cached too (`data/merge_cache`), so merging again is cheap.
+- `<name>.progress.json` in `--out` says how the run ended (`complete`, `partial`: written, but a paper is incomplete
+  or the merge failed, or `failed`) and lists each paper with its state and reason. Only a `complete` run is skipped
+  next time; the summary line and the exit code (1) say when something is left to do.
+- `--force` starts afresh: every paper is extracted again.
+- The REST service is not affected: it always extracts afresh. An incomplete run is never saved as a snapshot.
+
+```bash
+scripts/annotate_papers.sh --pmid-file pmids.txt --name big_run     # interrupted, or "partial"? run it again
+```
+
 #### Opening command-line results in the front-end
 
 `<name>.annotation.json` is the whole annotation as the service keeps it (draft, quotes, issues, suggested fixes, QA

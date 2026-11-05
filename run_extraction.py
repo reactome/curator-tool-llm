@@ -82,27 +82,73 @@ pm = importlib.util.module_from_spec(spec); spec.loader.exec_module(pm)
 splitter = RecursiveCharacterTextSplitter(chunk_size=1200, chunk_overlap=0, length_function=len,
                                           separators=['\n\n', '\n', '. ', ' ', ''])
 
+# A model call that fails for a passing reason (connection, timeout, rate limit, overload) is tried again after these
+# waits, on top of the SDK's own retries. A chunk that still fails makes the paper INCOMPLETE: no status "complete" is
+# written, so a resumed run extracts the paper again instead of keeping it with reactions missing.
+RETRY_WAITS = [float(x) for x in os.getenv('EXTRACT_RETRY_WAITS', '5,20,60').split(',') if x.strip()]
+FAILED_CHUNKS = set()          # chunk indexes of the paper being extracted whose model call failed for good
+_failed_lock = threading.Lock()
+
+
+class ChunkFailed(Exception):
+    pass
+
+
+def _transient(e) -> bool:
+    if isinstance(e, (anthropic.APIConnectionError, anthropic.APITimeoutError, anthropic.RateLimitError,
+                      anthropic.InternalServerError)):
+        return True
+    return getattr(e, 'status_code', None) in (408, 409, 429, 500, 502, 503, 504, 529)
+
+
+def _call(head, tail):
+    last = None
+    for attempt, wait in enumerate([0.0] + RETRY_WAITS):
+        if wait:
+            time.sleep(wait)
+        try:
+            # the head (instructions) is the same for every chunk: mark it for prompt caching
+            return client.messages.create(**MODEL_KW, max_tokens=16000, messages=[{'role': 'user', 'content': [
+                {'type': 'text', 'text': head, 'cache_control': {'type': 'ephemeral'}},
+                {'type': 'text', 'text': tail}]}])
+        except Exception as e:
+            last = e
+            print(f'    API call failed (try {attempt + 1}): {type(e).__name__}: {e}', flush=True)
+            if not _transient(e):                    # a bad request, say: trying again cannot help
+                break
+    raise ChunkFailed(f'{type(last).__name__}: {last}')
+
+
 def extract_reactions(current_chunk, prev_contexts, next_context, raw_prev=False):
+    """The chunk's reactions, or None when the model's reply cannot be read even on a second try (the chunk is then
+    taken as done, with nothing in it). Raises ChunkFailed when the model could not be reached."""
     head, tail = pm.build_extraction_prompt(current_chunk, prev_contexts=prev_contexts, next_context=next_context,
                                             raw_prev=raw_prev, split=True)
+    for attempt in (1, 2):
+        msg = _call(head, tail)
+        track_usage(msg)
+        raw = ''.join(b.text for b in msg.content if getattr(b, 'type', None) == 'text').strip()
+        raw = raw.replace('```json', '').replace('```', '').strip()
+        if not raw.startswith('{'):
+            s, e = raw.find('{'), raw.rfind('}')
+            if s != -1 and e != -1: raw = raw[s:e+1]
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            print(f'    JSON parse failed (try {attempt}): {e}{"  [TRUNCATED]" if msg.stop_reason=="max_tokens" else ""}',
+                  flush=True)
+    return None
+
+
+def _extract_or_mark(idx, *args, **kwargs):
+    """extract_reactions, recording a chunk whose model call failed for good (it then counts as having no reactions)."""
     try:
-        # the head (instructions) is the same for every chunk: mark it for prompt caching
-        msg = client.messages.create(**MODEL_KW, max_tokens=16000, messages=[{'role': 'user', 'content': [
-            {'type': 'text', 'text': head, 'cache_control': {'type': 'ephemeral'}},
-            {'type': 'text', 'text': tail}]}])
-    except Exception as e:
-        print(f'    API call failed: {type(e).__name__}: {e}', flush=True); return None
-    track_usage(msg)
-    raw = ''.join(b.text for b in msg.content if getattr(b, 'type', None) == 'text').strip()
-    raw = raw.replace('```json', '').replace('```', '').strip()
-    if not raw.startswith('{'):
-        s, e = raw.find('{'), raw.rfind('}')
-        if s != -1 and e != -1: raw = raw[s:e+1]
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError as e:
-        print(f'    JSON parse failed: {e}{"  [TRUNCATED]" if msg.stop_reason=="max_tokens" else ""}', flush=True)
-        return None
+        return extract_reactions(*args, **kwargs), False
+    except ChunkFailed as e:
+        print(f'    chunk {idx + 1}: giving up after retries ({e}); the paper will be marked incomplete', flush=True)
+        with _failed_lock:
+            FAILED_CHUNKS.add(idx)
+        return None, True
 
 def make_note(idx, reactions):
     if not reactions: return ''
@@ -126,7 +172,7 @@ def process_chunk(state: PipelineState) -> PipelineState:
     prev_contexts = state['recent_notes']
     next_context = state['chunks'][idx + 1] if idx + 1 < len(state['chunks']) else None
 
-    result = extract_reactions(chunk, prev_contexts, next_context)
+    result, _ = _extract_or_mark(idx, chunk, prev_contexts, next_context)
     new_reactions = [split_evidence(r) for r in (result.get('reactions', []) if result else [])]
     note = make_note(idx, new_reactions)
     recent = (([note] if note else []) + state['recent_notes'])[:PREV_WINDOW]
@@ -155,7 +201,7 @@ def extract_concurrently(source_id, out, chunks, workers):
     def work(idx):
         prev = [chunks[k] for k in (idx - 1, idx - 2) if k >= 0]
         nxt = chunks[idx + 1] if idx + 1 < len(chunks) else None
-        result = extract_reactions(chunks[idx], prev, nxt, raw_prev=True)
+        result, _ = _extract_or_mark(idx, chunks[idx], prev, nxt, raw_prev=True)
         new = [split_evidence(r) for r in (result.get('reactions', []) if result else [])]
         with lock:
             done[idx] = new
@@ -187,18 +233,78 @@ def cited_only_path(out):
     return out[:-len('_extraction.json')] + '_cited_only.json'
 
 
-def extract_paper(paper, gene=None, tag=None, overwrite=False, pmcid=None, review=False):
+def output_path(paper, gene=None, tag=None):
     # gene is only a filename label — a PMID stem carries no gene on its own.
     stem = fetcher.output_stem(paper, gene=gene)
     # --tag keeps a re-run in its own file so two extractions can be compared
     label = f'{stem}' + (f'_{tag}' if tag else '')
-    out = os.path.join(RESULTS_DIR, f'{label}_extraction.json')
+    return os.path.join(RESULTS_DIR, f'{label}_extraction.json')
+
+
+def status_path(out):
+    """How the paper's extraction ended (complete / incomplete / no_text), next to the extraction file. A resumed run
+    reuses the extraction only when this says complete and the fingerprint matches."""
+    return out[:-len('_extraction.json')] + '_extraction.status.json'
+
+
+def fingerprint(paper, review=False):
+    """What the extraction depends on: the paper (a PDF's content, else its id), the model and its settings, the prompt,
+    serial or concurrent chunks, and review vs research. If any of them changes, a resumed run extracts again."""
+    import hashlib
+    h = hashlib.sha256()
+    path = paper if os.path.isfile(paper) else os.path.join(PAPERS_DIR, paper)
+    if os.path.isfile(path):
+        with open(path, 'rb') as f:
+            for block in iter(lambda: f.read(1 << 20), b''):
+                h.update(block)
+    else:
+        h.update(str(paper).strip().encode())
+    h.update(json.dumps([MODEL_KW, pm.build_extraction_prompt('', split=True)[0], WORKERS == 1, bool(review)],
+                        sort_keys=True, default=str).encode())
+    return h.hexdigest()[:24]
+
+
+def write_status(out, state, fp, **extra):
+    tmp = status_path(out) + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump({'state': state, 'fingerprint': fp, 'finished_at': time.time(), **extra}, f, indent=2)
+    os.replace(tmp, status_path(out))
+
+
+def read_status(out):
+    try:
+        with open(status_path(out)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def extract_paper(paper, gene=None, tag=None, overwrite=False, pmcid=None, review=False, resume=False):
+    out = output_path(paper, gene, tag)
+    fp = fingerprint(paper, review)
+    if resume:
+        st = read_status(out)
+        if st and st.get('state') == 'complete' and st.get('fingerprint') == fp and os.path.exists(out):
+            print(f"[resume] {paper}: using the complete extraction from an earlier run "
+                  f"({st.get('reactions', '?')} reaction(s)) -> {out}", flush=True)
+            return
     if os.path.exists(out) and not overwrite:
         raise FileExistsError(f'{out} exists — pass --tag <name> to write a separate '
                               f'file, or --overwrite to replace it')
+    if os.path.exists(status_path(out)):
+        os.remove(status_path(out))          # an aborted run then leaves no "complete" behind for a half-written file
+    with _failed_lock:
+        FAILED_CHUNKS.clear()
     # pmcid comes from the up-front triage, so PMC is not asked to resolve it twice
-    source_id, results_text, how = fetcher.load_source(paper, client=client, model=MODEL_NAME, whole_paper_fallback=True,
-                                                       pmcid=pmcid)
+    try:
+        source_id, results_text, how = fetcher.load_source(paper, client=client, model=MODEL_NAME,
+                                                           whole_paper_fallback=True, pmcid=pmcid)
+    except requests.RequestException as e:   # the network, not the paper: try again on the next run
+        write_status(out, 'incomplete', fp, reason=f'could not fetch the paper ({type(e).__name__}: {e})')
+        raise
+    except ValueError as e:                   # no usable text (not open access, no body): trying again will not help
+        write_status(out, 'no_text', fp, reason=str(e))
+        raise
     chunks = splitter.split_text(results_text)
     print(f"[setup] {source_id}: Results={len(results_text.split()):,}w "
           f"(via {how}) -> {len(chunks)} chunks", flush=True)
@@ -226,6 +332,16 @@ def extract_paper(paper, gene=None, tag=None, overwrite=False, pmcid=None, revie
         print(f"[cited] left out {len(left_out)} reaction(s) the paper only cites from earlier work "
               f"(a research paper needs direct evidence; pass --review for a review article): "
               + '; '.join(r['annotation_result'].get('name', '') for r in left_out), flush=True)
+    with _failed_lock:
+        failed = sorted(FAILED_CHUNKS)
+    if failed:
+        write_status(out, 'incomplete', fp, chunks=len(chunks), failed_chunks=failed, reactions=len(found),
+                     reason=f'{len(failed)} of {len(chunks)} chunk(s) could not be extracted (the model could not be '
+                            f'reached); run again to finish')
+        print(f"[incomplete] {source_id}: {len(failed)} of {len(chunks)} chunk(s) failed: {[i + 1 for i in failed]}; "
+              f"run again to extract this paper completely", flush=True)
+    else:
+        write_status(out, 'complete', fp, chunks=len(chunks), reactions=len(found))
     print(f"[done] {source_id}: {n_chunks} chunks, {len(found)} reaction(s), "
           f"{time.time()-t0:.0f}s ({WORKERS} worker(s)) -> {out}", flush=True)
 
@@ -241,6 +357,9 @@ if __name__ == '__main__':
                                  'separate from an earlier extraction)')
     ap.add_argument('--overwrite', action='store_true',
                     help='allow replacing an existing extraction file (refused by default)')
+    ap.add_argument('--resume', action='store_true',
+                    help='keep a paper\'s extraction from an earlier run when it finished completely with the same '
+                         'paper, model, prompt and settings (see <stem>_extraction.status.json); extract the others')
     ap.add_argument('--workers', type=int, help='chunks extracted concurrently (default $EXTRACT_WORKERS or 16; '
                     '1 = the original serial mode, where each chunk sees notes on the previous two)')
     ap.add_argument('--review', action='store_true',
@@ -262,8 +381,18 @@ if __name__ == '__main__':
     # a paper PMC has no full text for can never enter this pipeline, so report it as a
     # miss up front instead of discovering it paper-by-paper. Local PDFs bypass this.
     ids = [p for p in papers if fetcher.is_pmid(p) or fetcher.is_pmcid(p)]
-    triage = fetcher.triage_pmids(ids) if ids else {'hits': {}, 'misses': {}}
+    try:
+        triage = fetcher.triage_pmids(ids) if ids else {'hits': {}, 'misses': {}}
+    except requests.RequestException as e:   # no network: every PMID is incomplete, to be tried again
+        for p in ids:
+            write_status(output_path(p, a.gene, a.tag), 'incomplete', fingerprint(p, a.review),
+                         reason=f'could not reach PubMed Central ({type(e).__name__}: {e})')
+        print(f"[skip] PubMed Central could not be reached: {e}", flush=True)
+        triage = {'hits': {}, 'misses': {p: 'pmc-unreachable' for p in ids}}
     misses = dict(triage['misses'])
+    for p, why in triage['misses'].items():
+        if why != 'pmc-unreachable':          # PMC has no full text for it: trying again will not help
+            write_status(output_path(p, a.gene, a.tag), 'no_text', fingerprint(p, a.review), reason=str(why))
     todo = [p for p in papers if p not in misses]
 
     print(f"[run] extracting {len(todo)} paper(s): {todo}", flush=True)
@@ -271,7 +400,7 @@ if __name__ == '__main__':
         print(f"\n########## {paper} ##########", flush=True)
         try:
             extract_paper(paper, gene=a.gene, tag=a.tag, overwrite=a.overwrite,
-                          pmcid=triage['hits'].get(paper), review=a.review)
+                          pmcid=triage['hits'].get(paper), review=a.review, resume=a.resume)
         except FileExistsError as e:
             print(f"[skip] {paper}: {e}", flush=True)
             misses[paper] = 'output-exists'

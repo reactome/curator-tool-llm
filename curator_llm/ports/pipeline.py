@@ -52,6 +52,19 @@ class PipelineResult:
     replayed: bool = False             # served from a saved result: the usage is the original run's
     papers: Dict[str, dict] = field(default_factory=dict)   # every paper's PaperText.to_dict(), by source tag
     reviews: Dict[str, bool] = field(default_factory=dict)  # review (True) or research, by source tag (paper_kind)
+    # how each paper's extraction ended (ExtractionResult.paper_status), and whether the whole run is complete: every
+    # paper extracted (or without usable text) and merged. An incomplete run is not saved as a snapshot.
+    paper_status: Dict[str, dict] = field(default_factory=dict)
+    complete: bool = True
+
+
+class PipelineFailed(RuntimeError):
+    """No reactions came out. Carries how each paper's extraction ended, so a caller can tell papers worth another
+    try (incomplete) from those that will not change (no usable text)."""
+
+    def __init__(self, message: str, paper_status: Optional[Dict[str, dict]] = None):
+        super().__init__(message)
+        self.paper_status = dict(paper_status or {})
 
 
 class Pipeline(Protocol):

@@ -30,11 +30,15 @@ results, per session, in --out:
                                  none is applied: a curator accepts them in the curator tool's Paper2Path page
   <name>.session.json            the papers, number of reactions and issues, and the tokens used
   <name>.evidence.json           every quote with the paper, page and section it is from, and which instance it supports
+  <name>.progress.json           how the run ended (complete / partial / failed) and each paper's extraction (complete,
+                                 incomplete: worth another try, no_text: not open access or no usable text; reused)
   <name>.annotation.json         the whole annotation, as the service keeps it: with --owner it is also added to that
                                  curator's annotations, or add it later with scripts/import_annotation.sh, and open it
                                  in the front-end (Paper2Path, "Your annotations")
 A paper that cannot be read (not open access, or nothing reaction-like in it) is skipped and listed in the issues; the
-other papers still go through. Needs the same .env as the service (ANTHROPIC_API_KEY, REACTOME_NEO4J_*, ...).
+other papers still go through. Interrupted, or a paper incomplete because the model or PubMed Central could not be
+reached? Run the same command again: each paper extracted completely before is reused (same paper, focus, model and
+prompt), only the rest is extracted, and a run already complete is skipped. --force starts afresh. Needs the same .env as the service (ANTHROPIC_API_KEY, REACTOME_NEO4J_*, ...).
 """
 
 
@@ -107,21 +111,59 @@ def _progress(name: str, say: Callable[[str], None]) -> Callable[[str], None]:
     return report
 
 
+COMPLETE, PARTIAL, FAILED = 'complete', 'partial', 'failed'
+
+
+def _paper_rows(refs: List[PaperRef], status: dict, default: str, reason: str = '') -> List[dict]:
+    rows = []
+    for r in refs:
+        st = status.get(r.source) or {'state': default, 'reason': reason}
+        rows.append({'paper': r.label or (f'PMID {r.pmid}' if r.pmid else r.source), 'source': r.source,
+                     'state': st.get('state', default), 'reason': st.get('reason', ''), 'reused': bool(st.get('reused'))})
+    return rows
+
+
+def write_progress(out_dir: str, name: str, status: str, papers: List[dict], note: str = '') -> None:
+    """<name>.progress.json: how this draft's last run ended and each paper's extraction. A run is skipped next time
+    only when it is complete; otherwise running the same command again finishes it, reusing the complete papers."""
+    os.makedirs(out_dir, exist_ok=True)
+    counts = {s: sum(p['state'] == s for p in papers) for s in ('complete', 'incomplete', 'no_text')}
+    _write(os.path.join(out_dir, f'{name}.progress.json'),
+           {'name': name, 'status': status, 'updated': time.strftime('%Y-%m-%d %H:%M:%S'), 'note': note,
+            'counts': counts, 'reused': sum(p['reused'] for p in papers), 'papers': papers})
+
+
+def read_progress(out_dir: str, name: str) -> Optional[dict]:
+    try:
+        with open(os.path.join(out_dir, f'{name}.progress.json')) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
 def annotate(name: str, refs: List[PaperRef], focus: Optional[str], out_dir: str, pipeline, say: Callable[[str], None],
-             force: bool = False, qa_model=None, owner: Optional[str] = None, store=None) -> bool:
-    """One draft from `refs`; writes the result files. False if it failed (the reason is printed). With `owner` and
-    `store` (a SessionStore) the annotation is also saved as one of that curator's, for the front-end."""
+             force: bool = False, qa_model=None, owner: Optional[str] = None, store=None) -> str:
+    """One draft from `refs`; writes the result files. Returns COMPLETE, PARTIAL (written, but some paper could not be
+    extracted completely or the merge failed: running again finishes it) or FAILED (nothing written; the reason is
+    printed). With `owner` and `store` (a SessionStore) the annotation is also saved as one of that curator's."""
     staged = os.path.join(out_dir, f'{name}.staged_instances.json')
-    if os.path.isfile(staged) and os.path.getsize(staged) > 0 and not force:
+    progress = read_progress(out_dir, name)
+    finished = (progress or {}).get('status') == COMPLETE or (
+        progress is None and os.path.isfile(staged) and os.path.getsize(staged) > 0)   # from before progress files
+    if finished and not force:
         say(f'[{name}] already done (use --force to run again), skipping')
-        return True
+        return COMPLETE
+    if progress and progress.get('status') != COMPLETE:
+        say(f'[{name}] resuming: papers extracted completely before are reused')
     say(f'[{name}] annotating {len(refs)} paper(s)')
     spec = PipelineInput(papers=refs, focus=focus or None)
     try:
         result = pipeline.run(spec, _progress(name, say))
     except Exception as e:
         say(f'[{name}] FAILED: {type(e).__name__}: {e}')
-        return False
+        write_progress(out_dir, name, FAILED, _paper_rows(refs, getattr(e, 'paper_status', {}), 'incomplete', str(e)),
+                       f'{type(e).__name__}: {e}')
+        return FAILED
     papers = [PaperInfo(source=r.source, kind='pmid' if r.pmid else 'pdf', pmid=r.pmid,
                         name=r.label or (r.pmid if r.pmid else r.source),
                         review=result.reviews.get(r.source, r.review)) for r in refs]
@@ -148,15 +190,25 @@ def annotate(name: str, refs: List[PaperRef], focus: Optional[str], out_dir: str
             'papers': [p.model_dump() for p in papers], 'usage': usage})
     s.progress = 'done'
     _write(os.path.join(out_dir, f'{name}.annotation.json'), s.model_dump(mode='json'))   # the whole annotation
-    say(f'[{name}] done: {len(s.draft.reactions)} reactions from {len(refs)} paper(s), {len(open_issues)} open issues, {len(suggestions)} suggested fixes')
+    say(f'[{name}] done: {len(s.draft.reactions)} reactions from {len(refs)} paper(s), {len(open_issues)} open issues, {len(suggestions)} suggested fixes'
+        + (f' ({sum(1 for v in (getattr(result, "paper_status", {}) or {}).values() if v.get("reused"))} paper(s) reused from an earlier run)'
+           if any(v.get('reused') for v in (getattr(result, 'paper_status', {}) or {}).values()) else ''))
     if owner and store is not None:
         add_to(store, s, owner, replace=True)
         say(f'[{name}] added to {owner}\'s annotations ({os.path.join(store.directory, owner, s.id + ".json")}): '
             f'open it in the front-end, Paper2Path, "Your annotations"')
+    rows = _paper_rows(refs, getattr(result, 'paper_status', {}) or {}, 'complete')
+    state = COMPLETE if getattr(result, 'complete', True) else PARTIAL
+    write_progress(out_dir, name, state, rows)
+    if state == PARTIAL:
+        todo = [r for r in rows if r['state'] == 'incomplete']
+        say(f'[{name}] PARTIAL: ' + (f'{len(todo)} paper(s) could not be extracted completely ('
+             + '; '.join(f"{r['paper']}: {r['reason']}" for r in todo[:5]) + ('; ...' if len(todo) > 5 else '') + '). '
+             if todo else 'the merge failed. ') + 'Run the same command again to finish; complete papers are reused.')
     notes = [i.message for i in open_issues if i.source == 'pipeline']
     if notes:
         say(f'[{name}] note: ' + '; '.join(notes))
-    return True
+    return state
 
 
 def main(argv: Optional[List[str]] = None, pipeline=None, say: Callable[[str], None] = None, qa_model=None) -> int:
@@ -171,7 +223,9 @@ def main(argv: Optional[List[str]] = None, pipeline=None, say: Callable[[str], N
     ap.add_argument('--out', default='annotations', metavar='DIR', help='where the results go (default ./annotations)')
     ap.add_argument('--name', metavar='NAME', help='file name prefix of the merged result (default papers-<date and time>)')
     ap.add_argument('--separate', action='store_true', help='annotate each paper on its own instead of one merged draft')
-    ap.add_argument('--force', action='store_true', help='run again even if the results already exist')
+    ap.add_argument('--force', action='store_true', help='run again even if the results already exist, and extract '
+                    'every paper afresh (without it, papers extracted completely before are reused, so an interrupted '
+                    'run continues where it stopped)')
     ap.add_argument('--owner', metavar='USER',
                     help="also add each annotation to this curator's annotations (their login name), so the front-end "
                          'shows it in Paper2Path, "Your annotations"; without it, add <name>.annotation.json later with '
@@ -198,7 +252,9 @@ def main(argv: Optional[List[str]] = None, pipeline=None, say: Callable[[str], N
     if pipeline is None:
         from curator_llm.wiring import build_pipeline, load_env
         load_env()
-        pipeline, _ = build_pipeline()
+        pipeline, inner = build_pipeline()
+        if hasattr(getattr(inner, 'extractor', None), 'resume'):
+            inner.extractor.resume = not args.force   # reuse papers extracted completely before (see --force)
         if qa_model is None and not args.no_qa:
             from curator_llm.adapters.chat_anthropic import AnthropicChatModel
             qa_model = AnthropicChatModel(role='qa')
@@ -208,7 +264,7 @@ def main(argv: Optional[List[str]] = None, pipeline=None, say: Callable[[str], N
     if args.owner:
         from curator_llm.adapters.sessions_file import FileSessionStore
         store = FileSessionStore(args.session_dir or default_session_dir())
-    done, failed = 0, []
+    done, partial, failed = 0, [], []
     if len(refs) == 1 and args.name:
         jobs = [(args.name, refs)]
     elif args.separate or len(refs) == 1:
@@ -216,14 +272,19 @@ def main(argv: Optional[List[str]] = None, pipeline=None, say: Callable[[str], N
     else:
         jobs = [(args.name or f'papers-{time.strftime("%Y%m%d-%H%M%S")}', refs)]
     for name, group in jobs:
-        if annotate(name, group, args.focus, args.out, pipeline, say, args.force, qa_model=qa_model,
-                    owner=args.owner, store=store):
+        state = annotate(name, group, args.focus, args.out, pipeline, say, args.force, qa_model=qa_model,
+                         owner=args.owner, store=store)
+        if state == COMPLETE:
             done += 1
+        elif state == PARTIAL:
+            partial.append(name)
         else:
             failed.append(name)
-    say(f'Finished: {done} session(s) done, {len(failed)} failed' + (f' ({", ".join(failed)})' if failed else '') +
-        f'. Results in {args.out}')
-    return 1 if failed else 0
+    say(f'Finished: {done} session(s) done, {len(partial)} partial, {len(failed)} failed'
+        + (f'; partial: {", ".join(partial)}' if partial else '') + (f'; failed: {", ".join(failed)}' if failed else '')
+        + f'. Results in {args.out}' + ('. Run the same command again to finish the rest (complete papers are reused).'
+                                        if partial or failed else ''))
+    return 1 if partial or failed else 0
 
 
 if __name__ == '__main__':

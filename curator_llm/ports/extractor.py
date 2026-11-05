@@ -16,6 +16,16 @@ class ExtractionResult:
     step_usage: Dict[str, Dict[str, int]] = field(default_factory=dict)   # the same, per step: extraction / merge / review
     error: Optional[str] = None                             # why it failed, with the step's stderr tail
     warnings: List[str] = field(default_factory=list)       # degraded but usable (merge failed, review failed)
+    # how each paper's extraction ended, by source tag: {'state': 'complete' | 'incomplete' | 'no_text', 'reason': str,
+    # 'reused': bool (a complete extraction kept from an earlier run)}. 'incomplete' (the model or PMC could not be
+    # reached) is worth trying again; 'no_text' is not.
+    paper_status: Dict[str, dict] = field(default_factory=dict)
+    merge_ok: bool = True                                   # False when the merge failed and unmerged reactions were used
+
+    @property
+    def complete(self) -> bool:
+        """Every paper extracted completely (or has no usable text, which another run cannot change) and merged."""
+        return self.merge_ok and all(s.get('state') in ('complete', 'no_text') for s in self.paper_status.values())
 
 
 class Extractor(Protocol):

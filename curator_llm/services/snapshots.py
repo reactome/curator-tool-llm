@@ -121,6 +121,9 @@ class SnapshotPipeline:
                 saved.replayed = True              # its usage is the original run's, not spent now
                 return saved
         result = self.inner.run(spec, report)
+        if not result.complete:                # a paper missing or unmerged: replaying it would hide that
+            logger.info('snapshot %s not saved: the run is incomplete', key)
+            return result
         try:
             self.store.save(key, result)
         except Exception as e:               # failing to save must never fail the annotation

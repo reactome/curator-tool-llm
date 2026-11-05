@@ -13,7 +13,7 @@ from curator_llm.ports.lookup import InstanceLookup
 from curator_llm.models.usage import UsageEntry, entry_from_counts
 from curator_llm.ports.events import EventLookup
 from curator_llm.ports.extractor import Extractor
-from curator_llm.ports.pipeline import PipelineInput, PipelineResult
+from curator_llm.ports.pipeline import PipelineFailed, PipelineInput, PipelineResult
 from curator_llm.services import issues as iss
 from curator_llm.services.draft_builder import build_draft
 from curator_llm.services.evidence_attach import attach_evidence
@@ -45,13 +45,17 @@ class DefaultPipeline:
         res = self._extract(spec, gene, report)
         reactions: List[dict] = res.reactions
         if not res.ok or not reactions:
-            raise RuntimeError(('no reactions could be extracted from these papers' if len(refs) > 1 else
-                                'no reactions could be extracted from this paper') +
-                               f' (no open-access full text, or nothing reaction-like in it): {res.error or ""}'.strip())
+            unreached = any(v.get('state') == 'incomplete' for v in res.paper_status.values())
+            why = ('the model or PubMed Central could not be reached: run again to finish' if unreached else
+                   'no open-access full text, or nothing reaction-like in it')
+            raise PipelineFailed(('no reactions could be extracted from these papers' if len(refs) > 1 else
+                                  'no reactions could be extracted from this paper') + f' ({why}): {res.error or ""}'.rstrip(': '),
+                                 res.paper_status)
 
         paper_for, papers = self._paper_loader(spec)
         result = self.assemble(spec, reactions, paper_for, papers, report)
         # what the script steps spent comes first, then the draft call that assemble() recorded
+        result.paper_status, result.complete = dict(res.paper_status), res.complete
         result.usage = [entry_from_counts(step, counts) for step, counts in res.step_usage.items()
                         if any(counts.values())] + result.usage
         if res.warnings:                          # e.g. one of several papers could not be read: say so, keep the rest
