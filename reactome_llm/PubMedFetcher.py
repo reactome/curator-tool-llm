@@ -15,13 +15,15 @@ Environment:
     NCBI_EMAIL       contact address NCBI asks for (defaults to NCBI_TOOL owner)
     NCBI_TOOL        tool name NCBI asks for
 """
-import os, re, sys, time, threading
+import json, os, re, sys, time, threading
 import xml.etree.ElementTree as et
 
 import requests
 
 PROJECT_ROOT = os.environ.get('CURATOR_LLM_ROOT') or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CACHE_DIR = os.path.join(PROJECT_ROOT, 'data', 'pmc')
+# PMC JATS XML, one <PMCID>.xml per paper. PMC_CACHE_DIR puts it elsewhere (scripts/annotate_spreadsheet.sh keeps it
+# next to the spreadsheet); the extraction subprocesses inherit the setting.
+CACHE_DIR = os.environ.get('PMC_CACHE_DIR') or os.path.join(PROJECT_ROOT, 'data', 'pmc')
 PAPERS_DIR = os.path.join(PROJECT_ROOT, 'data', 'fulltext_pdf')
 # FullTextResolver downloads PMC XML here, keyed by PMID. load_source reads it before
 # resolving/refetching so a paper the resolver already fetched is not pulled from NCBI twice.
@@ -60,14 +62,51 @@ def _throttle():
 # ─────────────────────────────────────────────────────────────────────────────
 # PMID -> PMCID
 # ─────────────────────────────────────────────────────────────────────────────
+_pmcid_lock = threading.Lock()
+
+
+def _pmcid_map_path():
+    return os.path.join(CACHE_DIR, 'pmcids.json')
+
+
+def known_pmcids():
+    """The PMID -> PMCID pairs already known, kept next to the PMC XML (pmcids.json): asked of NCBI once, or given
+    by a spreadsheet. NCBI answers repeated lookups from many workers with 403/429 now and then."""
+    try:
+        with open(_pmcid_map_path()) as f:
+            return {str(k): v for k, v in json.load(f).items() if v}
+    except (OSError, ValueError):
+        return {}
+
+
+def remember_pmcids(pairs):
+    """Add {pmid: pmcid} pairs to pmcids.json (only real PMCIDs: a 'none' may be temporary)."""
+    pairs = {str(k): (v if str(v).upper().startswith('PMC') else f'PMC{v}') for k, v in (pairs or {}).items() if v}
+    if not pairs:
+        return
+    with _pmcid_lock:
+        known = known_pmcids()
+        if all(known.get(k) == v for k, v in pairs.items()):
+            return
+        known.update(pairs)
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        tmp = _pmcid_map_path() + f'.{os.getpid()}.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(known, f, indent=1, sort_keys=True)
+        os.replace(tmp, _pmcid_map_path())
+
+
 def resolve_pmcids(pmids):
     """Map PMIDs to PMCIDs. Returns {pmid: pmcid_or_None}.
 
-    The ID Converter lives outside E-utilities, so it takes tool/email rather
+    Pairs already known (pmcids.json next to the PMC XML) are answered without asking NCBI; what NCBI resolves is
+    added there. The ID Converter lives outside E-utilities, so it takes tool/email rather
     than an api_key. It accepts up to 200 ids per request.
     """
     pmids = [str(p).strip() for p in pmids if str(p).strip()]
-    out = {}
+    known = known_pmcids()
+    out = {p: known[p] for p in pmids if p in known}
+    pmids = [p for p in pmids if p not in out]
     for i in range(0, len(pmids), 200):
         batch = pmids[i:i + 200]
         _throttle()
@@ -84,6 +123,7 @@ def resolve_pmcids(pmids):
                 print(f"    [idconv] {pmid}: {rec['errmsg']}", flush=True)
         for p in batch:                      # ids the converter didn't echo back
             out.setdefault(p, None)
+        remember_pmcids({p: out[p] for p in batch if out.get(p)})
     return out
 
 

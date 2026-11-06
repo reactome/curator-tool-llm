@@ -11,8 +11,8 @@ from typing import Dict, Iterable, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-Step = Literal['extraction', 'merge', 'review', 'draft', 'qa', 'chat']
-STEP_ORDER: List[str] = ['extraction', 'merge', 'review', 'draft', 'qa', 'chat']
+Step = Literal['extraction', 'merge', 'review', 'draft', 'qa', 'chat', 'combine']   # combine: services/combine.py's judge
+STEP_ORDER: List[str] = ['extraction', 'merge', 'review', 'draft', 'qa', 'chat', 'combine']
 # the steps that produce the annotation; a replayed session carries their usage from the saved run, while checks and
 # chat done in the session are always live
 PIPELINE_STEPS = ('extraction', 'merge', 'review', 'draft')

@@ -37,6 +37,7 @@ from curator_llm.services.merge_support import (TfidfSimilarity, VerdictCache, c
                                                 signature as _signature)
 from curator_llm.services.sources import record_sources
 from curator_llm.services.dedup_prefilter import candidate_pairs, may_be_duplicates
+from curator_llm.services.merge_support import _conf, _judge_prompt, _reaction_brief   # the judge's brief and rules
 
 client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
 from curator_llm.model_settings import anthropic_kwargs
@@ -150,104 +151,13 @@ print("[setup] unique reactions BEFORE semantic merge:", flush=True)
 for i, e in enumerate(unique, 1):
     print(f"   {i:2d}. {e['annotation_result'].get('name','')}", flush=True)
 
-def _reaction_brief(a):
-    ca = a.get('catalystActivity') or {}
-    regs = a.get('regulatedBy') or []
-    # the note carries any condition-dependence flag already recorded, so the judge can use it
-    # instead of re-deriving why one regulator appears in two directions
-    reg_str = ', '.join(
-        f"{r.get('regulationType')} by {r.get('regulator')}"
-        + (f" [note: {r.get('note')}]" if r.get('note') else '')
-        for r in regs) if regs else 'none'
-    return (f"name: {a.get('name','')}\n"
-            f"type: {a.get('reactionType','')}\n"
-            f"input: {', '.join(a.get('input',[]) or []) or 'none'}\n"
-            f"output: {', '.join(a.get('output',[]) or []) or 'none'}\n"
-            f"catalyst: {ca.get('catalyst') or 'none'} ({ca.get('molecularFunction') or 'none'})\n"
-            f"regulation: {reg_str}\n"
-            f"condition: {a.get('condition') or 'none'}\n"
-            f"compartment: {a.get('compartment') or 'none'}\n"
-            f"relationships: {' | '.join(a.get('relationships',[]) or []) or 'none'}")
 
 # pairs whose verdict we never got — they default to NOT duplicate, so the
 # final count may under-merge. Reported at the end rather than lost in the log.
 failures = []
 
-def _conf(x):
-    """Judge confidence clamped to 0-1, or None when the model returned none/garbage."""
-    try:
-        return round(min(1.0, max(0.0, float(x))), 3)
-    except (TypeError, ValueError):
-        return None
 
 
-def _judge_prompt(a1, a2):
-    return f"""You are a Reactome biocurator deduplicating extracted reactions.
-Two records are DUPLICATES if they describe the SAME underlying biochemical event — the same
-molecular transformation of the same participants — EVEN IF they differ in:
-  - wording or synonyms
-  - level of detail / granularity (e.g. one adds a qualifier like "leading to degradation")
-  - reactionType label (e.g. one tagged "blackBoxEvent", the other "transition")
-They are DIFFERENT reactions — do NOT merge them — if ANY of the following differs:
-  - the participants (input) or the products (output)
-  - the catalyst, A catalyst is the entity whose activity
-    performs the input-to-output conversion; an entity that acts upstream, or that modulates
-    whether or how fast the event happens, is REGULATION, not a catalyst — so a record naming
-    X as catalyst and one naming X only as a regulator do not agree on the catalyst either.
-  - a different regulationType on the SAME regulator (one says positiveRegulation by X, the
-    other negativeRegulation by X) — that is a genuine contradiction, not extra detail.
-    When the difference is due to conditional circumstances, such as a different experimental
-    condition, add a "note" on that regulation flagging it for the curator.
-  - the biological condition under which the reaction occurs — EXCEPT when the two records are
-    the SAME core transformation (same participants, same catalyst, same molecular action) and
-    the condition is the ONLY thing separating them. That is one reaction tested under two
-    conditions, not two reactions: merge it, keep BOTH regulatory directions, and flag each
-    with a "note" naming the condition it holds under.
-  - the compartment, when the two are genuinely different locations (cytosol vs
-    mitochondrion) — but NOT when one merely contains the other
-  - the molecular action (e.g. phosphorylation vs ubiquitination)
-They are also DIFFERENT if they merely share one participant.
-
-Likewise these are the SAME, not different:
-  - a domain or subunit vs its parent protein as catalyst (e.g. "ZNFX1 RZ domain" = "ZNFX1")
-  - an experimental construct vs the protein it stands for, as substrate or catalyst: a
-    truncation or fragment made for an assay ("CDH1 N186", "CDH1 (N-terminal fragment)" =
-    "CDH1"), a tagged or recombinant form, or an ortholog from another species used as a stand-in
-    ("Xenopus FZR (Cdh1)" = "CDH1"). One paper often shows the same event in vitro with such a
-    construct and in cells with the native protein: that is one reaction. (A fragment that is a
-    real product of the biology, such as a cleavage product, is a different entity.)
-  - one record listing an accessory cofactor (E1/E2 enzyme, ATP, ubiquitin) the other omits
-  - a compartment vs a sub-compartment of it ("mitochondrial outer membrane" = "mitochondrion")
-  - DIFFERENT SETS OF REGULATORS. Regulation hangs OFF a reaction; it is not part of the
-    reaction's identity. Two experiments on the same event naturally test different
-    regulators — one knocks out X, another uses a phospho-null mutant of Y — so their
-    regulator lists are additive and get unioned when the records merge. A regulator in one
-    record and absent from the other, or two records naming entirely different regulators,
-    is NOT a difference. (A conflicting regulationType on the same regulator still is; see
-    above.)
-  - GO molecular-function wording for the same catalytic act ("ubiquitin-protein ligase
-    activity" = "ubiquitin-protein transferase activity")
-  - the same modification of the same substrate by the same catalyst, named with FEWER sites
-    or none: "phosphorylated at Tyr130" vs "phosphorylated at Tyr91 and Tyr130" vs
-    "phosphorylated on tyrosine residues" vs "phosphorylated". One sentence of a paper often
-    names only some of the sites another sentence lists: that is less detail, not a different
-    product. Only two records naming DISJOINT site sets ("at Ser65" vs "at Ser228", with
-    neither naming both) are different products.
-Judge the CORE transformation: which entity acts on which, and what change it undergoes.
-
-When in doubt, do NOT merge. Two records left separate can still be merged by a curator
-later; a merge that should not have happened is harder to undo.
-
-Reaction A:
-{_reaction_brief(a1)}
-
-Reaction B:
-{_reaction_brief(a2)}
-
-Answer with the "same" key FIRST so the verdict survives truncation.
-Keep "reason" under 15 words. "confidence" is how sure you are OF THIS VERDICT, 0-1: high when
-the two records plainly describe one event, low when you had to weigh a judgement call.
-Return ONLY JSON: {{"same": <true|false>, "confidence": <0-1>, "reason": "<short phrase>"}}"""
 
 
 def reactions_are_duplicate(a1, a2):

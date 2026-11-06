@@ -312,3 +312,152 @@ def merge_across_papers(records: Sequence[dict], *,
                 if merged_any:
                     break
     return groups, stats
+
+
+
+# ── the duplicate judge's brief and rules (moved from run_merge.py, which runs on import; text unchanged, so the
+# verdict cache keys stay the same) ──────────────────────────────────────────────────────────────────────────────
+def _reaction_brief(a):
+    ca = a.get('catalystActivity') or {}
+    regs = a.get('regulatedBy') or []
+    # the note carries any condition-dependence flag already recorded, so the judge can use it
+    # instead of re-deriving why one regulator appears in two directions
+    reg_str = ', '.join(
+        f"{r.get('regulationType')} by {r.get('regulator')}"
+        + (f" [note: {r.get('note')}]" if r.get('note') else '')
+        for r in regs) if regs else 'none'
+    return (f"name: {a.get('name','')}\n"
+            f"type: {a.get('reactionType','')}\n"
+            f"input: {', '.join(a.get('input',[]) or []) or 'none'}\n"
+            f"output: {', '.join(a.get('output',[]) or []) or 'none'}\n"
+            f"catalyst: {ca.get('catalyst') or 'none'} ({ca.get('molecularFunction') or 'none'})\n"
+            f"regulation: {reg_str}\n"
+            f"condition: {a.get('condition') or 'none'}\n"
+            f"compartment: {a.get('compartment') or 'none'}\n"
+            f"relationships: {' | '.join(a.get('relationships',[]) or []) or 'none'}")
+
+
+def _conf(x):
+    """Judge confidence clamped to 0-1, or None when the model returned none/garbage."""
+    try:
+        return round(min(1.0, max(0.0, float(x))), 3)
+    except (TypeError, ValueError):
+        return None
+
+
+def _judge_prompt(a1, a2):
+    return f"""You are a Reactome biocurator deduplicating extracted reactions.
+Two records are DUPLICATES if they describe the SAME underlying biochemical event — the same
+molecular transformation of the same participants — EVEN IF they differ in:
+  - wording or synonyms
+  - level of detail / granularity (e.g. one adds a qualifier like "leading to degradation")
+  - reactionType label (e.g. one tagged "blackBoxEvent", the other "transition")
+They are DIFFERENT reactions — do NOT merge them — if ANY of the following differs:
+  - the participants (input) or the products (output)
+  - the catalyst, A catalyst is the entity whose activity
+    performs the input-to-output conversion; an entity that acts upstream, or that modulates
+    whether or how fast the event happens, is REGULATION, not a catalyst — so a record naming
+    X as catalyst and one naming X only as a regulator do not agree on the catalyst either.
+  - a different regulationType on the SAME regulator (one says positiveRegulation by X, the
+    other negativeRegulation by X) — that is a genuine contradiction, not extra detail.
+    When the difference is due to conditional circumstances, such as a different experimental
+    condition, add a "note" on that regulation flagging it for the curator.
+  - the biological condition under which the reaction occurs — EXCEPT when the two records are
+    the SAME core transformation (same participants, same catalyst, same molecular action) and
+    the condition is the ONLY thing separating them. That is one reaction tested under two
+    conditions, not two reactions: merge it, keep BOTH regulatory directions, and flag each
+    with a "note" naming the condition it holds under.
+  - the compartment, when the two are genuinely different locations (cytosol vs
+    mitochondrion) — but NOT when one merely contains the other
+  - the molecular action (e.g. phosphorylation vs ubiquitination)
+They are also DIFFERENT if they merely share one participant.
+
+Likewise these are the SAME, not different:
+  - a domain or subunit vs its parent protein as catalyst (e.g. "ZNFX1 RZ domain" = "ZNFX1")
+  - an experimental construct vs the protein it stands for, as substrate or catalyst: a
+    truncation or fragment made for an assay ("CDH1 N186", "CDH1 (N-terminal fragment)" =
+    "CDH1"), a tagged or recombinant form, or an ortholog from another species used as a stand-in
+    ("Xenopus FZR (Cdh1)" = "CDH1"). One paper often shows the same event in vitro with such a
+    construct and in cells with the native protein: that is one reaction. (A fragment that is a
+    real product of the biology, such as a cleavage product, is a different entity.)
+  - one record listing an accessory cofactor (E1/E2 enzyme, ATP, ubiquitin) the other omits
+  - a compartment vs a sub-compartment of it ("mitochondrial outer membrane" = "mitochondrion")
+  - DIFFERENT SETS OF REGULATORS. Regulation hangs OFF a reaction; it is not part of the
+    reaction's identity. Two experiments on the same event naturally test different
+    regulators — one knocks out X, another uses a phospho-null mutant of Y — so their
+    regulator lists are additive and get unioned when the records merge. A regulator in one
+    record and absent from the other, or two records naming entirely different regulators,
+    is NOT a difference. (A conflicting regulationType on the same regulator still is; see
+    above.)
+  - GO molecular-function wording for the same catalytic act ("ubiquitin-protein ligase
+    activity" = "ubiquitin-protein transferase activity")
+  - the same modification of the same substrate by the same catalyst, named with FEWER sites
+    or none: "phosphorylated at Tyr130" vs "phosphorylated at Tyr91 and Tyr130" vs
+    "phosphorylated on tyrosine residues" vs "phosphorylated". One sentence of a paper often
+    names only some of the sites another sentence lists: that is less detail, not a different
+    product. Only two records naming DISJOINT site sets ("at Ser65" vs "at Ser228", with
+    neither naming both) are different products.
+Judge the CORE transformation: which entity acts on which, and what change it undergoes.
+
+When in doubt, do NOT merge. Two records left separate can still be merged by a curator
+later; a merge that should not have happened is harder to undo.
+
+Reaction A:
+{_reaction_brief(a1)}
+
+Reaction B:
+{_reaction_brief(a2)}
+
+Answer with the "same" key FIRST so the verdict survives truncation.
+Keep "reason" under 15 words. "confidence" is how sure you are OF THIS VERDICT, 0-1: high when
+the two records plainly describe one event, low when you had to weigh a judgement call.
+Return ONLY JSON: {{"same": <true|false>, "confidence": <0-1>, "reason": "<short phrase>"}}"""
+
+
+def make_judge(client, model_kw: dict, cache: 'VerdictCache', revote_below: float = 0.9,
+               on_usage: Optional[Callable] = None) -> Callable[[dict, dict], Tuple[bool, Optional[float]]]:
+    """The duplicate judge as run_merge.py asks it, for use in-process: same rules and prompt caching, the verdict
+    cache (shared with run_merge.py: same keys), and a shaky verdict (confidence below `revote_below`) asked twice more,
+    majority wins. judge(a1, a2) takes two reaction annotations (run_merge's shape) and returns (same, confidence); a
+    call that fails twice raises."""
+    fp = hashlib.sha256(_judge_prompt({}, {}).split('Reaction A:')[0].encode()).hexdigest()[:16]
+
+    def ask(a1, a2):
+        prompt = _judge_prompt(a1, a2)
+        cut = prompt.index('Reaction A:')
+        last = None
+        for _ in (1, 2):
+            try:
+                msg = client.messages.create(**model_kw, max_tokens=4000, messages=[{'role': 'user', 'content': [
+                    {'type': 'text', 'text': prompt[:cut], 'cache_control': {'type': 'ephemeral'}},
+                    {'type': 'text', 'text': prompt[cut:]}]}])
+                if on_usage:
+                    on_usage(msg)
+                txt = next((b.text for b in msg.content if getattr(b, 'type', None) == 'text'), '')
+                txt = txt.strip().replace('```json', '').replace('```', '').strip()
+                try:
+                    got = json.loads(txt)
+                    return bool(got.get('same', False)), _conf(got.get('confidence'))
+                except json.JSONDecodeError:
+                    import re
+                    m = re.search(r'"same"\s*:\s*(true|false)', txt, re.I)
+                    if not m:
+                        raise
+                    c = re.search(r'"confidence"\s*:\s*([0-9.]+)', txt)
+                    return m.group(1).lower() == 'true', _conf(c and c.group(1))
+            except Exception as e:
+                last = e
+        raise RuntimeError(f'duplicate judge failed: {type(last).__name__}: {last}')
+
+    def judge(a1, a2):
+        key = VerdictCache.key(model_kw['model'], 'thinking' in model_kw, fp, _reaction_brief(a1), _reaction_brief(a2))
+        hit = cache.get(key)
+        if hit is not None and hit.get('final'):
+            return hit['same'], hit['conf']
+        same, conf = ask(a1, a2)
+        if conf is not None and conf < revote_below:
+            votes = [same] + [ask(a1, a2)[0] for _ in range(2)]
+            same = sum(votes) * 2 > len(votes)
+        cache.put(key, same, conf, final=True)
+        return same, conf
+    return judge

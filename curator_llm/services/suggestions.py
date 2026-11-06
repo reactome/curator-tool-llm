@@ -55,9 +55,9 @@ def remove_reaction_ops(draft: ReactomeDraft, key: str) -> List[dict]:
     """The patch that removes reaction `key`: out of the pathway, out of every other reaction's preceding list, then
     the reaction itself (its participants stay; one no reaction uses is harmless and the curator can drop it)."""
     ops = []
-    if draft.pathway and key in draft.pathway.reactions:
-        ops += [{'op': 'remove', 'path': f'/pathway/reactions/{i}'}
-                for i in sorted((i for i, k in enumerate(draft.pathway.reactions) if k == key), reverse=True)]
+    for path, pw in (draft.pathway.walk() if draft.pathway else ()):   # every pathway listing it, nested ones too
+        ops += [{'op': 'remove', 'path': f'{path}/reactions/{i}'}
+                for i in sorted((i for i, k in enumerate(pw.reactions) if k == key), reverse=True)]
     for r in draft.reactions:
         ops += [{'op': 'remove', 'path': f'/reactions/{r.key}/preceding/{i}'}
                 for i in sorted((i for i, k in enumerate(r.preceding) if k == key), reverse=True)]

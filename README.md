@@ -469,6 +469,52 @@ again** and it continues where it stopped:
 scripts/annotate_papers.sh --pmid-file pmids.txt --name big_run     # interrupted, or "partial"? run it again
 ```
 
+#### Papers listed in a spreadsheet
+
+`scripts/annotate_spreadsheet.sh` annotates the papers an `.xlsx` lists (first sheet, or `--sheet NAME`; no Excel
+library needed). Per row: the PDF named in the **PDF File Name** column when there is one (looked for next to the
+spreadsheet and in its `pdf/` or `PDF/` folder, or `--pdf-dir`), otherwise the **PMID**, read from PubMed Central. The
+PMC full text is downloaded into a `PMC/` folder next to the spreadsheet (`<PMCID>.xml`, from the **PMCID** column or
+looked up; `--pmc-dir` to change it) and the workflow reads it from there. Column names can be changed
+(`--pmid-column`, `--pmcid-column`, `--pdf-column`, `--id-column`).
+
+```bash
+scripts/annotate_spreadsheet.sh papers.xlsx --list              # what would be done (PDF or PMC per row); changes nothing
+scripts/annotate_spreadsheet.sh papers.xlsx --download-only     # just the PMC full text, into PMC/
+scripts/annotate_spreadsheet.sh papers.xlsx --rows 1-5 --no-qa  # try a few rows first
+scripts/annotate_spreadsheet.sh papers.xlsx --jobs 3            # everything, 3 annotations at a time
+scripts/annotate_spreadsheet.sh papers.xlsx --group-by "Drug(s)"   # one merged annotation per drug instead of per paper
+```
+
+Results go to `annotations/` next to the spreadsheet (`--out`): each annotation's result files (named
+`<row>_pmid<PMID>`, in sheet order) and `summary.tsv`, one line per spreadsheet row: PDF or PMC, whether the full text
+came, the annotation, how its run ended (`complete`, `no_reactions`, `partial`, `failed`), the paper's state and the
+number of reactions. It resumes like the command line (see above): run the same command again after a stop. `--owner
+USER` adds each annotation to that curator's annotations for the front-end. PMC sometimes gives only an article's
+metadata ("the publisher does not allow downloading of the full text in XML form"): such rows say so in the summary;
+add their PDF to the spreadsheet to annotate them.
+
+**Token usage and cost**: `summary.tsv` also has, per annotation, the model calls, input/output/cache-read/cache-write
+tokens and an estimated cost in USD (on the first row of an annotation holding several papers), a row for combining
+the hierarchy, and a `TOTAL` row. It is rewritten after each annotation finishes, and the log prints `[cost] ... so far
+~$X`. Prices are in `curator_llm/pricing.py` (Anthropic list prices; override with `LLM_PRICES`, a JSON object of model
+-> `{"input", "output", "cache_write", "cache_read"}` per million tokens). These are estimates: the Anthropic Console
+has the bill.
+
+**One pathway hierarchy for the whole spreadsheet** (`--hierarchy`): after annotating each paper, the script also
+makes ONE annotation of them all, with a top pathway (`--title`, default the spreadsheet's name), a sub-pathway per
+`--group-by` value (say, per drug), and under it a pathway per paper, named by its title (`--title-column`, default
+`Title`). It is put together in code from the finished per-paper annotations, so nothing is extracted again: entities
+are shared (one BCL2, one venetoclax), and a reaction that several papers of a group report becomes one reaction citing
+all of them, listed under each of their pathways (the merge's duplicate judge decides, with its cached verdicts;
+`--no-shared` keeps each paper's copy and asks nothing). Papers that ended without reactions, or not complete, are left
+out and named. Their quotes, issues and QA results come along. It is written as `<title>.annotation.json` and
+`<title>.staged_instances.json` in the results folder (and, with `--owner`, among that curator's annotations).
+
+```bash
+scripts/annotate_spreadsheet.sh papers.xlsx --jobs 3 --hierarchy --group-by "Drug(s)" --title "AML drug response"
+```
+
 #### Opening command-line results in the front-end
 
 `<name>.annotation.json` is the whole annotation as the service keeps it (draft, quotes, issues, suggested fixes, QA

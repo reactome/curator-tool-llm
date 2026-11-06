@@ -254,3 +254,19 @@ def test_force_redoes_a_complete_run(tmp_path):
     run(tmp_path, argv, pipe)
     run(tmp_path, argv + ['--force'], pipe)
     assert len(pipe.calls) == 2
+
+
+def test_a_paper_read_completely_with_no_reactions_is_finished_not_failed(tmp_path):
+    folder = tmp_path / 'pdfs'
+    folder.mkdir()
+    argv = [pdf(folder, 'a.pdf'), '--name', 'many']
+
+    class Empty(FakePipeline):
+        def run(self, spec, report):
+            self.calls.append(spec)
+            raise PipelineFailed('no reactions', {spec.refs()[0].source: {'state': 'complete', 'reason': ''}})
+    pipe = Empty()
+    code, lines, prog = run(tmp_path, argv, pipe)
+    assert code == 0 and prog['status'] == 'no_reactions' and any('no reactions' in m for m in lines)
+    run(tmp_path, argv, pipe)
+    assert len(pipe.calls) == 1                                            # not tried again

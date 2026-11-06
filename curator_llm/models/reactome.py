@@ -107,6 +107,17 @@ class PathwaySpec(BaseModel):
     reactions: List[str] = Field(default_factory=list)   # reaction keys
     summation: str = ''
     pmids: List[str] = Field(default_factory=list)
+    # pathways inside this one (emitted as events of it, before its reactions); a reaction may be listed in several
+    subpathways: List['PathwaySpec'] = Field(default_factory=list)
+
+    def walk(self, path: str = '/pathway'):
+        """(JSON-pointer path, pathway) for this pathway and every one inside it, parents first."""
+        yield path, self
+        for i, sp in enumerate(self.subpathways):
+            yield from sp.walk(f'{path}/subpathways/{i}')
+
+
+PathwaySpec.model_rebuild()
 
 
 class ReactomeDraft(BaseModel):

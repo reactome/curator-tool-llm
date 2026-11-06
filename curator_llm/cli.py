@@ -30,7 +30,7 @@ results, per session, in --out:
                                  none is applied: a curator accepts them in the curator tool's Paper2Path page
   <name>.session.json            the papers, number of reactions and issues, and the tokens used
   <name>.evidence.json           every quote with the paper, page and section it is from, and which instance it supports
-  <name>.progress.json           how the run ended (complete / partial / failed) and each paper's extraction (complete,
+  <name>.progress.json           how the run ended (complete / no_reactions / partial / failed) and each paper's extraction (complete,
                                  incomplete: worth another try, no_text: not open access or no usable text; reused)
   <name>.annotation.json         the whole annotation, as the service keeps it: with --owner it is also added to that
                                  curator's annotations, or add it later with scripts/import_annotation.sh, and open it
@@ -112,6 +112,8 @@ def _progress(name: str, say: Callable[[str], None]) -> Callable[[str], None]:
 
 
 COMPLETE, PARTIAL, FAILED = 'complete', 'partial', 'failed'
+# every paper was read completely (or has no usable text), but no reaction came out: finished, not worth another run
+EMPTY = 'no_reactions'
 
 
 def _paper_rows(refs: List[PaperRef], status: dict, default: str, reason: str = '') -> List[dict]:
@@ -148,21 +150,26 @@ def annotate(name: str, refs: List[PaperRef], focus: Optional[str], out_dir: str
     printed). With `owner` and `store` (a SessionStore) the annotation is also saved as one of that curator's."""
     staged = os.path.join(out_dir, f'{name}.staged_instances.json')
     progress = read_progress(out_dir, name)
-    finished = (progress or {}).get('status') == COMPLETE or (
+    finished = (progress or {}).get('status') in (COMPLETE, EMPTY) or (
         progress is None and os.path.isfile(staged) and os.path.getsize(staged) > 0)   # from before progress files
     if finished and not force:
         say(f'[{name}] already done (use --force to run again), skipping')
         return COMPLETE
-    if progress and progress.get('status') != COMPLETE:
+    if progress and progress.get('status') not in (COMPLETE, EMPTY):
         say(f'[{name}] resuming: papers extracted completely before are reused')
     say(f'[{name}] annotating {len(refs)} paper(s)')
     spec = PipelineInput(papers=refs, focus=focus or None)
     try:
         result = pipeline.run(spec, _progress(name, say))
     except Exception as e:
+        status = getattr(e, 'paper_status', {}) or {}
+        if status and len(status) >= len(refs) and all(v.get('state') in ('complete', 'no_text') for v in status.values()):
+            say(f'[{name}] no reactions: the paper(s) were read completely, but nothing in them is a molecular reaction '
+                f'the workflow extracts (or there is no usable text); not tried again')
+            write_progress(out_dir, name, EMPTY, _paper_rows(refs, status, 'complete'), f'{type(e).__name__}: {e}')
+            return EMPTY
         say(f'[{name}] FAILED: {type(e).__name__}: {e}')
-        write_progress(out_dir, name, FAILED, _paper_rows(refs, getattr(e, 'paper_status', {}), 'incomplete', str(e)),
-                       f'{type(e).__name__}: {e}')
+        write_progress(out_dir, name, FAILED, _paper_rows(refs, status, 'incomplete', str(e)), f'{type(e).__name__}: {e}')
         return FAILED
     papers = [PaperInfo(source=r.source, kind='pmid' if r.pmid else 'pdf', pmid=r.pmid,
                         name=r.label or (r.pmid if r.pmid else r.source),
@@ -274,7 +281,7 @@ def main(argv: Optional[List[str]] = None, pipeline=None, say: Callable[[str], N
     for name, group in jobs:
         state = annotate(name, group, args.focus, args.out, pipeline, say, args.force, qa_model=qa_model,
                          owner=args.owner, store=store)
-        if state == COMPLETE:
+        if state in (COMPLETE, EMPTY):
             done += 1
         elif state == PARTIAL:
             partial.append(name)

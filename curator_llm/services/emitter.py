@@ -269,6 +269,15 @@ class Emitter:
                 self.links.append({'evidenceId': ev_id, 'instanceDbId': target,
                                    'field': f if f in claim_ids else (f if f != 'reaction' else 'reaction')})
 
+    def _pathway(self, pw, key_to_shell: Dict[str, dict]) -> dict:
+        """Emit a Pathway and, first, the pathways inside it; its hasEvent lists them, then its reactions."""
+        subs = [self._pathway(sp, key_to_shell) for sp in pw.subpathways]
+        return self._add('Pathway', pw.name, {
+            'hasEvent': subs + [key_to_shell[k] for k in pw.reactions if k in key_to_shell],
+            'summation': self._summation(pw.summation, pw.pmids),
+            'literatureReference': [self._publication(p) for p in pw.pmids],
+            'species': [self._shell_of(HUMAN)]})
+
     def emit(self) -> EmitResult:
         key_to_shell: Dict[str, dict] = {}
         for r in self.d.reactions:
@@ -279,12 +288,10 @@ class Emitter:
                 self.warnings.append(
                     f'add the new reactions to the existing pathway "{pw.existing.display_name}" '
                     f'(dbId {pw.existing.db_id}) manually; its hasEvent was not rewritten')
+                for sp in pw.subpathways:              # its own sub-pathways are new: emit them all the same
+                    self._pathway(sp, key_to_shell)
             else:
-                self._add('Pathway', pw.name, {
-                    'hasEvent': [key_to_shell[k] for k in pw.reactions if k in key_to_shell],
-                    'summation': self._summation(pw.summation, pw.pmids),
-                    'literatureReference': [self._publication(p) for p in pw.pmids],
-                    'species': [self._shell_of(HUMAN)]})
+                self._pathway(pw, key_to_shell)
         ui = {'newInstances': self.new, 'updatedInstances': [], 'deletedInstances': [], 'bookmarks': []}
         return EmitResult(ui, self.links, self.warnings,
                           {k: s['dbId'] for k, s in key_to_shell.items()},

@@ -53,7 +53,9 @@ def integrity_errors(d: ReactomeDraft) -> List[str]:
         if r.key in r.preceding:
             errs.append(f'reaction {r.key} precedes itself')
     if d.pathway:
-        errs += [f'pathway: unknown reaction "{x}"' for x in d.pathway.reactions if x not in rkeys]
+        for _, pw in d.pathway.walk():
+            errs += [f'pathway {pw.name!r}: unknown reaction "{x}"' if pw is not d.pathway else f'pathway: unknown reaction "{x}"'
+                     for x in pw.reactions if x not in rkeys]
     return errs
 
 
