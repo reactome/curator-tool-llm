@@ -114,11 +114,55 @@ class Emitter:
             members = [self._participant(m) for m in p.members]
             shell = self._add('DefinedSet', self._display(p.name, p), {
                 'name': [p.name], 'hasMember': members, 'compartment': self._compartment(p),
-                'species': [self._shell_of(HUMAN)]})
+                **self._container_species(p.members)})
         else:
             raise ValueError(f'unsupported participant {key}')
         self._shells[key] = shell
         return shell
+
+    # ── species ────────────────────────────────────────────────────────────
+    def _species_of(self, p: EwasSpec) -> Optional[dict]:
+        """A molecule's own species: human, or the organism it was resolved to (a viral protein: the virus)."""
+        if p.species == 'Homo sapiens':
+            return self._shell_of(HUMAN)
+        if p.species_ref is not None:
+            return self._shell_of(p.species_ref)
+        self.warnings.append(f'{p.name}: species "{p.species}" is not resolved to a Species instance; set it manually')
+        return None
+
+    def _organisms(self, keys, seen=None) -> tuple:
+        """(any human molecule, {dbId: Species ref} of the other organisms) among these participants and the parts
+        of their complexes and sets."""
+        seen = set() if seen is None else seen
+        human, other = False, {}
+        for k in keys:
+            p = self.d.participants.get(k)
+            if p is None or k in seen:
+                continue
+            seen.add(k)
+            if isinstance(p, EwasSpec):
+                if p.species == 'Homo sapiens':
+                    human = True
+                elif p.species_ref is not None:
+                    other[p.species_ref.db_id] = p.species_ref
+            elif isinstance(p, (ComplexSpec, DefinedSetSpec)):
+                h, o = self._organisms(p.components if isinstance(p, ComplexSpec) else p.members, seen)
+                human, other = human or h, {**other, **o}
+        return human, other
+
+    def _container_species(self, keys) -> dict:
+        """Reactome's convention for a complex or set: human when any part is human (or none has a species), with
+        the other organisms as relatedSpecies (LANA1:BUB1 is Homo sapiens, related Human herpesvirus 8); only another
+        organism's parts: that organism."""
+        human, other = self._organisms(keys)
+        if human or not other:
+            return {'species': [self._shell_of(HUMAN)], 'relatedSpecies': [self._shell_of(r) for r in other.values()]}
+        return {'species': [self._shell_of(r) for r in other.values()]}
+
+    def _related_species(self, r: ReactionSpec) -> List[ExistingRef]:
+        keys = list(r.inputs) + list(r.outputs) + [g.regulator for g in r.regulations] + \
+            ([r.catalyst.entity] if r.catalyst else [])
+        return list(self._organisms(keys)[1].values())
 
     def _compartment(self, p) -> List[dict]:
         if p.compartment is not None:
@@ -144,7 +188,7 @@ class Emitter:
             memo = f'{p.molecule}:{symbol}'
             if memo not in self._refs:
                 self._refs[memo] = self._add(cls, f'{symbol} {"gene" if p.molecule == "dna" else "mRNA"}', {
-                    'geneName': [symbol], 'species': self._shell_of(HUMAN)})
+                    'geneName': [symbol], 'species': self._species_of(p)})
                 self.warnings.append(f'{p.name}: new {cls}; its identifier (e.g. Ensembl) and referenceDatabase '
                                      f'must be set by the curator')
             ref = self._refs[memo]
@@ -154,7 +198,7 @@ class Emitter:
             memo = f'uniprot:{p.uniprot}'
             if memo not in self._refs:
                 self._refs[memo] = self._add('ReferenceGeneProduct', f'UniProt:{p.uniprot} {p.name}', {
-                    'identifier': p.uniprot, 'geneName': [p.name], 'species': self._shell_of(HUMAN)})
+                    'identifier': p.uniprot, 'geneName': [p.name], 'species': self._species_of(p)})
                 self.warnings.append(f'{p.name}: new ReferenceGeneProduct for UniProt:{p.uniprot} - '
                                      f'its referenceDatabase must be set to UniProt by the curator')
             ref = self._refs[memo]
@@ -163,7 +207,7 @@ class Emitter:
         mods = [self._modified_residue(m, ref) for m in p.modifications]
         prefix = ''.join(f'{m.short}-{m.residue or ""}{m.coordinate or ""}-' for m in p.modifications)
         return self._add('EntityWithAccessionedSequence', self._display(p.name, p, prefix), {
-            'name': [p.name], 'referenceEntity': ref, 'species': self._shell_of(HUMAN) if p.species == 'Homo sapiens' else None,
+            'name': [p.name], 'referenceEntity': ref, 'species': self._species_of(p),
             'compartment': self._compartment(p), 'hasModifiedResidue': mods,
             'startCoordinate': p.start_coordinate, 'endCoordinate': p.end_coordinate})
 
@@ -198,7 +242,7 @@ class Emitter:
         name = p.name or ':'.join(c['displayName'] for c in comps)
         return self._add('Complex', self._display(name, p), {
             'name': [name], 'hasComponent': comps, 'compartment': self._compartment(p),
-            'species': [self._shell_of(HUMAN)]})
+            **self._container_species(p.components)})
 
     # ── reactions ──────────────────────────────────────────────────────────
     def _reaction(self, r: ReactionSpec, key_to_shell: Dict[str, dict]) -> dict:
@@ -249,6 +293,7 @@ class Emitter:
             'precedingEvent': preceding,
             'inferredFrom': [self._shell_of(x) for x in r.inferred_from],
             'species': [self._shell_of(HUMAN)] if r.species == 'Homo sapiens' else [],
+            'relatedSpecies': [self._shell_of(x) for x in self._related_species(r)],
         }
         attrs = {k: v for k, v in attrs.items() if v not in (None, '', [])}
         inst = {'dbId': reaction_id, 'displayName': r.name, 'schemaClassName': shell['schemaClassName'],
@@ -272,11 +317,17 @@ class Emitter:
     def _pathway(self, pw, key_to_shell: Dict[str, dict]) -> dict:
         """Emit a Pathway and, first, the pathways inside it; its hasEvent lists them, then its reactions."""
         subs = [self._pathway(sp, key_to_shell) for sp in pw.subpathways]
+        related = {}                     # the other organisms of every reaction at or below this pathway
+        by_key = {r.key: r for r in self.d.reactions}
+        for _, sub in pw.walk():
+            for k in sub.reactions:
+                if k in by_key and by_key[k].existing is None:
+                    related.update({x.db_id: x for x in self._related_species(by_key[k])})
         return self._add('Pathway', pw.name, {
             'hasEvent': subs + [key_to_shell[k] for k in pw.reactions if k in key_to_shell],
             'summation': self._summation(pw.summation, pw.pmids),
             'literatureReference': [self._publication(p) for p in pw.pmids],
-            'species': [self._shell_of(HUMAN)]})
+            'species': [self._shell_of(HUMAN)], 'relatedSpecies': [self._shell_of(x) for x in related.values()]})
 
     def emit(self) -> EmitResult:
         key_to_shell: Dict[str, dict] = {}

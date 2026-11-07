@@ -51,7 +51,8 @@ class FakeUniProt:
         return self.entries.get(accession.upper())
 
     def search_gene(self, symbol, taxon=9606):
-        return self.genes.get(symbol)
+        self.searches = getattr(self, 'searches', []) + [(symbol, taxon)]
+        return self.genes.get(symbol) if taxon == 9606 else self.genes.get((symbol, taxon))
 
 
 class FakeOntology:

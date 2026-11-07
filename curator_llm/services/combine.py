@@ -49,7 +49,7 @@ def _identity(p, by_key: Dict[str, object], memo: Dict[str, tuple]) -> tuple:
     if isinstance(p, EwasSpec):
         mods = tuple(sorted((m.psi_mod or '', m.residue or '', m.coordinate or 0) for m in p.modifications))
         ident = ('ewas', p.molecule, (p.uniprot or '').upper(), name, mods, p.start_coordinate, p.end_coordinate,
-                 _compartment(p))
+                 _compartment(p), p.species)
     elif isinstance(p, SimpleEntitySpec):
         ident = ('simple', (p.chebi or '').upper(), name, _compartment(p))
     else:

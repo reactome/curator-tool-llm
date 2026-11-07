@@ -84,25 +84,49 @@ class Neo4jInstanceLookup:
         return self._run(cypher, v=str(value), **extra)
 
     def find_human_accession(self, name: str) -> Optional[str]:
-        """UniProt accession of the one human ReferenceGeneProduct in the graph known by `name`, or None.
+        return self.find_accession(name, _HUMAN)
+
+    def find_accession(self, name: str, species: str = _HUMAN) -> Optional[str]:
+        """UniProt accession of the one ReferenceGeneProduct of `species` in the graph known by `name`, or None.
 
         Tries gene names and synonyms first (PRKN, PARK2), then the UniProt short name kept in the description
-        ("shortName: Parkin"). Several different accessions is ambiguous: no guess."""
+        ("shortName: Parkin"). For a species other than human, last, a gene name that starts with `name` when exactly
+        one does (a paper's "LANA" is KSHV's LANA1; "EBNA" matches six EBV genes, so no guess). Several different
+        accessions is ambiguous: no guess."""
         n = name.strip()
         if not n:
             return None
-        base = ('MATCH (n:ReferenceGeneProduct)-[:species]->(:Taxon {displayName: $human}) WHERE n.identifier IS NOT NULL AND ')
+        base = ('MATCH (n:ReferenceGeneProduct)-[:species]->(:Taxon {displayName: $species}) WHERE n.identifier IS NOT NULL AND ')
         with self.driver.session(database=self.database) as s:
             ids = {r['id'] for r in s.run(
                 base + 'any(g IN n.geneName WHERE toLower(g) = toLower($n)) RETURN DISTINCT n.identifier AS id',
-                human=_HUMAN, n=n)}
+                species=species, n=n)}
             if not ids:
                 short = re.compile(r'shortName: ' + re.escape(n) + r'(?= [A-Za-z]+(?: evidence=|:)|$)', re.I)
                 ids = {r['id'] for r in s.run(
                     base + 'any(d IN n.description WHERE toLower(d) CONTAINS toLower($frag)) '
-                    'RETURN n.identifier AS id, n.description AS d', human=_HUMAN, frag=f'shortName: {n}')
+                    'RETURN n.identifier AS id, n.description AS d', species=species, frag=f'shortName: {n}')
                     if any(short.search(d) for d in r['d'])}
+            if not ids and species != _HUMAN and len(n) >= 3:
+                ids = {r['id'] for r in s.run(
+                    base + 'any(g IN n.geneName WHERE toLower(g) STARTS WITH toLower($n)) '
+                    'RETURN DISTINCT n.identifier AS id', species=species, n=n)}
         return next(iter(ids)) if len(ids) == 1 else None
+
+    def find_species(self, name: str) -> Optional[Dict]:
+        """The Species whose name or synonym is `name`, ignoring case ("KSHV", "HHV8" and "Human herpesvirus 8" are
+        one), with its NCBI taxId: {dbId, displayName, schemaClassName, taxId}. None when there is not exactly one."""
+        n = name.strip()
+        if not n:
+            return None
+        with self.driver.session(database=self.database) as s:
+            rows = [dict(r) for r in s.run(
+                'MATCH (n:Species) WHERE toLower(n.displayName) = toLower($n) '
+                'OR any(x IN n.name WHERE toLower(x) = toLower($n)) '
+                'RETURN DISTINCT n.dbId AS dbId, n.displayName AS displayName, n.taxId AS taxId LIMIT 3', n=n)]
+        if len(rows) != 1:
+            return None
+        return {**rows[0], 'schemaClassName': 'Species'}
 
     def candidate_genes(self, name: str) -> List[str]:
         """Gene symbols of the members of human Reactome sets named `name` (e.g. "Ub [cytosol]"), in alphabetical order.

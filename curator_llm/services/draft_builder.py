@@ -37,6 +37,8 @@ class LlmEntity(BaseModel):
     uniprot: Optional[str] = Field(None, description="UniProt accession ONLY if it was given to you; otherwise null")
     chebi: Optional[str] = Field(None, description="ChEBI id ONLY if certain; otherwise null")
     compartment: Optional[str] = Field(None, description="Compartment name ONLY if the reaction states it; otherwise null")
+    species: Optional[str] = Field(None, description="Organism of a protein, gene or rna that is NOT human (a viral, "
+                                   "bacterial or parasite molecule), e.g. 'Human herpesvirus 8'; null for human ones")
     modifications: List[LlmModification] = Field(default_factory=list)
     components: List[str] = Field(default_factory=list, description="Entity keys, for complexes")
     members: List[str] = Field(default_factory=list, description="Entity keys, for sets")
@@ -121,6 +123,10 @@ PARTICIPANTS (entities)
 {mods}
   If the modification is not in this list, keep the unmodified name and mention nothing invented.
 - Names are plain: strip tags and fusion partners (HA-, His-, MBP-, GFP-); proteins use the gene symbol.
+- A protein, gene or rna of a virus, bacterium or parasite (in a host-pathogen paper) is not human: set species to its
+  organism (e.g. "Human herpesvirus 8" for KSHV, "Human gammaherpesvirus 4" for EBV, "Human immunodeficiency virus 1")
+  and name it by its official UniProt gene name, which is often not what the paper calls it (KSHV LANA is "LANA1").
+  Human molecules, and host molecules in such papers, leave species null.
 - Complexes list their component entity keys. Sets list member keys. Do not create entities for phenotypes
   or measurements.
 - compartment: only when the reaction states where it happens or where the species is; else null.
@@ -139,6 +145,10 @@ INPUT REACTIONS (JSON):
 ```"""
 
 
+def _is_human(species: str) -> bool:
+    return species.strip().lower() in ('homo sapiens', 'human', 'h. sapiens', '9606')
+
+
 # ── assembly ───────────────────────────────────────────────────────────────
 _KIND = {'protein': EwasSpec, 'gene': EwasSpec, 'rna': EwasSpec, 'small_molecule': SimpleEntitySpec, 'complex': ComplexSpec, 'set': DefinedSetSpec}
 
@@ -152,8 +162,9 @@ def assemble(gene: str, reactions: List[dict], ex: DraftExtraction,
             notes.append(f'duplicate entity key {e.key}: the later one was ignored')
             continue
         common = {'key': e.key, 'name': e.name, 'compartment_name': e.compartment}
+        seq = {'species': e.species.strip()} if e.species and e.species.strip() and not _is_human(e.species) else {}
         if e.kind in ('gene', 'rna'):
-            d.participants[e.key] = EwasSpec(**common, molecule='dna' if e.kind == 'gene' else 'rna')
+            d.participants[e.key] = EwasSpec(**common, **seq, molecule='dna' if e.kind == 'gene' else 'rna')
         elif e.kind == 'protein':
             mods = []
             for m in e.modifications:
@@ -161,7 +172,7 @@ def assemble(gene: str, reactions: List[dict], ex: DraftExtraction,
                     notes.append(f'{e.name}: modification {m.psi_mod} is not an allowed PSI-MOD id; dropped')
                     continue
                 mods.append(ModifiedResidueSpec(psi_mod=m.psi_mod, residue=m.residue, coordinate=m.coordinate))
-            d.participants[e.key] = EwasSpec(**common, uniprot=e.uniprot, modifications=mods)
+            d.participants[e.key] = EwasSpec(**common, **seq, uniprot=e.uniprot, modifications=mods)
         elif e.kind == 'small_molecule':
             d.participants[e.key] = SimpleEntitySpec(**common, chebi=e.chebi)
         elif e.kind == 'complex':

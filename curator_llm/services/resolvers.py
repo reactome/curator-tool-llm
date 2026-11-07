@@ -41,6 +41,8 @@ class Resolver:
         self.notes: List[str] = []
         self._down: set = set()     # services that failed once: not retried for the rest of this run
         self._tl = threading.local()    # per-task note buffer while lookups run in parallel
+        self._species: dict = {}        # organism name -> (Species ref, NCBI taxon) or None, looked up once
+        self._species_lock = threading.Lock()
         self.workers = max(1, int(os.getenv('RESOLVE_WORKERS', '8')))
 
     def _note(self, msg: str):
@@ -128,6 +130,28 @@ class Resolver:
             return None, f'{symbol}: {len(human)} human {cls}s exist (for example {human[0]["displayName"]}); choose one'
         return None, None
 
+    def species(self, name: str) -> Tuple[Optional[ExistingRef], Optional[int]]:
+        """(Species instance, NCBI taxon id) for an organism name or synonym ("KSHV" is Human herpesvirus 8). The
+        graph lookup knows synonyms and taxon ids (`find_species`); another lookup finds the instance by name only."""
+        key = name.strip().lower()
+        with self._species_lock:
+            if key in self._species:
+                return self._species[key]
+        find = getattr(self.lookup, 'find_species', None)
+        if find is not None:
+            hit = self._call('Reactome graph', find, name, default=None)
+        else:
+            hits = self._call('Reactome graph', self.lookup.search, 'Species', 'name', name.strip(), 'equal', 2,
+                              default=[]) or []
+            hit = hits[0] if len(hits) == 1 else None
+        taxon = None
+        if hit and str(hit.get('taxId') or '').isdigit():
+            taxon = int(hit['taxId'])
+        out = (_ref(hit), taxon) if hit else (None, None)
+        with self._species_lock:
+            self._species[key] = out
+        return out
+
     def psi_mod(self, mod_id: str) -> Optional[ExistingRef]:
         return self._by_identifier('PsiMod', mod_id.split(':')[-1])
 
@@ -174,10 +198,30 @@ class Resolver:
         self.notes = list(dict.fromkeys(self.notes))     # the same finding for several entities reads once
         return self.notes
 
-    def _graph_accession(self, name: str) -> Optional[str]:
-        """The accession Reactome already uses for this protein name (no external call), when the lookup can say."""
+    def _graph_accession(self, name: str, species: str = 'Homo sapiens') -> Optional[str]:
+        """The accession Reactome already uses for this protein name in this species (no external call), when the
+        lookup can say."""
+        if not _GENE_OR_NAME.match(name):
+            return None
+        if species != 'Homo sapiens':
+            find = getattr(self.lookup, 'find_accession', None)
+            return self._call('Reactome graph', find, name, species) if find else None
         find = getattr(self.lookup, 'find_human_accession', None)
-        return self._call('Reactome graph', find, name) if find and _GENE_OR_NAME.match(name) else None
+        return self._call('Reactome graph', find, name) if find else None
+
+    def _organism(self, p: EwasSpec) -> Tuple[bool, Optional[int]]:
+        """For a molecule of another organism (a viral protein): its Species instance, named as Reactome names it.
+        Returns (human, NCBI taxon): taxon None means UniProt cannot be searched for it."""
+        if p.species == 'Homo sapiens':
+            return True, 9606
+        ref, taxon = self.species(p.species)
+        if ref is None:
+            p.needs_resolution.append('species')
+            self._note(f'{p.name}: species "{p.species}" is not a Species in Reactome; set it, and the identifier, '
+                       f'by hand')
+            return False, None
+        p.species_ref, p.species = ref, ref.display_name
+        return False, taxon
 
     def _note_candidates(self, p: EwasSpec):
         """A name with no single accession may stand for a family (ubiquitin): tell the curator which genes Reactome
@@ -189,8 +233,9 @@ class Resolver:
                               f'come from {", ".join(genes)}. Choose the gene(s) or use that set')
 
     def _ewas(self, p: EwasSpec):
+        human, taxon = self._organism(p)
         if p.molecule != 'protein':          # a gene or transcript has no UniProt entry
-            if p.reference_entity is None:
+            if p.reference_entity is None and human:     # only human reference sequences are looked up
                 p.reference_entity, note = self.reference_sequence(sequence_symbol(p.name), p.molecule)
                 if note:
                     self._note(note)
@@ -198,9 +243,13 @@ class Resolver:
                 p.existing = _ref(self.lookup.find_by_display_name(
                     entity_display_name(p), ['EntityWithAccessionedSequence']))
             return
-        if not p.uniprot and (acc := self._graph_accession(p.name)):
+        if not p.uniprot and p.species_ref is None and not human:
+            p.needs_resolution.append('uniprot')          # an organism Reactome does not have: nothing to search in
+            return
+        if not p.uniprot and (acc := self._graph_accession(p.name, p.species)):
             p.uniprot = acc
-            self._note(f'{p.name}: UniProt {acc} found in the Reactome graph by name; confirm')
+            self._note(f'{p.name}: UniProt {acc} found in the Reactome graph by name' +
+                       ('' if human else f' ({p.species})') + '; confirm')
         if self.uniprot:
             if p.uniprot:
                 info = self._call('UniProt', self.uniprot.fetch, p.uniprot, default=False)
@@ -210,19 +259,27 @@ class Resolver:
                     self._note(f'{p.name}: UniProt accession {p.uniprot} does not exist or is obsolete; removed')
                     p.uniprot = None
                     p.needs_resolution.append('uniprot')
+                elif not human and info['genes'] and p.name.upper() not in {g.upper() for g in info['genes']}:
+                    # outside human the paper's name is often not the gene name (KSHV "LANA" is LANA1): use the gene
+                    # name, which is what Reactome names the entity by
+                    self._note(f'{p.name}: renamed {info["genes"][0]}, the UniProt gene name of {p.uniprot} '
+                               f'({p.species}); confirm')
+                    p.name = info['genes'][0]
                 elif p.name.upper() not in {g.upper() for g in info['genes']} and not any(
                         p.name.lower() in n.lower() for n in info['names']):
                     self._note(f'{p.name}: UniProt {p.uniprot} is gene(s) {info["genes"]}, '
                                       f'which does not match the name; check it')
                     p.needs_resolution.append('uniprot-mismatch')
             elif _GENE_SYMBOL.match(p.name):
-                acc = self._call('UniProt', self.uniprot.search_gene, p.name)
+                acc = self._call('UniProt', self.uniprot.search_gene, p.name, taxon) if taxon is not None else None
                 if acc:
                     p.uniprot = acc
-                    self._note(f'{p.name}: UniProt {acc} found by gene-name search; confirm')
+                    self._note(f'{p.name}: UniProt {acc} found by gene-name search' +
+                               ('' if human else f' in {p.species}') + '; confirm')
                 else:
                     p.needs_resolution.append('uniprot')
-                    self._note_candidates(p)
+                    if human:
+                        self._note_candidates(p)
         if p.uniprot and p.reference_entity is None:
             p.reference_entity = self.reference_gene_product(p.uniprot)
         for m in p.modifications:

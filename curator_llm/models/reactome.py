@@ -41,7 +41,10 @@ class EwasSpec(_Participant):
     molecule: Literal['protein', 'dna', 'rna'] = 'protein'
     uniprot: Optional[str] = None
     reference_entity: Optional[ExistingRef] = None   # existing ReferenceGeneProduct
+    # the organism the molecule comes from: a viral or bacterial protein in a host-pathogen paper is not human.
+    # species_ref is the Species instance it resolves to (None for human, which the emitter knows already).
     species: str = 'Homo sapiens'
+    species_ref: Optional[ExistingRef] = None
     start_coordinate: Optional[int] = None
     end_coordinate: Optional[int] = None
     modifications: List[ModifiedResidueSpec] = Field(default_factory=list)

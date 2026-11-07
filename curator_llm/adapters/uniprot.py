@@ -1,4 +1,4 @@
-"""UniProt REST client: validates accessions and finds the reviewed human entry for a gene symbol."""
+"""UniProt REST client: validates accessions and finds the reviewed entry for a gene symbol (human, or another taxon)."""
 from typing import Dict, Optional
 
 import requests
@@ -44,7 +44,11 @@ class RestUniProtClient:
         return self._gene_cache[key]
 
     def _search_gene(self, symbol: str, taxon: int) -> Optional[str]:
-        q = f'gene:{symbol} AND organism_id:{taxon} AND reviewed:true'     # gene field includes synonyms (Parkin -> PRKN)
+        # the gene field includes synonyms (Parkin -> PRKN). Outside human, entries sit under a strain or isolate of the
+        # species (KSHV's LANA1 is "Human herpesvirus 8 type P (isolate GK18)"), so search the whole taxon below it;
+        # human keeps organism_id so that Neanderthal and Denisovan entries are not counted
+        org = f'organism_id:{taxon}' if int(taxon) == 9606 else f'taxonomy_id:{taxon}'
+        q = f'gene:{symbol} AND {org} AND reviewed:true'
         r = self.http.get(f'{BASE}/search', params={'query': q, 'fields': 'accession', 'size': 2},
                           timeout=self.timeout)
         r.raise_for_status()
