@@ -161,6 +161,9 @@ class Resolver:
 
     # ── whole draft ────────────────────────────────────────────────────────
     def _resolve_participant(self, p):
+        # the flags are this run's findings, not a log: resolve() runs again after every accepted edit, so start over
+        # (an accession a curator added clears its flag; a still-missing one is flagged once, not once per edit)
+        p.needs_resolution = []
         if p.compartment is None and p.compartment_name:
             p.compartment = self.compartment(p.compartment_name)
             if p.compartment is None:

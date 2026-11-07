@@ -257,3 +257,29 @@ def test_a_family_name_without_one_accession_lists_the_genes_reactome_groups_und
     assert d.participants['u'].uniprot is None and 'uniprot' in d.participants['u'].needs_resolution
     assert any(n.startswith('UB:') and 'UBB, UBC' in n for n in notes)
     assert not any(n.startswith('FOO1:') for n in notes)
+
+
+def test_resolving_again_after_an_edit_flags_each_problem_once_and_clears_a_fixed_one():
+    # resolve() runs again after every accepted edit: the flags must not pile up ("needs uniprot" x11 on the page)
+    d = ReactomeDraft()
+    d.participants = {'x': EwasSpec(key='x', name='NOSUCHGENE'), 'y': EwasSpec(key='y', name='OTHERGENE')}
+    for _ in range(3):
+        Resolver(FakeInstanceLookup(GK), FakeUniProt({}, {})).resolve(d)
+    assert d.participants['x'].needs_resolution == ['uniprot']
+    d.participants['y'].uniprot = 'O60260'               # a curator supplied the accession
+    Resolver(FakeInstanceLookup(GK), FakeUniProt({'O60260': {'accession': 'O60260', 'genes': ['OTHERGENE'], 'names': [],
+                                                             'reviewed': True, 'organism': 'Homo sapiens'}})).resolve(d)
+    assert d.participants['y'].needs_resolution == [] and d.participants['x'].needs_resolution == ['uniprot']
+
+
+def test_a_saved_session_with_repeated_flags_loads_with_each_flag_once():
+    p = EwasSpec.model_validate({'key': 'lana', 'name': 'LANA1', 'needs_resolution': ['uniprot'] * 11 + ['compartment']})
+    assert p.needs_resolution == ['uniprot', 'compartment']
+
+
+def test_uniprot_search_prefers_the_entry_whose_primary_gene_name_it_is():
+    hit = lambda acc, gene: {'primaryAccession': acc, 'genes': [{'geneName': {'value': gene}}]}
+    sp1 = _Http(_R(200, {'results': [hit('Q8N907', 'DAND5'), hit('P08047', 'SP1')]}))   # SP1 is also DAND5's synonym
+    assert RestUniProtClient(session=sp1).search_gene('SP1') == 'P08047'
+    both = _Http(_R(200, {'results': [hit('P42771', 'CDKN2A'), hit('Q8N726', 'CDKN2A')]}))   # p16 and p14ARF
+    assert RestUniProtClient(session=both).search_gene('CDKN2A') is None

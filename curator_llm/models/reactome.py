@@ -6,7 +6,7 @@ id: unresolved things stay as new instances with `needs_resolution` set for the 
 """
 from typing import Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ExistingRef(BaseModel):
@@ -32,6 +32,11 @@ class _Participant(BaseModel):
     compartment_name: Optional[str] = None   # kept so an unresolved compartment is not silently lost
     needs_resolution: List[str] = Field(default_factory=list)   # e.g. ["uniprot", "compartment"]
     existing: Optional[ExistingRef] = None   # set when this exact entity already exists: emit a shell
+
+    @field_validator('needs_resolution')
+    @classmethod
+    def _once_each(cls, v: List[str]) -> List[str]:
+        return list(dict.fromkeys(v))        # sessions saved before the resolver reset its flags repeat them
 
 
 class EwasSpec(_Participant):

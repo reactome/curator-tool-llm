@@ -49,8 +49,14 @@ class RestUniProtClient:
         # human keeps organism_id so that Neanderthal and Denisovan entries are not counted
         org = f'organism_id:{taxon}' if int(taxon) == 9606 else f'taxonomy_id:{taxon}'
         q = f'gene:{symbol} AND {org} AND reviewed:true'
-        r = self.http.get(f'{BASE}/search', params={'query': q, 'fields': 'accession', 'size': 2},
+        r = self.http.get(f'{BASE}/search', params={'query': q, 'fields': 'accession,gene_primary', 'size': 10},
                           timeout=self.timeout)
         r.raise_for_status()
         results = r.json().get('results', [])
+        # a symbol is often also another gene's synonym (SP1 is a synonym of DAND5, TRAF2 of TANK): the one entry whose
+        # PRIMARY gene name it is wins. Otherwise a single hit (found by a synonym) is used; several is ambiguous.
+        primary = [x for x in results if any(g.get('geneName', {}).get('value', '').upper() == symbol.strip().upper()
+                                             for g in x.get('genes', []))]
+        if len(primary) == 1:
+            return primary[0]['primaryAccession']
         return results[0]['primaryAccession'] if len(results) == 1 else None   # ambiguous => no guess

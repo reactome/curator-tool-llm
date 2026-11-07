@@ -98,9 +98,13 @@ class Neo4jInstanceLookup:
             return None
         base = ('MATCH (n:ReferenceGeneProduct)-[:species]->(:Taxon {displayName: $species}) WHERE n.identifier IS NOT NULL AND ')
         with self.driver.session(database=self.database) as s:
-            ids = {r['id'] for r in s.run(
-                base + 'any(g IN n.geneName WHERE toLower(g) = toLower($n)) RETURN DISTINCT n.identifier AS id',
-                species=species, n=n)}
+            rows = [dict(r) for r in s.run(
+                base + 'any(g IN n.geneName WHERE toLower(g) = toLower($n)) '
+                'RETURN DISTINCT n.identifier AS id, toLower(head(n.geneName)) = toLower($n) AS primary',
+                species=species, n=n)]
+            # a symbol can also be another gene's synonym (SP1 of DAND5, TRAF2 of TANK): the gene it is the primary
+            # name of wins; with none, any gene that has it as a synonym
+            ids = {r['id'] for r in rows if r['primary']} or {r['id'] for r in rows}
             if not ids:
                 short = re.compile(r'shortName: ' + re.escape(n) + r'(?= [A-Za-z]+(?: evidence=|:)|$)', re.I)
                 ids = {r['id'] for r in s.run(
