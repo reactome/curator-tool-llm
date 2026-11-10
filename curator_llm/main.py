@@ -46,6 +46,7 @@ def build_app():
         store.mark_interrupted()
     else:
         raise ValueError(f'SESSION_STORE must be file, mongo or memory, not {kind!r}')
+    from curator_llm.adapters.pubmed import PubMedClient
     pipeline, inner = build_pipeline()
     lookup, uniprot, ols = inner.lookup, inner.uniprot, inner.ontology
     origins = [o.strip() for o in os.getenv('CORS_ORIGINS', 'http://localhost:4200').split(',') if o.strip()]
@@ -55,7 +56,7 @@ def build_app():
                       upload_dir=os.getenv('UPLOAD_DIR', os.path.join(ROOT, 'data', 'uploads')),
                       cors_origins=origins, chat_model=AnthropicChatModel(),
                       qa_model=AnthropicChatModel(role='qa'), max_papers=int(os.getenv('MAX_PAPERS', '10')),
-                      auto_qa=os.getenv('AUTO_QA', '1') != '0')
+                      auto_qa=os.getenv('AUTO_QA', '1') != '0', article_search=PubMedClient())
 
 
 app = build_app() if os.getenv('CURATOR_LLM_AUTOSTART', '1') == '1' else None

@@ -398,12 +398,33 @@ A **review article** reports cited work by nature, so it keeps those reactions. 
   gets an info issue (`paper_is_review`). If PubMed cannot be reached, the paper is treated as research and an info
   issue (`paper_kind_unknown`) says so.
 - **A PDF**: research, unless the curator ticks it as a review (the front-end has a "Review" box per PDF; over the API,
-  `review_files` in `POST /sessions/upload`, one form field per file name).
+  `review_files` in `POST /sessions/upload`, one form field per file name), or it has a PubMed ID (next section), in
+  which case PubMed decides as for a PMID.
 - **An override for every paper of a request**: `"review": true|false` in `POST /sessions`, `review=true|false` in the
   upload form, `--review` for `scripts/annotate_papers.sh` and `run_extraction.py`.
 
 The session's paper list shows what was decided (`papers[].review`). A review and a research run of the same paper are
 saved as different snapshots.
+
+### The PubMed ID of an uploaded PDF
+
+A PDF's reactions can only cite the paper (a LiteratureReference, filled in from PubMed when loaded into the curator
+tool) if the paper's PubMed ID is known. The service finds it from the PDF itself (`services/paper_identity.py`): the DOI
+on its first two pages, looked up in PubMed and accepted only when PubMed's title for it is printed there (a DOI on page 1
+can be a cited paper's); otherwise the title (the largest text on page 1, or the PDF's title field), searched by its
+distinctive words and accepted when PubMed's title matches closely. Content beats the file name: a PDF named
+`39737163.pdf` may hold another paper. On 25 article PDFs it found every PubMed ID and none wrong; documents that are not
+articles gave nothing. Preprints, papers not yet in PubMed and scans without text get no ID.
+
+What is found is only offered; the curator keeps, edits or clears it:
+
+- **Before annotating**: the front-end looks each chosen PDF up (`POST /papers/identify`, the PDF is not kept) and shows
+  the ID under it, editable. It goes with the upload as `pdf_pmids` (a JSON object of file name -> PMID); an ID PubMed
+  does not know is refused (422). The text still comes from the PDF; the paper, its reactions, their quotes and pathways
+  cite the ID, and PubMed decides whether it is a review.
+- **Afterwards** (sessions made before, or a paper indexed later): "Set PubMed ID" next to the PDF in the annotation, with
+  "Find in PubMed" (`POST /sessions/{id}/papers/identify`, on the stored PDF). Saving (`PUT /sessions/{id}/papers/pmid`,
+  `{source, pmid}`; empty removes it) updates the reactions from that PDF and clears the `paper_no_pmid` issue.
 
 ### Checks on every draft
 

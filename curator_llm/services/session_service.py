@@ -89,9 +89,9 @@ class SessionService:
     def start(self, owner: str, spec: PipelineInput, source_label: Optional[str] = None) -> Tuple[str, str]:
         """Create the session, queue the pipeline, return (session_id, job_id)."""
         refs = spec.refs()
-        papers = [PaperInfo(source=r.source, kind='pmid' if r.pmid else 'pdf', pmid=r.pmid,
+        papers = [PaperInfo(source=r.source, kind='pmid' if r.pmid else 'pdf', pmid=r.pmid or r.pdf_pmid,
                             name=r.label or (r.pmid if r.pmid else r.source), review=r.review) for r in refs]
-        first_pmid = next((r.pmid for r in refs if r.pmid), None)
+        first_pmid = next((r.pmid or r.pdf_pmid for r in refs if r.pmid or r.pdf_pmid), None)
         s = Session(owner=owner, pmid=first_pmid, focus=spec.focus, papers=papers,
                     source=source_label or self._source_label(papers))
         self.store.save(s)
@@ -123,6 +123,9 @@ class SessionService:
                     p.review = result.reviews[p.source]
             s.existing, s.issues = list(result.existing), list(result.issues)
             s.usage, s.usage_source = list(result.usage), 'saved' if result.replayed else 'run'
+            for p in s.papers:                                 # a PDF's PubMed ID: its reactions cite it
+                if p.kind == 'pdf' and p.pmid:
+                    self.cite_paper(s, p.source, p.pmid)
             self.refresh(s)
             if self.auto_qa and self.qa_model is not None and not result.replayed and s.draft.reactions:
                 progress(f'checking each reaction ({len(s.draft.reactions)})')
@@ -138,6 +141,87 @@ class SessionService:
             raise
         self.store.save(s)
         return session_id
+
+    def cite_paper(self, s: Session, source: str, pmid: str, old: Optional[str] = None) -> int:
+        """Make the reactions from paper `source` cite `pmid` (replacing `old`, unless another paper of the session has
+        that ID too): their pmids, their quotes' pmid and the pathways listing them. The LiteratureReference is the
+        existing one in Reactome when there is one (resolver), else a new one the front-end fills in from PubMed.
+        Returns how many reactions now cite it; `s` is not saved here."""
+        d = s.draft
+        if d is None:
+            return 0
+        if len(s.papers) <= 1:
+            ev_ids = {e.id for e in s.evidence}
+        else:
+            ev_ids = {e.id for e in s.evidence if e.source == source}
+        keep_old = old and any(p.pmid == old for p in s.papers if p.source != source)
+        for e in s.evidence:
+            if e.id in ev_ids:
+                e.pmid = pmid
+        keys = set()
+        for r in d.reactions:
+            if len(s.papers) <= 1 or ev_ids.intersection(r.evidence_ids):
+                r.pmids = [m for m in r.pmids if m != old or keep_old]
+                if pmid not in r.pmids:
+                    r.pmids.append(pmid)
+                keys.add(r.key)
+        if d.pathway is not None:
+            for _, pw in d.pathway.walk():
+                if keys.intersection(pw.reactions) or (pw is d.pathway and keys):
+                    pw.pmids = [m for m in pw.pmids if m != old or keep_old]
+                    if pmid not in pw.pmids:
+                        pw.pmids.append(pmid)
+        if old and not keep_old:
+            d.publications.pop(old, None)
+        if pmid not in d.publications and self.resolver_factory:
+            try:
+                ref = self.resolver_factory().publication(pmid)
+            except Exception:                                  # the graph unreachable: a new reference is fine
+                ref = None
+            if ref:
+                d.publications[pmid] = ref
+        return len(keys)
+
+    @_locked
+    def set_paper_pmid(self, owner: str, session_id: str, source: str, pmid: Optional[str]) -> Session:
+        """Give an uploaded PDF its PubMed ID after the fact (or correct it): the paper, its reactions, their quotes and
+        pathways get it, and the 'no PubMed ID' issue goes. `pmid` None or '' takes it away again."""
+        s = self._ready(owner, session_id)
+        paper = next((p for p in s.papers if p.source == source), None)
+        if paper is None:
+            raise ProposalError(f'no paper {source!r} in this annotation')
+        if paper.kind != 'pdf':
+            raise ProposalError(f'{paper.name} came from PubMed; its PubMed ID cannot be changed')
+        old, new = paper.pmid, (pmid or '').strip() or None
+        if new == old:
+            return s
+        if new is None:
+            self._uncite_paper(s, source, old)
+        else:
+            self.cite_paper(s, source, new, old=old)
+        paper.pmid = new
+        if len(s.papers) == 1:
+            s.pmid = new
+        s.change_log.append(ChangeLogEntry(actor=owner, action='set pubmed id',
+                                           detail=f'{paper.name}: {old or "none"} -> {new or "none"}'))
+        self.refresh(s)
+        self.refresh_suggestions(s)
+        self.store.save(s)
+        return s
+
+    @staticmethod
+    def _uncite_paper(s: Session, source: str, old: Optional[str]) -> None:
+        if not old or s.draft is None or any(p.pmid == old for p in s.papers if p.source != source):
+            return
+        for r in s.draft.reactions:
+            r.pmids = [m for m in r.pmids if m != old]
+        if s.draft.pathway is not None:
+            for _, pw in s.draft.pathway.walk():
+                pw.pmids = [m for m in pw.pmids if m != old]
+        s.draft.publications.pop(old, None)
+        for e in s.evidence:
+            if e.source == source or len(s.papers) <= 1:
+                e.pmid = None
 
     @staticmethod
     def reviews_of(s: Session) -> List[str]:

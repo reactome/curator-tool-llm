@@ -85,10 +85,31 @@ class SyncJobRunner:
 
 
 class FakePubMed:
-    """PubMed publication types by PMID; `fail` makes every call raise, as an unreachable PubMed would."""
+    """PubMed publication types by PMID; `fail` makes every call raise, as an unreachable PubMed would. With `articles`
+    ({pmid: {'title': ..., 'doi': ...}}) it also searches (ArticleSearch): '"<doi>"[doi]' finds by DOI, 'w[Title] AND
+    ...' finds titles holding every word; `queries` records the searches."""
 
-    def __init__(self, types: Optional[Dict[str, List[str]]] = None, fail: bool = False):
+    def __init__(self, types: Optional[Dict[str, List[str]]] = None, fail: bool = False,
+                 articles: Optional[Dict[str, Dict[str, str]]] = None):
         self.types, self.fail, self.calls = types or {}, fail, []
+        self.articles, self.queries = articles or {}, []
+
+    def search(self, term, limit=5):
+        import re
+        self.queries.append(term)
+        if self.fail:
+            raise ConnectionError('PubMed is down')
+        m = re.fullmatch(r'"(.+)"\[doi\]', term)
+        if m:
+            return [p for p, a in self.articles.items() if a.get('doi', '').lower() == m.group(1).lower()][:limit]
+        words = re.findall(r'(\w+)\[Title\]', term)
+        norm = lambda t: re.sub(r'[^a-z0-9]+', ' ', t.lower()).split()
+        return [p for p, a in self.articles.items() if words and all(w in norm(a['title']) for w in words)][:limit]
+
+    def titles(self, pmids):
+        if self.fail:
+            raise ConnectionError('PubMed is down')
+        return {p: self.articles[p]['title'] for p in pmids if p in self.articles}
 
     def publication_types(self, pmids):
         self.calls.append(list(pmids))

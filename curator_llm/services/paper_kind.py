@@ -24,7 +24,7 @@ REVIEW_TYPES = frozenset({'Review', 'Systematic Review', 'Scoping Review', 'Meta
 def decide(spec: PipelineInput, pubmed: Optional[PublicationTypes]) -> Tuple[PipelineInput, List[str]]:
     """(the input with every paper's `review` set to True or False, notes for the curator)."""
     refs = spec.refs()
-    ask = [r.pmid for r in refs if r.review is None and r.pmid]
+    ask = [r.pmid or r.pdf_pmid for r in refs if r.review is None and (r.pmid or r.pdf_pmid)]   # a PDF's PubMed ID counts
     types, failed = {}, None
     if ask:
         if pubmed is None:
@@ -38,17 +38,18 @@ def decide(spec: PipelineInput, pubmed: Optional[PublicationTypes]) -> Tuple[Pip
     decided: List[PaperRef] = []
     for r in refs:
         review = r.review
-        if review is None and r.pmid:
-            if failed or r.pmid not in types:
+        pmid = r.pmid or r.pdf_pmid
+        if review is None and pmid:
+            if failed or pmid not in types:
                 review = False
-                notes.append(f'PMID {r.pmid}: could not read its publication type from PubMed '
+                notes.append(f'PMID {pmid}: could not read its publication type from PubMed '
                              f'({failed or "PubMed has no record of it"}); treated as a research paper. If it is a '
                              'review, annotate it again marked as a review.')
             else:
-                review = bool(REVIEW_TYPES.intersection(types[r.pmid]))
+                review = bool(REVIEW_TYPES.intersection(types[pmid]))
                 if review:
-                    found = ', '.join(t for t in types[r.pmid] if t in REVIEW_TYPES)
-                    notes.append(f'PMID {r.pmid} is a review article (PubMed publication type: {found}): the reactions '
+                    found = ', '.join(t for t in types[pmid] if t in REVIEW_TYPES)
+                    notes.append(f'PMID {pmid} is a review article (PubMed publication type: {found}): the reactions '
                                  'it only cites from earlier work are kept.')
         decided.append(replace(r, review=bool(review)))
     if spec.papers:

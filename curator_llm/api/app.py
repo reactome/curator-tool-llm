@@ -1,8 +1,10 @@
 """FastAPI app factory. Auth is a router-level dependency, so no route can be added without it, and
 every session read goes through the owner check in the store."""
 import dataclasses
+import json
 import os
 import re
+import tempfile
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -67,6 +69,32 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024           # per PDF
 MAX_PAPERS = 10                                # per session, unless create_app is given another limit
 
 
+class PaperPmidRequest(BaseModel):
+    source: str                                  # the paper's source tag (Session.papers[].source)
+    pmid: Optional[str] = None                   # its PubMed ID; empty or null takes it away
+
+
+def parse_pdf_pmids(raw: Optional[str]) -> Dict[str, str]:
+    """{file name: PubMed ID} from the upload's `pdf_pmids` field (a JSON object); 422 on anything else. An empty ID
+    means none."""
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        raise HTTPException(422, 'pdf_pmids must be a JSON object of file name -> PubMed ID')
+    if not isinstance(data, dict):
+        raise HTTPException(422, 'pdf_pmids must be a JSON object of file name -> PubMed ID')
+    out = {}
+    for name, pmid in data.items():
+        pmid = str(pmid or '').strip()
+        if pmid and not pmid.isdigit():
+            raise HTTPException(422, f'{name}: {pmid!r} is not a PubMed ID')
+        if pmid:
+            out[str(name)] = pmid
+    return out
+
+
 class ChatRequest(BaseModel):
     message: str
     selectedDbIds: List[int] = Field(default_factory=list)
@@ -97,7 +125,9 @@ def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: O
                pipeline: Optional[Pipeline] = None, resolver_factory=None,
                upload_dir: Optional[str] = None, cors_origins: Optional[List[str]] = None,
                chat_model=None, events=None, qa_model=None, max_papers: int = MAX_PAPERS,
-               auto_qa: bool = False) -> FastAPI:
+               auto_qa: bool = False, article_search=None) -> FastAPI:
+    """`article_search` (ports.external.ArticleSearch, PubMed) finds the PubMed ID of an uploaded PDF and checks one a
+    curator types; without it, PDFs simply have none until a curator gives it."""
     app = FastAPI(title='curator-tool-llm')
     if cors_origins:
         app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=True,
@@ -141,12 +171,14 @@ def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: O
     async def upload(file: Optional[UploadFile] = File(None), files: Optional[List[UploadFile]] = File(None),
                      pmids: Optional[str] = Form(None), focus: Optional[str] = Form(None),
                      review: Optional[bool] = Form(None), review_files: Optional[List[str]] = Form(None),
-                     user: AuthUser = Depends(current_user)):
+                     pdf_pmids: Optional[str] = Form(None), user: AuthUser = Depends(current_user)):
         """Annotate papers that are not (all) in PubMed Central: upload PDFs. Send one in `file` (as before), or several
         in `files`, and optionally add PubMed IDs in `pmids` (comma or space separated). With more than one paper in all,
         they are merged into ONE draft, across papers. A PDF named in `review_files` (one field per file name, as uploaded) is a
         review article; any other PDF is research. Each PMID's kind is read from PubMed. `review=true|false` overrides
-        both for every paper (see StartRequest)."""
+        both for every paper (see StartRequest). `pdf_pmids` gives a PDF its PubMed ID, as a JSON object of file name (as
+        uploaded) -> PMID (see POST /papers/identify): the text still comes from the PDF, its reactions cite the ID,
+        and PubMed decides whether it is a review."""
         if not upload_dir:
             raise HTTPException(503, 'uploads are not configured')
         sent = [f for f in ([file] if file else []) + list(files or []) if f is not None and (f.filename or f.size)]
@@ -156,6 +188,16 @@ def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: O
         if len(sent) + len(ids) > max_papers:
             raise HTTPException(422, f'at most {max_papers} papers per session')
         reviews = {n for n in (review_files or []) if n}
+        given = parse_pdf_pmids(pdf_pmids)
+        if given and article_search is not None:             # a typo would make the reactions cite another paper
+            try:
+                known = article_search.titles(sorted(set(given.values())))
+            except Exception:                                # PubMed unreachable: trust the curator
+                known = None
+            if known is not None:
+                for name, pmid in given.items():
+                    if pmid not in known:
+                        raise HTTPException(422, f'{name}: PubMed has no record of PMID {pmid}')
         folder = os.path.join(upload_dir, _safe_name(user.username))
         os.makedirs(folder, exist_ok=True)
         refs: List[PaperRef] = []
@@ -172,7 +214,8 @@ def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: O
                 with open(path, 'wb') as out:
                     out.write(data)
                 saved.append(path)
-                refs.append(PaperRef(pdf_path=path, label=label, review=True if f.filename in reviews else None))
+                refs.append(PaperRef(pdf_path=path, label=label, review=True if f.filename in reviews else None,
+                                     pdf_pmid=given.get(f.filename) or given.get(label)))
         except HTTPException:
             for p in saved:                                # a refused request leaves nothing behind
                 try:
@@ -185,10 +228,85 @@ def create_app(auth: AuthProvider, store: Optional[SessionStore] = None, jobs: O
             refs = [dataclasses.replace(r, review=review) for r in refs]
         if len(refs) == 1 and refs[0].pdf_path:            # one PDF: exactly as before
             sid, jid = svc().start(user.username, PipelineInput(pdf_path=refs[0].pdf_path, focus=focus or None,
-                                                                review=refs[0].review), source_label=refs[0].label)
+                                                                review=refs[0].review, pdf_pmid=refs[0].pdf_pmid),
+                                   source_label=refs[0].label)
         else:
             sid, jid = svc().start(user.username, PipelineInput(papers=refs, focus=focus or None))
         return {'sessionId': sid, 'jobId': jid}
+
+    @router.post('/papers/identify')
+    def identify_paper(file: UploadFile = File(...), user: AuthUser = Depends(current_user)):
+        """Find the PubMed ID of the article in a PDF, before uploading it for annotation: by the DOI on its first pages,
+        else by its title (services/paper_identity). The PDF is not kept. Answers {found, pmid, title, method: doi|title,
+        doi}; found false when nothing matched (a preprint, a paper not in PubMed, a scan) or PubMed could not be asked
+        (`note` says which). A suggestion for the curator to confirm, never applied by itself."""
+        if article_search is None:
+            raise HTTPException(503, 'PubMed search is not configured')
+        data = file.file.read(MAX_UPLOAD_BYTES + 1)
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, f'the PDF is larger than {MAX_UPLOAD_BYTES // (1024 * 1024)} MB')
+        if not data.startswith(b'%PDF-'):
+            raise HTTPException(422, 'the file is not a PDF')
+        from curator_llm.services.paper_identity import identify
+        with tempfile.NamedTemporaryFile(suffix='.pdf') as tmp:
+            tmp.write(data)
+            tmp.flush()
+            try:
+                hit = identify(tmp.name, article_search)
+            except Exception as e:                       # PubMed down, or a PDF PyMuPDF cannot read
+                return {'found': False, 'note': f'could not check ({type(e).__name__}: {e})'}
+        if not hit:
+            return {'found': False, 'note': 'no DOI or title on its first page matched a PubMed record'}
+        return {'found': True, **hit}
+
+    class PaperSourceRequest(BaseModel):
+        source: str
+
+    @router.post('/sessions/{session_id}/papers/identify')
+    def identify_session_paper(session_id: str, req: PaperSourceRequest, user: AuthUser = Depends(current_user)):
+        """As POST /papers/identify, for a PDF already uploaded in this annotation (one made before its PubMed ID was
+        known). A suggestion to confirm with PUT .../papers/pmid; nothing changes here."""
+        s = load(session_id, user)
+        paper = next((p for p in s.papers if p.source == req.source), None)
+        if paper is None or paper.kind != 'pdf':
+            raise HTTPException(404, f'no uploaded PDF {req.source!r} in this annotation')
+        if article_search is None:
+            raise HTTPException(503, 'PubMed search is not configured')
+        path = os.path.join(upload_dir or '', _safe_name(user.username), os.path.basename(paper.source))
+        if not upload_dir or not os.path.isfile(path):
+            raise HTTPException(404, 'the uploaded PDF is no longer on the server')
+        from curator_llm.services.paper_identity import identify
+        try:
+            hit = identify(path, article_search)
+        except Exception as e:
+            return {'found': False, 'note': f'could not check ({type(e).__name__}: {e})'}
+        if not hit:
+            return {'found': False, 'note': 'no DOI or title on its first page matched a PubMed record'}
+        return {'found': True, **hit}
+
+    @router.put('/sessions/{session_id}/papers/pmid')
+    def set_paper_pmid(session_id: str, req: PaperPmidRequest, user: AuthUser = Depends(current_user)):
+        """Give an uploaded PDF its PubMed ID (or change or remove it): the paper, its reactions, their quotes and
+        pathways cite it, and the 'no PubMed ID' issue goes. PubMed must know the ID (checked when it can be asked).
+        Answers the papers and the title PubMed has for the ID."""
+        load(session_id, user)
+        pmid = (req.pmid or '').strip()
+        if pmid and not pmid.isdigit():
+            raise HTTPException(422, f'{pmid!r} is not a PubMed ID')
+        title = None
+        if pmid and article_search is not None:
+            try:
+                title = article_search.titles([pmid]).get(pmid)
+            except Exception:                            # PubMed unreachable: trust the curator
+                title = None
+            else:
+                if title is None:
+                    raise HTTPException(422, f'PubMed has no record of PMID {pmid}')
+        try:
+            s = svc().set_paper_pmid(user.username, session_id, req.source, pmid or None)
+        except ProposalError as e:
+            raise HTTPException(404 if 'no paper' in str(e) else 409, str(e))
+        return {'papers': [p.model_dump() for p in s.papers], 'title': title}
 
     @router.get('/sessions')
     def list_sessions(user: AuthUser = Depends(current_user)) -> List[SessionSummary]:

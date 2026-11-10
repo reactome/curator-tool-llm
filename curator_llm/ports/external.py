@@ -22,3 +22,17 @@ class PublicationTypes(Protocol):
         """PubMed's publication types per PMID, e.g. {'25670789': ['Journal Article', 'Review']}. A PMID PubMed does not
         know is absent. Raises when PubMed cannot be asked (network, HTTP error)."""
         ...
+
+
+class ArticleSearch(Protocol):
+    """PubMed search, to find the PubMed ID of an uploaded PDF (services/paper_identity.py)."""
+
+    def search(self, term: str, limit: int = 5) -> List[str]:
+        """PMIDs PubMed returns for a query in its own syntax (e.g. '"10.1182/x"[doi]', 'mcl1[Title] AND ...').
+        Raises when PubMed cannot be asked."""
+        ...
+
+    def titles(self, pmids: List[str]) -> Dict[str, str]:
+        """{pmid: article title} for the PMIDs PubMed knows; an unknown PMID is absent. Raises when PubMed cannot be
+        asked."""
+        ...

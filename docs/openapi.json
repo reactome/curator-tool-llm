@@ -81,7 +81,7 @@
     "/api/llm/sessions/upload": {
       "post": {
         "summary": "Upload",
-        "description": "Annotate papers that are not (all) in PubMed Central: upload PDFs. Send one in `file` (as before), or several\nin `files`, and optionally add PubMed IDs in `pmids` (comma or space separated). With more than one paper in all,\nthey are merged into ONE draft, across papers.",
+        "description": "Annotate papers that are not (all) in PubMed Central: upload PDFs. Send one in `file` (as before), or several\nin `files`, and optionally add PubMed IDs in `pmids` (comma or space separated). With more than one paper in all,\nthey are merged into ONE draft, across papers. A PDF named in `review_files` (one field per file name, as uploaded) is a\nreview article; any other PDF is research. Each PMID's kind is read from PubMed. `review=true|false` overrides\nboth for every paper (see StartRequest). `pdf_pmids` gives a PDF its PubMed ID, as a JSON object of file name (as\nuploaded) -> PMID (see POST /papers/identify): the text still comes from the PDF, its reactions cite the ID,\nand PubMed decides whether it is a review.",
         "operationId": "upload_api_llm_sessions_upload_post",
         "requestBody": {
           "content": {
@@ -94,6 +94,139 @@
         },
         "responses": {
           "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/llm/papers/identify": {
+      "post": {
+        "summary": "Identify Paper",
+        "description": "Find the PubMed ID of the article in a PDF, before uploading it for annotation: by the DOI on its first pages,\nelse by its title (services/paper_identity). The PDF is not kept. Answers {found, pmid, title, method: doi|title,\ndoi}; found false when nothing matched (a preprint, a paper not in PubMed, a scan) or PubMed could not be asked\n(`note` says which). A suggestion for the curator to confirm, never applied by itself.",
+        "operationId": "identify_paper_api_llm_papers_identify_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_identify_paper_api_llm_papers_identify_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/llm/sessions/{session_id}/papers/identify": {
+      "post": {
+        "summary": "Identify Session Paper",
+        "description": "As POST /papers/identify, for a PDF already uploaded in this annotation (one made before its PubMed ID was\nknown). A suggestion to confirm with PUT .../papers/pmid; nothing changes here.",
+        "operationId": "identify_session_paper_api_llm_sessions__session_id__papers_identify_post",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaperSourceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/llm/sessions/{session_id}/papers/pmid": {
+      "put": {
+        "summary": "Set Paper Pmid",
+        "description": "Give an uploaded PDF its PubMed ID (or change or remove it): the paper, its reactions, their quotes and\npathways cite it, and the 'no PubMed ID' issue goes. PubMed must know the ID (checked when it can be asked).\nAnswers the papers and the title PubMed has for the ID.",
+        "operationId": "set_paper_pmid_api_llm_sessions__session_id__papers_pmid_put",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PaperPmidRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
@@ -137,6 +270,37 @@
                 "schema": {}
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Delete Session",
+        "description": "Delete one of the curator's sessions (annotations) for good, with the PDFs uploaded for it. 409 while it is\nstill queued or running.",
+        "operationId": "delete_session_api_llm_sessions__session_id__delete",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
           },
           "422": {
             "description": "Validation Error",
@@ -391,6 +555,51 @@
       "get": {
         "summary": "Reaction",
         "operationId": "reaction_api_llm_sessions__session_id__reactions__key__get",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Session Id"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Key"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "summary": "Remove Reaction",
+        "description": "Remove one reaction from the draft, as the curator's own decision (no quote needed). Recorded as an accepted\nproposal, so issues, QA, suggestions, other pending proposals and the emitted instances follow, exactly as when\na suggested removal is accepted. Same reply as accepting a proposal.",
+        "operationId": "remove_reaction_api_llm_sessions__session_id__reactions__key__delete",
         "parameters": [
           {
             "name": "session_id",
@@ -1092,6 +1301,20 @@
   },
   "components": {
     "schemas": {
+      "Body_identify_paper_api_llm_papers_identify_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_identify_paper_api_llm_papers_identify_post"
+      },
       "Body_upload_api_llm_sessions_upload_post": {
         "properties": {
           "file": {
@@ -1142,6 +1365,42 @@
               }
             ],
             "title": "Focus"
+          },
+          "review": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review"
+          },
+          "review_files": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Files"
+          },
+          "pdf_pmids": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pdf Pmids"
           }
         },
         "type": "object",
@@ -1261,6 +1520,44 @@
             ],
             "title": "Status",
             "default": "open"
+          },
+          "field": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field"
+          },
+          "category": {
+            "type": "string",
+            "title": "Category",
+            "default": "other"
+          },
+          "blocked_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocked By"
+          },
+          "proposal_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposal Id"
           }
         },
         "type": "object",
@@ -1284,6 +1581,43 @@
           "status"
         ],
         "title": "IssueUpdate"
+      },
+      "PaperPmidRequest": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "pmid": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pmid"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source"
+        ],
+        "title": "PaperPmidRequest"
+      },
+      "PaperSourceRequest": {
+        "properties": {
+          "source": {
+            "type": "string",
+            "title": "Source"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source"
+        ],
+        "title": "PaperSourceRequest"
       },
       "ProposalRequest": {
         "properties": {
@@ -1415,6 +1749,17 @@
               }
             ],
             "title": "Focus"
+          },
+          "review": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review"
           }
         },
         "type": "object",

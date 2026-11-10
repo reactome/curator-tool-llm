@@ -17,6 +17,9 @@ class PaperRef:
     # a review article keeps the reactions it only cites; a research paper does not. None = decide (services/paper_kind:
     # PubMed for a PMID, research for a PDF)
     review: Optional[bool] = None
+    # the PubMed ID of an uploaded PDF (the curator's, or found in it: services/paper_identity). The text still comes
+    # from the PDF; the ID is the paper's identity: its reactions cite it, and PubMed says whether it is a review.
+    pdf_pmid: Optional[str] = None
 
     @property
     def source(self) -> str:
@@ -31,6 +34,7 @@ class PipelineInput:
     focus: Optional[str] = None        # gene/protein the curator cares about; None = whole paper
     papers: List[PaperRef] = field(default_factory=list)   # several papers, merged into ONE draft (pmid/pdf_path unused)
     review: Optional[bool] = None      # for every paper that does not say itself (PaperRef.review); None = decide
+    pdf_pmid: Optional[str] = None     # the PubMed ID of the one PDF (PaperRef.pdf_pmid)
 
     def refs(self) -> List[PaperRef]:
         """The papers to annotate: `papers` if given, else the single pmid or pdf_path. `review` here fills in the papers
@@ -38,7 +42,8 @@ class PipelineInput:
         if self.papers:
             return [replace(r, review=self.review) if r.review is None and self.review is not None else r
                     for r in self.papers]
-        return [PaperRef(self.pmid, self.pdf_path, review=self.review)] if (self.pmid or self.pdf_path) else []
+        return ([PaperRef(self.pmid, self.pdf_path, review=self.review, pdf_pmid=self.pdf_pmid if self.pdf_path else None)]
+                if (self.pmid or self.pdf_path) else [])
 
 
 @dataclass
